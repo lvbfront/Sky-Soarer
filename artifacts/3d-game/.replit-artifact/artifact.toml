@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Bird Flight"
+description = "A relaxing 3D bird flight simulator controlled entirely with hand gestures via webcam. The player tilts their palm to steer, makes a fist to boost speed, and flicks their wrist to trigger a barrel roll, gliding a low-poly bird over an endless procedurally generated pastel landscape."
+version = "1.0.0"
+id = "artifacts/3d-game"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 24982
+
+[services.development]
+run = "pnpm --filter @workspace/3d-game run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/3d-game", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/3d-game/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "24982"
+BASE_PATH = "/"

@@ -1,0 +1,2 @@
+- [WebGL in headless screenshots](webgl-headless-screenshots.md) — the appPreview screenshot sandbox has no GPU; WebGL context creation always fails there regardless of renderer options.
+- [Gesture control smoothing tradeoffs](gesture-control-smoothing.md) — smooth steering signals but keep fast-gesture triggers on raw/unsmoothed data, or smoothing blurs out the trigger.
