@@ -26,12 +26,31 @@ const FLIP_COOLDOWN_MS = 1400;
 const SMOOTHING_ALPHA = 0.35;
 const STEER_GAIN = 2.6;
 
+// Neutral flight point: dead-center of the camera frame. Palm positions are measured as an
+// offset from this point, so holding your hand here always means "fly straight".
+const NEUTRAL_X = 0.5;
+const NEUTRAL_Y = 0.5;
+// Max possible offset from center (palm coordinates are normalized 0..1).
+const MAX_OFFSET = 0.5;
+// Offsets smaller than this (in the same 0..0.5 units as MAX_OFFSET) are treated as "centered"
+// so small hand tremor / tracking jitter near the middle doesn't cause constant drift.
+const CENTER_DEADZONE = 0.035;
+
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
 function dist2D(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/** Zeroes out small offsets near center, then rescales the remaining range so the
+ * maximum offset still maps to the full output range (no jump at the deadzone edge). */
+function applyDeadzone(offset: number, deadzone: number, max: number) {
+  const magnitude = Math.abs(offset);
+  if (magnitude <= deadzone) return 0;
+  const sign = Math.sign(offset);
+  return sign * ((magnitude - deadzone) / (max - deadzone)) * max;
 }
 
 export class HandTracker {
@@ -65,7 +84,9 @@ export class HandTracker {
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
     });
     this.hands.setOptions({
-      selfieMode: true,
+      // We mirror the palm X coordinate ourselves below (in lockstep with the mirrored
+      // webcam preview), so we want MediaPipe's raw, un-mirrored camera-frame coordinates.
+      selfieMode: false,
       maxNumHands: 1,
       modelComplexity: 0,
       minDetectionConfidence: 0.6,
@@ -120,18 +141,30 @@ export class HandTracker {
     px /= PALM_POINTS.length;
     py /= PALM_POINTS.length;
 
+    // Mirror horizontally (scaleX = -1), matching the mirrored webcam preview: this makes
+    // moving your hand to your own left steer left and to your own right steer right, the
+    // way a mirror (or any selfie camera app) naturally behaves.
+    const mirroredPx = 1 - px;
+
     if (!this.hasSmoothed) {
-      this.smoothedPalmX = px;
+      this.smoothedPalmX = mirroredPx;
       this.smoothedPalmY = py;
       this.hasSmoothed = true;
     } else {
-      this.smoothedPalmX = SMOOTHING_ALPHA * px + (1 - SMOOTHING_ALPHA) * this.smoothedPalmX;
+      this.smoothedPalmX = SMOOTHING_ALPHA * mirroredPx + (1 - SMOOTHING_ALPHA) * this.smoothedPalmX;
       this.smoothedPalmY = SMOOTHING_ALPHA * py + (1 - SMOOTHING_ALPHA) * this.smoothedPalmY;
     }
 
-    // selfieMode already mirrors landmarks horizontally, so hand-right maps to bird-right.
-    const roll = clamp((this.smoothedPalmX - 0.5) * STEER_GAIN, -1, 1);
-    const pitch = clamp((0.5 - this.smoothedPalmY) * STEER_GAIN, -1, 1);
+    // Offsets from the neutral center point (dead-center of frame = fly straight), with a
+    // small deadzone so tiny jitter near center doesn't cause constant steering drift.
+    const rawOffsetX = this.smoothedPalmX - NEUTRAL_X;
+    const rawOffsetY = NEUTRAL_Y - this.smoothedPalmY;
+    const offsetX = applyDeadzone(rawOffsetX, CENTER_DEADZONE, MAX_OFFSET);
+    const offsetY = applyDeadzone(rawOffsetY, CENTER_DEADZONE, MAX_OFFSET);
+
+    // Left/right moves the hand along X -> roll. Up/down moves the hand along Y -> pitch.
+    const roll = clamp(offsetX * STEER_GAIN, -1, 1);
+    const pitch = clamp(offsetY * STEER_GAIN, -1, 1);
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];

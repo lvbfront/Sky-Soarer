@@ -1,2 +1,4 @@
 - [WebGL in headless screenshots](webgl-headless-screenshots.md) — the appPreview screenshot sandbox has no GPU; WebGL context creation always fails there regardless of renderer options.
 - [Gesture control smoothing tradeoffs](gesture-control-smoothing.md) — smooth steering signals but keep fast-gesture triggers on raw/unsmoothed data, or smoothing blurs out the trigger.
+- [3D mesh orientation under yaw+pitch](three-js-mesh-orientation-fix.md) — fix a backward-facing character by adjusting the yaw offset where it's applied to the outer group, not by flipping the mesh/child group (breaks pitch).
+- [React ref before conditional mount](react-ref-before-conditional-mount.md) — a ref for a conditionally-rendered element is null until after the state flip commits; do ref-dependent setup in an effect keyed on that state, not inline before the setState call.

@@ -227,8 +227,12 @@ export class GameEngine {
     if (bird.position.y < minAltitude) bird.position.y = minAltitude;
     if (bird.position.y > 140) bird.position.y = 140;
 
+    // The bird mesh's beak/head faces local +Z, which is the same axis `forward` above is
+    // built from — so setting yaw to headingYaw directly (no extra 180deg offset) makes the
+    // beak point the way the bird is actually flying, away from the chase camera, instead of
+    // staring back at it.
     bird.rotation.order = 'YXZ';
-    bird.rotation.y = this.headingYaw + Math.PI;
+    bird.rotation.y = this.headingYaw;
     bird.rotation.x = -pitchAngle;
     bird.rotation.z = rollAngle;
 

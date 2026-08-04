@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
+import { Hand, MoveHorizontal, MoveVertical, RotateCw, Zap, X } from 'lucide-react';
 import { GameEngine } from '@/game/GameEngine';
 import { HandTracker, type HandControlState } from '@/game/handControls';
 
@@ -7,6 +8,34 @@ type FlightState = 'idle' | 'requesting' | 'flying' | 'denied' | 'unsupported';
 
 const PREVIEW_WIDTH = 176;
 const PREVIEW_HEIGHT = 132;
+
+const GESTURE_GUIDE = [
+  {
+    icon: Hand,
+    title: 'Open hand, centered',
+    description: 'Glide straight and steady.',
+  },
+  {
+    icon: MoveHorizontal,
+    title: 'Move hand left / right',
+    description: 'Turn and roll that way.',
+  },
+  {
+    icon: MoveVertical,
+    title: 'Move hand up / down',
+    description: 'Pitch up to climb, down to dive.',
+  },
+  {
+    icon: Zap,
+    title: 'Close into a fist',
+    description: 'Speed boost.',
+  },
+  {
+    icon: RotateCw,
+    title: 'Flick your wrist fast',
+    description: 'Trigger a barrel roll.',
+  },
+] as const;
 
 function drawHandPreview(
   ctx: CanvasRenderingContext2D,
@@ -39,6 +68,24 @@ function drawHandPreview(
   ctx.restore();
 }
 
+/** Small deadzone-aware label describing the current hand pose, shown under the webcam preview. */
+function describeStatus(state: {
+  handDetected: boolean;
+  roll: number;
+  pitch: number;
+  boost: boolean;
+  barrelRolling: boolean;
+}) {
+  if (!state.handDetected) return 'Status: No Hand Detected';
+  if (state.boost) return 'Status: Fist (Boost) Active';
+  if (state.barrelRolling) return 'Status: Barrel Roll Detected';
+  if (state.roll > 0) return 'Status: Steering Right';
+  if (state.roll < 0) return 'Status: Steering Left';
+  if (state.pitch > 0) return 'Status: Pitching Up';
+  if (state.pitch < 0) return 'Status: Pitching Down';
+  return 'Status: Flying Straight';
+}
+
 function App() {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -47,11 +94,17 @@ function App() {
   const trackerRef = useRef<HandTracker | null>(null);
   const previewRafRef = useRef<number | null>(null);
   const latestLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
+  const barrelRollingRef = useRef(false);
 
   const [flightState, setFlightState] = useState<FlightState>('idle');
   const [handDetected, setHandDetected] = useState(false);
   const [boosting, setBoosting] = useState(false);
-  const [flipping, setFlipping] = useState(false);
+  const [barrelRolling, setBarrelRolling] = useState(false);
+  const [statusText, setStatusText] = useState('Status: No Hand Detected');
+
+  useEffect(() => {
+    barrelRollingRef.current = barrelRolling;
+  }, [barrelRolling]);
 
   const stopEverything = useCallback(() => {
     trackerRef.current?.stop();
@@ -62,6 +115,7 @@ function App() {
     previewRafRef.current = null;
     const stream = videoRef.current?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((track) => track.stop());
+    if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
   useEffect(() => stopEverything, [stopEverything]);
@@ -96,22 +150,24 @@ function App() {
           latestLandmarksRef.current = state.landmarks;
           setHandDetected(state.handDetected);
           setBoosting(state.boost);
-          if (state.flipTriggered) setFlipping(true);
+          if (state.flipTriggered) setBarrelRolling(true);
+          setStatusText(
+            describeStatus({
+              handDetected: state.handDetected,
+              roll: state.roll,
+              pitch: state.pitch,
+              boost: state.boost,
+              barrelRolling: state.flipTriggered || barrelRollingRef.current,
+            }),
+          );
         },
         () => setFlightState('denied'),
       );
       trackerRef.current = tracker;
       await tracker.start();
 
-      const previewCtx = previewCanvasRef.current?.getContext('2d') ?? null;
-      const drawPreview = () => {
-        if (previewCtx && video.readyState >= 2) {
-          drawHandPreview(previewCtx, video, latestLandmarksRef.current);
-        }
-        previewRafRef.current = requestAnimationFrame(drawPreview);
-      };
-      drawPreview();
-
+      // Mounting the preview canvas happens once flightState flips to 'flying' (below); the
+      // draw-loop effect keyed on flightState picks it up as soon as it's in the DOM.
       setFlightState('flying');
     } catch (error) {
       console.error('Failed to start flight', error);
@@ -119,11 +175,41 @@ function App() {
     }
   }, []);
 
+  // Starts the webcam-preview draw loop only once the preview canvas is actually mounted
+  // (flightState === 'flying'), instead of grabbing the ref before React has rendered it.
   useEffect(() => {
-    if (!flipping) return;
-    const timeout = window.setTimeout(() => setFlipping(false), 850);
+    if (flightState !== 'flying') return;
+    const video = videoRef.current;
+    const previewCtx = previewCanvasRef.current?.getContext('2d') ?? null;
+    if (!video || !previewCtx) return;
+
+    let rafId: number;
+    const drawPreview = () => {
+      if (video.readyState >= 2) {
+        drawHandPreview(previewCtx, video, latestLandmarksRef.current);
+      }
+      rafId = requestAnimationFrame(drawPreview);
+    };
+    rafId = requestAnimationFrame(drawPreview);
+    previewRafRef.current = rafId;
+
+    return () => cancelAnimationFrame(rafId);
+  }, [flightState]);
+
+  useEffect(() => {
+    if (!barrelRolling) return;
+    const timeout = window.setTimeout(() => setBarrelRolling(false), 850);
     return () => window.clearTimeout(timeout);
-  }, [flipping]);
+  }, [barrelRolling]);
+
+  const handleStopFlight = useCallback(() => {
+    stopEverything();
+    setFlightState('idle');
+    setHandDetected(false);
+    setBoosting(false);
+    setBarrelRolling(false);
+    setStatusText('Status: No Hand Detected');
+  }, [stopEverything]);
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-background">
@@ -137,6 +223,17 @@ function App() {
             </p>
           </div>
 
+          <div className="absolute right-6 top-6">
+            <button
+              type="button"
+              onClick={handleStopFlight}
+              className="flex items-center gap-1.5 rounded-full bg-card/80 px-4 py-2 text-xs font-semibold tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm transition hover:bg-card"
+            >
+              <X className="h-3.5 w-3.5" />
+              Stop Game
+            </button>
+          </div>
+
           <div className="pointer-events-none absolute bottom-6 left-6 flex gap-2">
             <span
               className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
@@ -147,20 +244,25 @@ function App() {
             </span>
             <span
               className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
-                flipping ? 'bg-secondary text-secondary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
+                barrelRolling ? 'bg-secondary text-secondary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
               }`}
             >
               Barrel Roll
             </span>
           </div>
 
-          <div className="absolute bottom-6 right-6 overflow-hidden rounded-2xl border border-border/60 bg-card/80 shadow-lg backdrop-blur-sm">
-            <canvas
-              ref={previewCanvasRef}
-              width={PREVIEW_WIDTH}
-              height={PREVIEW_HEIGHT}
-              className="block scale-x-[-1]"
-            />
+          <div className="absolute bottom-6 right-6 flex flex-col items-end gap-1.5">
+            <div className="overflow-hidden rounded-2xl border border-border/60 bg-card/80 shadow-lg backdrop-blur-sm">
+              <canvas
+                ref={previewCanvasRef}
+                width={PREVIEW_WIDTH}
+                height={PREVIEW_HEIGHT}
+                className="block scale-x-[-1]"
+              />
+            </div>
+            <p className="rounded-full bg-card/70 px-3 py-1 text-[11px] font-medium tracking-wide text-foreground/70 shadow-sm backdrop-blur-sm">
+              {statusText}
+            </p>
           </div>
         </>
       )}
@@ -168,17 +270,33 @@ function App() {
       <video ref={videoRef} className="hidden" muted playsInline />
 
       {flightState !== 'flying' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6">
-          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/85 p-8 text-center shadow-xl backdrop-blur-sm">
+        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
+          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
             <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
               A quiet little sky
             </p>
             <h1 className="mb-3 text-3xl font-semibold text-foreground">Bird Flight</h1>
             <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-              Glide over endless rolling hills using nothing but your hand. Tilt your palm to
-              steer, close it into a fist to catch a gust of speed, and flick your wrist for a
-              lazy barrel roll.
+              Glide over endless rolling hills using nothing but your hand. Here's how the
+              controls work:
             </p>
+
+            <ul className="mb-6 flex flex-col gap-3 text-left">
+              {GESTURE_GUIDE.map(({ icon: Icon, title, description }) => (
+                <li
+                  key={title}
+                  className="flex items-center gap-3 rounded-2xl bg-muted/60 px-4 py-3"
+                >
+                  <span className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-primary/15 text-primary">
+                    <Icon className="h-5 w-5" />
+                  </span>
+                  <span>
+                    <span className="block text-sm font-semibold text-foreground">{title}</span>
+                    <span className="block text-xs text-muted-foreground">{description}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
 
             {flightState === 'denied' && (
               <p className="mb-4 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
@@ -197,7 +315,7 @@ function App() {
               disabled={flightState === 'requesting'}
               className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90 disabled:opacity-60"
             >
-              {flightState === 'requesting' ? 'Waking up the sky…' : 'Enable Camera & Fly'}
+              {flightState === 'requesting' ? 'Waking up the sky…' : 'Got It, Start Flying!'}
             </button>
 
             <p className="mt-4 text-xs text-muted-foreground">

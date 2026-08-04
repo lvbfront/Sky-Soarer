@@ -63,7 +63,9 @@ export class Bird {
     this.rightWing.position.set(0.12, 0.06, -0.05);
     this.group.add(this.rightWing);
 
-    this.group.rotation.y = Math.PI;
+    // Note: `group.rotation` (including yaw/heading) is driven every frame by GameEngine's
+    // flight physics, not set here — the beak is modeled facing local +Z, which GameEngine
+    // aligns directly with the direction of travel.
   }
 
   private buildWing(material: THREE.Material, side: 1 | -1) {
