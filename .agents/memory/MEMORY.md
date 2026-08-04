@@ -3,3 +3,5 @@
 - [3D mesh orientation under yaw+pitch](three-js-mesh-orientation-fix.md) — fix a backward-facing character by adjusting the yaw offset where it's applied to the outer group, not by flipping the mesh/child group (breaks pitch).
 - [React ref before conditional mount](react-ref-before-conditional-mount.md) — a ref for a conditionally-rendered element is null until after the state flip commits; do ref-dependent setup in an effect keyed on that state, not inline before the setState call.
 - [MediaPipe Hands stop/restart race](mediapipe-hands-teardown-race.md) — quick stop/restart of a MediaPipe solution can throw "deleted object" wasm errors; guard onFrame + close() with a stopped flag.
+- [THREE.PointsMaterial ignores custom attributes](three-js-particle-fade-shader.md) — per-particle opacity/size attributes need a custom ShaderMaterial; PointsMaterial silently ignores them.
+- [Decouple visual sweep from physics](decouple-visual-sweep-from-physics.md) — a one-shot animation (e.g. barrel roll) must not share a variable with a continuously-controlled physics value (e.g. steering roll), or the animation corrupts gameplay.

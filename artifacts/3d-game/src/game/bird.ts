@@ -56,6 +56,14 @@ export class Bird {
     // Note: `group.rotation` (including yaw/heading) is driven every frame by GameEngine's
     // flight physics, not set here — every bird variant is modeled facing local +Z, which
     // GameEngine aligns directly with the direction of travel.
+
+    // Let the bird cast a shadow onto the terrain/ocean below (from the sun light rig set
+    // up in GameEngine) — it doesn't need to receive shadows on itself.
+    this.group.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+      }
+    });
   }
 
   private buildPigeon() {

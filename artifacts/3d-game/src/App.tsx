@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
 import { Hand, MoveHorizontal, MoveVertical, Zap, X } from 'lucide-react';
-import { GameEngine, MAP_OPTIONS, type MapType } from '@/game/GameEngine';
+import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from '@/game/GameEngine';
 import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
 import { HandTracker, type HandControlState } from '@/game/handControls';
+import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 
 type FlightState = 'idle' | 'requesting' | 'flying' | 'denied' | 'unsupported';
 
@@ -100,8 +101,14 @@ function App() {
 
   const [selectedBird, setSelectedBird] = useState<BirdType>('pigeon');
   const [selectedMap, setSelectedMap] = useState<MapType>('mountain');
+  const [selectedWeather, setSelectedWeather] = useState<WeatherPreset>('sunny');
   const [ringChallengeEnabled, setRingChallengeEnabled] = useState(false);
   const [score, setScore] = useState(0);
+  const [bestScore, setBestScore] = useState(0);
+
+  useEffect(() => {
+    setBestScore(getBestScore());
+  }, []);
 
   useEffect(() => {
     barrelRollingRef.current = barrelRolling;
@@ -144,8 +151,12 @@ function App() {
       const engine = new GameEngine(canvasContainerRef.current, {
         birdType: selectedBird,
         mapType: selectedMap,
+        weather: selectedWeather,
         ringChallenge: ringChallengeEnabled,
-        onScoreChange: (total) => setScore(total),
+        onScoreChange: (total) => {
+          setScore(total);
+          setBestScore(saveBestScoreIfHigher(total));
+        },
         onBarrelRoll: () => setBarrelRolling(true),
       });
       engineRef.current = engine;
@@ -180,7 +191,7 @@ function App() {
       console.error('Failed to start flight', error);
       setFlightState('denied');
     }
-  }, [selectedBird, selectedMap, ringChallengeEnabled]);
+  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled]);
 
   // Starts the webcam-preview draw loop only once the preview canvas is actually mounted
   // (flightState === 'flying'), instead of grabbing the ref before React has rendered it.
@@ -224,6 +235,18 @@ function App() {
 
       {flightState === 'flying' && (
         <>
+          {/* CSS-only speed-blur / motion-streak vignette around the screen edges during
+              Boost — a lightweight stand-in for a full post-processing motion-blur pass,
+              since the renderer here doesn't run an EffectComposer pipeline. */}
+          <div
+            className="pointer-events-none absolute inset-0 transition-opacity duration-200"
+            style={{
+              opacity: boosting ? 1 : 0,
+              background:
+                'radial-gradient(ellipse at center, rgba(255,255,255,0) 42%, rgba(255,244,224,0.35) 78%, rgba(255,214,165,0.65) 100%)',
+              boxShadow: 'inset 0 0 140px 40px rgba(255,180,110,0.45)',
+            }}
+          />
           <div className="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 text-center">
             <p className="rounded-full bg-card/70 px-5 py-2 text-sm font-medium tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm">
               {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
@@ -359,11 +382,35 @@ function App() {
               </div>
             </div>
 
+            <div className="mb-6 text-left">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                Day, night &amp; weather
+              </p>
+              <div className="flex flex-col gap-2">
+                {WEATHER_OPTIONS.map((weather) => (
+                  <button
+                    key={weather.id}
+                    type="button"
+                    onClick={() => setSelectedWeather(weather.id)}
+                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
+                      selectedWeather === weather.id
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold text-foreground">{weather.name}</span>
+                    <span className="block text-xs text-muted-foreground">{weather.tagline}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="mb-6 flex items-center justify-between rounded-2xl bg-muted/60 px-4 py-3 text-left">
               <span>
                 <span className="block text-sm font-semibold text-foreground">Ring Challenge</span>
                 <span className="block text-xs text-muted-foreground">
                   Fly through glowing rings to score points.
+                  {bestScore > 0 && <span className="block font-semibold text-foreground/80">Best Score: {bestScore}</span>}
                 </span>
               </span>
               <button

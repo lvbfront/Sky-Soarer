@@ -9,6 +9,20 @@ const WATER_LEVEL = 0;
 const RIPPLE_AMPLITUDE = 0.18;
 const RIPPLE_FREQ = 0.02;
 
+// Vertices at or below this base height are pure open water (not shoreline/sand/foam),
+// so only they get the live per-frame undulation — animating the shoreline slope would
+// make sand appear to bob up and down, which reads as wrong.
+const WATER_ANIM_HEIGHT_THRESHOLD = 0.24;
+const WATER_ANIM_SPEED = 1.6;
+const WATER_ANIM_FREQ = 0.045;
+const WATER_ANIM_AMPLITUDE = 0.3;
+// Only animate tiles close to the bird — distant tiles are barely visible through fog, so
+// skipping their per-vertex update keeps the cost bounded regardless of streaming radius.
+const WATER_ANIM_TILE_RADIUS = 1;
+// Recomputing vertex normals every frame is the expensive part; do it a few times a
+// second instead — the ripple amplitude is subtle enough that stale normals don't show.
+const NORMAL_RECOMPUTE_EVERY_N_FRAMES = 4;
+
 // Islands are placed on a coarse lattice: each cell may or may not spawn an island,
 // decided deterministically from a hash of the cell coordinates (so it's stable across tiles).
 const ISLAND_CELL = 55;
@@ -23,6 +37,14 @@ interface Island {
   z: number;
   radius: number;
   height: number;
+}
+
+interface TileRecord {
+  mesh: THREE.Mesh;
+  baseHeights: Float32Array;
+  isWater: Uint8Array;
+  worldXs: Float32Array;
+  worldZs: Float32Array;
 }
 
 /** Cheap deterministic hash -> [0, 1) used to seed each island lattice cell. */
@@ -52,19 +74,22 @@ function smoothstep(edge0: number, edge1: number, x: number) {
 }
 
 /**
- * Endless ocean map: a mostly-flat gently-rippling water surface (blue/teal) dotted with
- * procedurally scattered low-poly tropical islands (sand -> green domes). Shares the same
- * tile-pooling streaming approach as `TerrainManager` and exposes the same
- * `update`/`heightAtWorld` contract so `GameEngine` can swap between maps freely.
+ * Endless ocean map: a mostly-flat, gently-undulating water surface (blue/teal, with a
+ * soft foam band at shorelines) dotted with procedurally scattered low-poly tropical
+ * islands (sand -> green domes). Shares the same tile-pooling streaming approach as
+ * `TerrainManager` and exposes the same `update`/`heightAtWorld` contract so `GameEngine`
+ * can swap between maps freely.
  */
 export class OceanManager {
   private scene: THREE.Scene;
   private noise2D = createNoise2D();
-  private tiles = new Map<string, THREE.Mesh>();
+  private tiles = new Map<string, TileRecord>();
   private pool: THREE.Mesh[] = [];
   private material: THREE.MeshStandardMaterial;
   private currentTile = { x: Number.NaN, z: Number.NaN };
   private islandCache = new Map<string, Island[]>();
+  private animTime = 0;
+  private animFrameCounter = 0;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -124,11 +149,17 @@ export class OceanManager {
     const colors: number[] = [];
     const colorDeepWater = new THREE.Color('#1f6f9c');
     const colorShallowWater = new THREE.Color('#5fc7d6');
+    const colorFoam = new THREE.Color('#f4fdff');
     const colorSand = new THREE.Color('#eddca0');
     const colorFoliage = new THREE.Color('#7fbf6a');
 
     const originX = tileX * TILE_SIZE;
     const originZ = tileZ * TILE_SIZE;
+
+    const baseHeights = new Float32Array(position.count);
+    const isWater = new Uint8Array(position.count);
+    const worldXs = new Float32Array(position.count);
+    const worldZs = new Float32Array(position.count);
 
     for (let i = 0; i < position.count; i += 1) {
       const localX = position.getX(i);
@@ -138,14 +169,23 @@ export class OceanManager {
       const height = this.heightAt(worldX, worldZ);
       position.setY(i, height);
 
+      baseHeights[i] = height;
+      worldXs[i] = worldX;
+      worldZs[i] = worldZ;
+      isWater[i] = height <= WATER_ANIM_HEIGHT_THRESHOLD ? 1 : 0;
+
       let color: THREE.Color;
-      if (height <= 0.4) {
-        // Water: darker further from zero (deeper-looking away from any nearby shore).
+      if (height <= 0.15) {
+        // Open water: darker further from shore.
         const t = THREE.MathUtils.clamp((height + 1.2) / 1.2, 0, 1);
         color = colorDeepWater.clone().lerp(colorShallowWater, t);
+      } else if (height <= 0.5) {
+        // A soft white foam band right where water meets shore.
+        const t = THREE.MathUtils.clamp((height - 0.15) / 0.35, 0, 1);
+        color = colorShallowWater.clone().lerp(colorFoam, t);
       } else if (height <= 1.6) {
-        const t = THREE.MathUtils.clamp((height - 0.4) / 1.2, 0, 1);
-        color = colorShallowWater.clone().lerp(colorSand, t);
+        const t = THREE.MathUtils.clamp((height - 0.5) / 1.1, 0, 1);
+        color = colorFoam.clone().lerp(colorSand, t);
       } else {
         const t = THREE.MathUtils.clamp((height - 1.6) / 6, 0, 1);
         color = colorSand.clone().lerp(colorFoliage, t);
@@ -155,14 +195,14 @@ export class OceanManager {
 
     geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
     geometry.computeVertexNormals();
-    return geometry;
+    return { geometry, baseHeights, isWater, worldXs, worldZs };
   }
 
   private activate(tileX: number, tileZ: number) {
     const key = `${tileX},${tileZ}`;
     if (this.tiles.has(key)) return;
 
-    const geometry = this.buildGeometry(tileX, tileZ);
+    const { geometry, baseHeights, isWater, worldXs, worldZs } = this.buildGeometry(tileX, tileZ);
     let mesh = this.pool.pop();
     if (mesh) {
       mesh.geometry.dispose();
@@ -170,18 +210,19 @@ export class OceanManager {
       mesh.visible = true;
     } else {
       mesh = new THREE.Mesh(geometry, this.material);
+      mesh.receiveShadow = true;
       this.scene.add(mesh);
     }
     mesh.position.set(tileX * TILE_SIZE, 0, tileZ * TILE_SIZE);
-    this.tiles.set(key, mesh);
+    this.tiles.set(key, { mesh, baseHeights, isWater, worldXs, worldZs });
   }
 
   private deactivate(key: string) {
-    const mesh = this.tiles.get(key);
-    if (!mesh) return;
-    mesh.visible = false;
+    const record = this.tiles.get(key);
+    if (!record) return;
+    record.mesh.visible = false;
     this.tiles.delete(key);
-    this.pool.push(mesh);
+    this.pool.push(record.mesh);
   }
 
   update(position: THREE.Vector3) {
@@ -200,6 +241,39 @@ export class OceanManager {
     }
     for (const key of Array.from(this.tiles.keys())) {
       if (!wanted.has(key)) this.deactivate(key);
+    }
+  }
+
+  /**
+   * Per-frame water-only vertex animation for a dynamic, undulating surface — call every
+   * frame (independent of `update`, which only runs on tile-streaming transitions).
+   */
+  animateWater(dt: number) {
+    this.animTime += dt;
+    this.animFrameCounter += 1;
+    const recomputeNormals = this.animFrameCounter % NORMAL_RECOMPUTE_EVERY_N_FRAMES === 0;
+
+    const { x: cx, z: cz } = this.currentTile;
+    for (const [key, record] of this.tiles) {
+      const [txStr, tzStr] = key.split(',');
+      const tx = Number(txStr);
+      const tz = Number(tzStr);
+      if (Math.abs(tx - cx) > WATER_ANIM_TILE_RADIUS || Math.abs(tz - cz) > WATER_ANIM_TILE_RADIUS) continue;
+
+      const posAttr = record.mesh.geometry.attributes.position as THREE.BufferAttribute;
+      let touched = false;
+      for (let i = 0; i < record.isWater.length; i += 1) {
+        if (!record.isWater[i]) continue;
+        const ripple =
+          Math.sin(this.animTime * WATER_ANIM_SPEED + record.worldXs[i] * WATER_ANIM_FREQ + record.worldZs[i] * WATER_ANIM_FREQ) *
+          WATER_ANIM_AMPLITUDE;
+        posAttr.setY(i, record.baseHeights[i] + ripple);
+        touched = true;
+      }
+      if (touched) {
+        posAttr.needsUpdate = true;
+        if (recomputeNormals) record.mesh.geometry.computeVertexNormals();
+      }
     }
   }
 

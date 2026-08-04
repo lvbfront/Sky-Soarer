@@ -88,6 +88,7 @@ export class TerrainManager {
       mesh.visible = true;
     } else {
       mesh = new THREE.Mesh(geometry, this.material);
+      mesh.receiveShadow = true;
       this.scene.add(mesh);
     }
     mesh.position.set(tileX * TILE_SIZE, 0, tileZ * TILE_SIZE);

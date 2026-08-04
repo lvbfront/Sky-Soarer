@@ -1,0 +1,23 @@
+Please apply the following bug fixes, visual upgrades, and new gameplay features:
+
+1. Fix Boost Direction Bug:
+- When the fist (Boost) gesture triggers a barrel roll, lock the bird's horizontal heading (yaw/steering). The bird must continue flying straight forward along its current direction while rolling, WITHOUT unintended right turns or banking.
+
+2. Fix Ring Challenge Spawning (Immediate Front View):
+- Ensure that when "Ring Challenge Mode" is enabled, the first set of glowing target rings spawns DIRECTLY IN FRONT of the player's starting line/bird trajectory so they are immediately visible as soon as flight begins.
+- Chain subsequent rings in a gentle, visible curve ahead of the player as they fly.
+
+3. Graphics & Visual Upgrades (Enhanced Aesthetics):
+- Upgrade lighting: Add dynamic directional sunlight with subtle low-poly mesh shadows, soft volumetric ambient light, and atmospheric color gradients.
+- Add volumetric cloud clusters floating in the sky that the bird can fly through.
+- Add a subtle speed-blur / motion-streak effect around the screen edges during Boost.
+- Refine water shader: Give ocean water a dynamic undulating surface mesh with soft foam edges around island shorelines.
+
+4. New Creative Features to Add:
+- Day / Night & Weather Cycle Toggle: Add a start-menu selector or live key option for [Sunny Morning | Sunset Gold | Starry Night]. Adjust skybox lighting and fog colors accordingly.
+- Dynamic Bird Wing Flapping Speed: Sync wing-animation flap speed to flight velocity—flapping faster during Boost and gliding smoothly during slow descent.
+- Audio Visual Feedback: Trigger a harmonic chime sound effect with Web Audio API and spawn glowing star burst particles whenever a ring is collected.
+- High Score Tracker: Save the highest ring collection score locally using browser localStorage and display "Best Score" on the start menu.
+
+5. Retain Existing Functionality:
+- Keep bird selection (Pigeon, Falcon, Greater Flamingo), water splash particle trails over ocean, bottom-right mirrored webcam feed with pose labels, and the Stop Game button.

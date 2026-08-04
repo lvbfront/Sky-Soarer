@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 
-const SPAWN_INTERVAL = 2.1; // seconds between ring spawns
-const SPAWN_DISTANCE_MIN = 70;
-const SPAWN_DISTANCE_MAX = 130;
-const LATERAL_OFFSET = 22;
-const VERTICAL_OFFSET_MIN = -6;
-const VERTICAL_OFFSET_MAX = 14;
+const SPAWN_INTERVAL = 2.1; // seconds between ring spawns after the first
+const FIRST_RING_DISTANCE = 42; // close enough to be immediately visible at flight start
+const CHAIN_DISTANCE_MIN = 55;
+const CHAIN_DISTANCE_MAX = 80;
+
+// Subsequent rings trace a gentle sine-wave curve ahead of the bird instead of jumping to
+// fully random offsets, so the chain reads as a deliberate, flyable path rather than noise.
+const CURVE_STEP = 0.85; // radians of curve phase advanced per ring
+const CURVE_LATERAL_AMPLITUDE = 16;
+const CURVE_VERTICAL_AMPLITUDE = 6;
+const CURVE_VERTICAL_PHASE_SCALE = 0.6;
 const MIN_ALTITUDE_ABOVE_GROUND = 8;
 
 const RING_RADIUS = 3.4;
@@ -33,7 +38,11 @@ export class RingManager {
   private scene: THREE.Scene;
   private active: ActiveRing[] = [];
   private pool: THREE.Group[] = [];
-  private spawnTimer = SPAWN_INTERVAL * 0.5;
+  // Zero so the very first ring spawns on the first update() call, directly ahead of the
+  // bird's starting position — visible the instant flight begins.
+  private spawnTimer = 0;
+  private ringsSpawned = 0;
+  private curvePhase = 0;
   private ringMaterial: THREE.MeshStandardMaterial;
   private glowMaterial: THREE.MeshBasicMaterial;
 
@@ -65,10 +74,25 @@ export class RingManager {
   }
 
   private spawnRing(birdPosition: THREE.Vector3, forward: THREE.Vector3, heightAtWorld: (x: number, z: number) => number) {
-    const distance = SPAWN_DISTANCE_MIN + Math.random() * (SPAWN_DISTANCE_MAX - SPAWN_DISTANCE_MIN);
+    const isFirst = this.ringsSpawned === 0;
     const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
-    const lateral = (Math.random() - 0.5) * 2 * LATERAL_OFFSET;
-    const vertical = VERTICAL_OFFSET_MIN + Math.random() * (VERTICAL_OFFSET_MAX - VERTICAL_OFFSET_MIN);
+
+    let distance: number;
+    let lateral: number;
+    let vertical: number;
+
+    if (isFirst) {
+      // Spawn directly on the player's starting trajectory — no lateral/vertical offset —
+      // so the first ring is immediately visible dead ahead as soon as flight begins.
+      distance = FIRST_RING_DISTANCE;
+      lateral = 0;
+      vertical = 0;
+    } else {
+      distance = CHAIN_DISTANCE_MIN + Math.random() * (CHAIN_DISTANCE_MAX - CHAIN_DISTANCE_MIN);
+      this.curvePhase += CURVE_STEP;
+      lateral = Math.sin(this.curvePhase) * CURVE_LATERAL_AMPLITUDE;
+      vertical = Math.sin(this.curvePhase * CURVE_VERTICAL_PHASE_SCALE + 1.2) * CURVE_VERTICAL_AMPLITUDE;
+    }
 
     const position = birdPosition
       .clone()
@@ -97,6 +121,8 @@ export class RingManager {
       collected: false,
       spinPhase: Math.random() * Math.PI * 2,
     });
+
+    this.ringsSpawned += 1;
   }
 
   private recycle(ring: ActiveRing) {
@@ -106,21 +132,22 @@ export class RingManager {
 
   /**
    * Advance ring animation/spawning and check for a collection this frame.
-   * Returns true exactly once, the frame the bird threads a ring.
+   * Returns the collected ring's world position exactly once, the frame the bird threads
+   * a ring — the caller can use it to trigger a burst effect at that spot — or `null`.
    */
   update(
     dt: number,
     birdPosition: THREE.Vector3,
     forward: THREE.Vector3,
     heightAtWorld: (x: number, z: number) => number,
-  ): boolean {
+  ): THREE.Vector3 | null {
     this.spawnTimer -= dt;
     if (this.spawnTimer <= 0 && this.active.length < MAX_ACTIVE_RINGS) {
       this.spawnRing(birdPosition, forward, heightAtWorld);
       this.spawnTimer = SPAWN_INTERVAL;
     }
 
-    let collectedThisFrame = false;
+    let collectedPosition: THREE.Vector3 | null = null;
 
     for (let i = this.active.length - 1; i >= 0; i -= 1) {
       const ring = this.active[i];
@@ -135,7 +162,7 @@ export class RingManager {
         const radialDist = delta.clone().addScaledVector(ring.normal, -axialDist).length();
         if (Math.abs(axialDist) < AXIAL_HIT_THRESHOLD && radialDist < RING_RADIUS) {
           ring.collected = true;
-          collectedThisFrame = true;
+          collectedPosition = ring.position.clone();
           this.active.splice(i, 1);
           this.recycle(ring);
           continue;
@@ -149,7 +176,7 @@ export class RingManager {
       }
     }
 
-    return collectedThisFrame;
+    return collectedPosition;
   }
 
   dispose() {
