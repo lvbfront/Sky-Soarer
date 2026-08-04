@@ -6,6 +6,8 @@ import { RingManager } from './rings';
 import { SplashEffect } from './splash';
 import { CloudManager } from './clouds';
 import { RingBurstEffect } from './ringBurst';
+import { UnderwaterEnvironment } from './underwater';
+import { WaterBurstEffect } from './waterBurst';
 import { WindAudio, SoundEffects } from './audio';
 import type { HandControlState } from './handControls';
 
@@ -13,7 +15,7 @@ export type MapType = 'mountain' | 'ocean';
 
 export const MAP_OPTIONS: { id: MapType; name: string; tagline: string }[] = [
   { id: 'mountain', name: 'Mountain Valley', tagline: 'Rolling procedural hills.' },
-  { id: 'ocean', name: 'Tropical Ocean & Islands', tagline: 'Skim the waves between palm-dotted islands.' },
+  { id: 'ocean', name: 'Tropical Ocean & Islands', tagline: 'Skim the waves, or dive beneath them, between palm-dotted islands.' },
 ];
 
 export type WeatherPreset = 'sunny' | 'sunset' | 'night';
@@ -88,6 +90,16 @@ const WEATHER_LOOKS: Record<WeatherPreset, WeatherLook> = {
   },
 };
 
+// Underwater look — a fixed cyan/blue palette independent of the surface weather preset,
+// since sunlight/moonlight above doesn't meaningfully change how it looks a few meters down.
+const UNDERWATER_BACKGROUND = '#0b4a68';
+const UNDERWATER_FOG_DENSITY = 0.05;
+const UNDERWATER_HEMI_SKY = '#2f8fb0';
+const UNDERWATER_HEMI_GROUND = '#052437';
+const UNDERWATER_HEMI_INTENSITY = 0.6;
+const UNDERWATER_AMBIENT_COLOR = '#7fd8ff';
+const UNDERWATER_AMBIENT_INTENSITY = 0.4;
+
 export interface GameEngineOptions {
   birdType: BirdType;
   mapType: MapType;
@@ -95,6 +107,8 @@ export interface GameEngineOptions {
   ringChallenge: boolean;
   onScoreChange?: (score: number) => void;
   onBarrelRoll?: () => void;
+  onBackflip?: () => void;
+  onWaterTransition?: (state: 'submerged' | 'surfaced') => void;
 }
 
 const BASE_SPEED = 9;
@@ -103,11 +117,23 @@ const SPEED_LERP = 0.04;
 const RING_SPEED_PULSE = 7;
 const SPEED_PULSE_DECAY_PER_SEC = 9;
 
+// Underwater flight is slower and floatier than airborne flight — momentum builds and
+// bleeds off more gradually, matching the "more drag, floatier" swimming feel from spec.
+const UNDERWATER_BASE_SPEED = 5;
+const UNDERWATER_BOOST_SPEED = 10;
+const UNDERWATER_SPEED_LERP = 0.02;
+// Steering input is damped underwater so both the visual roll and the actual turn rate
+// soften together — swimming banks gentler than flying.
+const UNDERWATER_STEERING_DAMPING = 0.5;
+
 const BASE_FOV = 58;
 const BOOST_FOV = 72;
+const UNDERWATER_BASE_FOV = 50;
+const UNDERWATER_BOOST_FOV = 60;
 const FOV_LERP = 0.06;
 
 const CAMERA_LERP = 0.05;
+const UNDERWATER_CAMERA_LERP = 0.03;
 const CAMERA_BACK_DISTANCE = 6.5;
 const CAMERA_HEIGHT = 2.2;
 const LOOK_AHEAD_DISTANCE = 8;
@@ -117,13 +143,22 @@ const MAX_ROLL_ANGLE = THREE.MathUtils.degToRad(48);
 const ORIENTATION_LERP = 0.06;
 
 const FLIP_DURATION = 0.8; // seconds, per spec
+const BACKFLIP_DURATION = 0.9;
 
 const MIN_FLAP_SPEED = 3;
 const MAX_FLAP_SPEED = 17;
 const GLIDE_PITCH_THRESHOLD = -0.15; // diving hard enough (while not boosting) reads as a glide
 const GLIDE_FLAP_MULTIPLIER = 0.55;
 
-/** Smoothly ease in/out — used for the barrel roll sweep. */
+// Over open water there is no altitude floor except the seabed itself, so the bird can dive
+// to (and below) true sea level. Over solid ground (terrain map, or an island on the ocean
+// map) the old hard floor above the surface is kept unchanged.
+const SEABED_FLOOR_Y = -34;
+// Small hysteresis band around the water surface so skimming exactly at sea level doesn't
+// rapidly flicker between airborne/underwater state.
+const UNDERWATER_HYSTERESIS = 0.4;
+
+/** Smoothly ease in/out — used for the barrel roll and backflip sweeps. */
 function easeInOutCubic(t: number) {
   return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
 }
@@ -139,12 +174,16 @@ export class GameEngine {
   private sfx = new SoundEffects();
 
   private sun!: THREE.DirectionalLight;
+  private hemi!: THREE.HemisphereLight;
+  private ambient!: THREE.AmbientLight;
   private starfield: THREE.Points | null = null;
 
   private clouds: CloudManager;
   private rings: RingManager | null;
   private splash: SplashEffect | null;
   private ringBurst: RingBurstEffect | null;
+  private underwaterEnv: UnderwaterEnvironment | null;
+  private waterBurst: WaterBurstEffect | null;
   private score = 0;
 
   private options: GameEngineOptions;
@@ -161,8 +200,13 @@ export class GameEngine {
   private speedPulse = 0;
   private boosting = false;
 
-  private flipProgress: number | null = null; // null when not flipping
+  private flipProgress: number | null = null; // barrel roll; null when not flipping
   private flipStartRoll = 0;
+
+  private backflipProgress: number | null = null; // null when not backflipping
+  private backflipStartPitch = 0;
+
+  private underwater = false;
 
   private headingYaw = 0;
   private cameraTarget = new THREE.Vector3();
@@ -203,10 +247,14 @@ export class GameEngine {
       this.environment = ocean;
       this.ocean = ocean;
       this.splash = new SplashEffect(this.scene);
+      this.underwaterEnv = new UnderwaterEnvironment(this.scene);
+      this.waterBurst = new WaterBurstEffect(this.scene);
     } else {
       this.environment = new TerrainManager(this.scene);
       this.ocean = null;
       this.splash = null;
+      this.underwaterEnv = null;
+      this.waterBurst = null;
     }
     this.clouds = new CloudManager(this.scene);
     this.rings = options.ringChallenge ? new RingManager(this.scene) : null;
@@ -310,9 +358,11 @@ export class GameEngine {
   private buildLighting(look: WeatherLook) {
     const hemi = new THREE.HemisphereLight(look.hemiSky, look.hemiGround, look.hemiIntensity);
     this.scene.add(hemi);
+    this.hemi = hemi;
 
     const ambient = new THREE.AmbientLight(look.ambientColor, look.ambientIntensity);
     this.scene.add(ambient);
+    this.ambient = ambient;
 
     // Dynamic directional sun/moon light — casts soft low-poly shadows and follows the
     // bird each frame (see `update`) so its shadow camera frustum stays centered nearby.
@@ -334,6 +384,30 @@ export class GameEngine {
     const fill = new THREE.DirectionalLight(look.fillColor, 0.3);
     fill.position.set(50, 40, 60);
     this.scene.add(fill);
+  }
+
+  /** Swaps the scene's fog/background/lighting to the fixed cyan underwater look. */
+  private enterUnderwaterLook() {
+    this.scene.background = new THREE.Color(UNDERWATER_BACKGROUND);
+    this.scene.fog = new THREE.FogExp2(UNDERWATER_BACKGROUND, UNDERWATER_FOG_DENSITY);
+    this.hemi.color.set(UNDERWATER_HEMI_SKY);
+    this.hemi.groundColor.set(UNDERWATER_HEMI_GROUND);
+    this.hemi.intensity = UNDERWATER_HEMI_INTENSITY;
+    this.ambient.color.set(UNDERWATER_AMBIENT_COLOR);
+    this.ambient.intensity = UNDERWATER_AMBIENT_INTENSITY;
+  }
+
+  /** Restores the surface fog/background/lighting for the currently selected weather preset. */
+  private exitUnderwaterLook() {
+    const look = WEATHER_LOOKS[this.options.weather];
+    const isOcean = this.options.mapType === 'ocean';
+    this.scene.background = new THREE.Color(look.skyTop);
+    this.scene.fog = new THREE.FogExp2(isOcean ? look.fogOcean : look.fogMountain, 0.0068);
+    this.hemi.color.set(look.hemiSky);
+    this.hemi.groundColor.set(look.hemiGround);
+    this.hemi.intensity = look.hemiIntensity;
+    this.ambient.color.set(look.ambientColor);
+    this.ambient.intensity = look.ambientIntensity;
   }
 
   private handleResize = () => {
@@ -359,6 +433,15 @@ export class GameEngine {
 
   /** Called from the hand tracker whenever a new gesture reading is available. */
   applyControls(state: HandControlState) {
+    // The backflip gesture's "hand left frame" fallback reports handDetected: false (the
+    // flick often carries the hand out of the webcam view), so this check must run before
+    // the guard below or that fallback path would silently do nothing.
+    if (state.backflip && this.flipProgress === null && this.backflipProgress === null) {
+      this.backflipProgress = 0;
+      this.backflipStartPitch = this.currentPitch;
+      this.options.onBackflip?.();
+    }
+
     if (!state.handDetected) return;
 
     this.targetPitch = state.pitch;
@@ -367,9 +450,10 @@ export class GameEngine {
     const wasBoosting = this.boosting;
     this.boosting = state.boost;
 
-    // The barrel roll now fires automatically the instant a fist closes (boost starts),
-    // instead of needing a separate fast wrist-flick gesture.
-    if (!wasBoosting && this.boosting && this.flipProgress === null) {
+    // The barrel roll fires automatically the instant a fist closes (boost starts), instead
+    // of needing a separate gesture — mutually exclusive with an in-progress backflip so the
+    // two one-shot tricks never fight over the bird's rotation in the same frame.
+    if (!wasBoosting && this.boosting && this.flipProgress === null && this.backflipProgress === null) {
       this.flipProgress = 0;
       this.flipStartRoll = this.currentRoll;
       this.options.onBarrelRoll?.();
@@ -382,16 +466,20 @@ export class GameEngine {
     this.currentPitch += (this.targetPitch - this.currentPitch) * ORIENTATION_LERP;
     this.currentRoll += (this.targetRoll - this.currentRoll) * ORIENTATION_LERP;
 
-    const pitchAngle = this.currentPitch * MAX_PITCH_ANGLE;
-    // `steeringRollAngle` is the player's actual steering input and is the ONLY thing
-    // allowed to change heading/yaw. `visualRollAngle` is what actually gets applied to
-    // the bird's mesh/camera roll, which during a barrel roll sweeps a full 360 degrees —
-    // previously that sweep was fed into the turn-rate calculation too, so every barrel
-    // roll also spun the bird's heading wildly off course. Keeping them separate fixes it.
-    const steeringRollAngle = this.currentRoll * MAX_ROLL_ANGLE;
+    // `steeringPitchAngle`/`steeringRollAngle` are the player's actual steering input and are
+    // the ONLY things allowed to change the flight path (forward vector, heading/yaw).
+    // `visualPitchAngle`/`visualRollAngle` are what actually gets applied to the bird's
+    // mesh/camera rotation, which during a trick sweeps a full 360 degrees on top — keeping
+    // them separate is what makes the barrel roll and backflip purely cosmetic instead of
+    // corrupting the actual momentum/direction (see project memory on this pattern).
+    const steeringPitchAngle = this.currentPitch * MAX_PITCH_ANGLE;
+    let visualPitchAngle = steeringPitchAngle;
+
+    let steeringRollAngle = this.currentRoll * MAX_ROLL_ANGLE;
+    if (this.underwater) steeringRollAngle *= UNDERWATER_STEERING_DAMPING;
     let visualRollAngle = steeringRollAngle;
 
-    // Barrel roll: sweep a full 360 degrees on top of the steering roll over 0.8s.
+    // Barrel roll: sweep a full 360 degrees of roll on top of the steering roll over 0.8s.
     if (this.flipProgress !== null) {
       this.flipProgress += dt / FLIP_DURATION;
       if (this.flipProgress >= 1) {
@@ -402,6 +490,18 @@ export class GameEngine {
       }
     }
 
+    // Backflip: sweep a full 360 degrees of pitch on top of the steering pitch, triggered by
+    // a rapid upward hand flick. Mirrors the barrel roll's fix exactly, along the pitch axis.
+    if (this.backflipProgress !== null) {
+      this.backflipProgress += dt / BACKFLIP_DURATION;
+      if (this.backflipProgress >= 1) {
+        this.backflipProgress = null;
+      } else {
+        const sweep = easeInOutCubic(this.backflipProgress) * Math.PI * 2;
+        visualPitchAngle = this.backflipStartPitch * MAX_PITCH_ANGLE + sweep;
+      }
+    }
+
     // Turning: bank angle steers yaw, like a real glider — but heading is locked while a
     // barrel roll is in progress, so boosting always continues straight ahead.
     if (this.flipProgress === null) {
@@ -409,21 +509,56 @@ export class GameEngine {
     }
 
     this.speedPulse = Math.max(0, this.speedPulse - SPEED_PULSE_DECAY_PER_SEC * dt);
-    const targetSpeed = (this.boosting ? BOOST_SPEED : BASE_SPEED) + this.speedPulse;
-    this.speed += (targetSpeed - this.speed) * SPEED_LERP;
+    const baseSpeed = this.underwater ? UNDERWATER_BASE_SPEED : BASE_SPEED;
+    const boostSpeed = this.underwater ? UNDERWATER_BOOST_SPEED : BOOST_SPEED;
+    const speedLerp = this.underwater ? UNDERWATER_SPEED_LERP : SPEED_LERP;
+    const targetSpeed = (this.boosting ? boostSpeed : baseSpeed) + this.speedPulse;
+    this.speed += (targetSpeed - this.speed) * speedLerp;
 
+    // The actual flight path uses only the steering pitch (never the trick sweep above), so
+    // a backflip never alters where the bird is actually heading.
     const forward = new THREE.Vector3(
-      Math.sin(this.headingYaw) * Math.cos(pitchAngle),
-      Math.sin(pitchAngle),
-      Math.cos(this.headingYaw) * Math.cos(pitchAngle),
+      Math.sin(this.headingYaw) * Math.cos(steeringPitchAngle),
+      Math.sin(steeringPitchAngle),
+      Math.cos(this.headingYaw) * Math.cos(steeringPitchAngle),
     ).normalize();
 
     const bird = this.bird.group;
     bird.position.addScaledVector(forward, this.speed * dt);
 
-    const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
-    if (bird.position.y < minAltitude) bird.position.y = minAltitude;
+    // Altitude clamp: over open water there is no floor except the seabed itself, letting
+    // the bird dive to (and below) true sea level. Over solid ground — the mountain map, or
+    // an island on the ocean map — the old hard floor just above the surface is unchanged.
+    const overWater = this.ocean !== null && this.ocean.isOverWater(bird.position.x, bird.position.z);
+    if (overWater) {
+      if (bird.position.y < SEABED_FLOOR_Y) bird.position.y = SEABED_FLOOR_Y;
+    } else {
+      const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
+      if (bird.position.y < minAltitude) bird.position.y = minAltitude;
+    }
     if (bird.position.y > 140) bird.position.y = 140;
+
+    // Underwater state, recomputed from the bird's post-movement position, with a small
+    // hysteresis band around the surface so skimming right at sea level doesn't flicker.
+    let targetUnderwater = false;
+    if (overWater && this.ocean) {
+      const waterSurfaceY = this.ocean.heightAtWorld(bird.position.x, bird.position.z);
+      const depthBelowSurface = waterSurfaceY - bird.position.y;
+      const threshold = this.underwater ? -UNDERWATER_HYSTERESIS : UNDERWATER_HYSTERESIS;
+      targetUnderwater = depthBelowSurface > threshold;
+    }
+    if (targetUnderwater !== this.underwater) {
+      this.underwater = targetUnderwater;
+      this.underwaterEnv?.setActive(this.underwater);
+      if (this.underwater) {
+        this.enterUnderwaterLook();
+        this.options.onWaterTransition?.('submerged');
+      } else {
+        this.exitUnderwaterLook();
+        this.waterBurst?.trigger(bird.position.clone());
+        this.options.onWaterTransition?.('surfaced');
+      }
+    }
 
     // The bird mesh's beak/head faces local +Z, which is the same axis `forward` above is
     // built from — so setting yaw to headingYaw directly (no extra 180deg offset) makes the
@@ -431,21 +566,22 @@ export class GameEngine {
     // staring back at it.
     bird.rotation.order = 'YXZ';
     bird.rotation.y = this.headingYaw;
-    bird.rotation.x = -pitchAngle;
+    bird.rotation.x = -visualPitchAngle;
     bird.rotation.z = visualRollAngle;
 
     // Wing-flap speed now tracks actual flight speed continuously (fast during boost,
     // slower cruising otherwise) instead of a binary boosting/not-boosting switch, and
     // eases further when diving un-boosted for a proper "gliding" look.
-    let flapSpeed = THREE.MathUtils.mapLinear(this.speed, BASE_SPEED, BOOST_SPEED, 7, MAX_FLAP_SPEED);
-    if (!this.boosting && pitchAngle < GLIDE_PITCH_THRESHOLD) {
+    let flapSpeed = THREE.MathUtils.mapLinear(this.speed, baseSpeed, boostSpeed, 7, MAX_FLAP_SPEED);
+    if (!this.boosting && !this.underwater && steeringPitchAngle < GLIDE_PITCH_THRESHOLD) {
       flapSpeed *= GLIDE_FLAP_MULTIPLIER;
     }
     flapSpeed = THREE.MathUtils.clamp(flapSpeed, MIN_FLAP_SPEED, MAX_FLAP_SPEED);
-    this.bird.update(dt, flapSpeed);
+    this.bird.update(dt, flapSpeed, this.underwater);
 
     this.environment.update(bird.position);
     this.clouds.update(dt, bird.position, forward);
+    this.underwaterEnv?.update(dt, bird.position, forward);
 
     if (this.rings) {
       const collectedAt = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
@@ -458,25 +594,29 @@ export class GameEngine {
       }
     }
     this.ringBurst?.update(dt);
+    this.waterBurst?.update(dt);
 
     if (this.splash && this.ocean) {
       const waterSurfaceY = this.ocean.heightAtWorld(bird.position.x, bird.position.z);
-      const isOverWater = this.ocean.isOverWater(bird.position.x, bird.position.z);
-      this.splash.update(dt, bird.position, forward, waterSurfaceY, isOverWater);
+      this.splash.update(dt, bird.position, forward, waterSurfaceY, overWater);
     }
     this.ocean?.animateWater(dt);
 
-    // Camera follow: heavy lerp for a floaty, relaxed feel.
+    // Camera follow: heavy lerp for a floaty, relaxed feel — even heavier underwater so the
+    // chase camera reads as swimming through water rather than flying through air.
+    const cameraLerp = this.underwater ? UNDERWATER_CAMERA_LERP : CAMERA_LERP;
     const behind = forward.clone().multiplyScalar(-CAMERA_BACK_DISTANCE);
     const desiredCameraPos = bird.position.clone().add(behind).add(new THREE.Vector3(0, CAMERA_HEIGHT, 0));
-    this.cameraTarget.lerp(desiredCameraPos, CAMERA_LERP);
+    this.cameraTarget.lerp(desiredCameraPos, cameraLerp);
     this.camera.position.copy(this.cameraTarget);
 
     const desiredLookAt = bird.position.clone().addScaledVector(forward, LOOK_AHEAD_DISTANCE);
-    this.cameraLookAt.lerp(desiredLookAt, CAMERA_LERP);
+    this.cameraLookAt.lerp(desiredLookAt, cameraLerp);
     this.camera.lookAt(this.cameraLookAt);
 
-    const targetFov = this.boosting ? BOOST_FOV : BASE_FOV;
+    const baseFov = this.underwater ? UNDERWATER_BASE_FOV : BASE_FOV;
+    const boostFov = this.underwater ? UNDERWATER_BOOST_FOV : BOOST_FOV;
+    const targetFov = this.boosting ? boostFov : baseFov;
     this.camera.fov += (targetFov - this.camera.fov) * FOV_LERP;
     this.camera.updateProjectionMatrix();
 
@@ -489,8 +629,8 @@ export class GameEngine {
       this.starfield.position.set(bird.position.x, 0, bird.position.z);
     }
 
-    const speedRatio = (this.speed - BASE_SPEED) / (BOOST_SPEED - BASE_SPEED);
-    this.wind.setIntensity(0.3 + speedRatio);
+    const speedRatio = (this.speed - baseSpeed) / (boostSpeed - baseSpeed);
+    this.wind.setIntensity(this.underwater ? 0 : 0.3 + speedRatio);
   }
 
   getSpeed() {
@@ -509,6 +649,14 @@ export class GameEngine {
     return this.flipProgress !== null;
   }
 
+  isBackflipping() {
+    return this.backflipProgress !== null;
+  }
+
+  isUnderwater() {
+    return this.underwater;
+  }
+
   dispose() {
     this.disposed = true;
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
@@ -519,6 +667,8 @@ export class GameEngine {
     this.rings?.dispose();
     this.splash?.dispose();
     this.ringBurst?.dispose();
+    this.underwaterEnv?.dispose();
+    this.waterBurst?.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);

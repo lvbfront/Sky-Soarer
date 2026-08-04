@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 
-export type BirdType = 'pigeon' | 'falcon' | 'flamingo';
+export type BirdType = 'pigeon' | 'falcon' | 'flamingo' | 'duck';
 
 export const BIRD_OPTIONS: { id: BirdType; name: string; tagline: string }[] = [
   { id: 'pigeon', name: 'Pigeon', tagline: 'Light and agile — the friendly default.' },
   { id: 'falcon', name: 'Falcon', tagline: 'Sleek, dark, narrow-winged speedster.' },
   { id: 'flamingo', name: 'Greater Flamingo', tagline: 'Pink & white, long neck, unmistakable beak.' },
+  { id: 'duck', name: 'Duck / Seabird', tagline: 'Built to dive — paddles and swims beneath the waves.' },
 ];
 
 interface WingSpec {
@@ -40,6 +41,12 @@ export class Bird {
       }
       case 'flamingo': {
         const wings = this.buildFlamingo();
+        this.leftWing = wings.leftWing;
+        this.rightWing = wings.rightWing;
+        break;
+      }
+      case 'duck': {
+        const wings = this.buildDuck();
         this.leftWing = wings.leftWing;
         this.rightWing = wings.rightWing;
         break;
@@ -192,6 +199,49 @@ export class Bird {
     });
   }
 
+  private buildDuck() {
+    const bodyMat = new THREE.MeshStandardMaterial({ color: '#8a6b3d', flatShading: true, roughness: 0.85 });
+    const headMat = new THREE.MeshStandardMaterial({ color: '#3f6b4a', flatShading: true, roughness: 0.7 });
+    const billMat = new THREE.MeshStandardMaterial({ color: '#e2932f', flatShading: true, roughness: 0.6 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: '#2b2116', flatShading: true, roughness: 0.6 });
+
+    // Plump, rounded body — reads as a duck's silhouette rather than a streamlined flier.
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.46, 8, 6), bodyMat);
+    body.scale.set(1, 0.9, 1.35);
+    this.group.add(body);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 6), headMat);
+    head.position.set(0, 0.32, 0.72);
+    this.group.add(head);
+
+    const bill = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.08, 0.32), billMat);
+    bill.position.set(0, 0.26, 1.02);
+    this.group.add(bill);
+
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.5, 4), bodyMat);
+    tail.rotation.x = -Math.PI / 2.4;
+    tail.position.set(0, 0.18, -0.75);
+    this.group.add(tail);
+
+    this.addEyes(darkMat, 0.4, 0.9);
+
+    // Webbed feet tucked beneath the body — a nod to its diving/paddling specialty.
+    for (const side of [-1, 1] as const) {
+      const foot = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.05, 4), billMat);
+      foot.rotation.x = Math.PI / 2;
+      foot.position.set(side * 0.16, -0.32, -0.1);
+      this.group.add(foot);
+    }
+
+    return this.attachWings(bodyMat, {
+      radius: 0.15,
+      length: 1.3,
+      spanScale: 2.1,
+      sweepAngle: 0.1,
+      position: [0.16, 0.14, -0.05],
+    });
+  }
+
   private addEyes(material: THREE.Material, y: number, z: number) {
     const eyeGeometry = new THREE.SphereGeometry(0.045, 6, 6);
     const leftEye = new THREE.Mesh(eyeGeometry, material);
@@ -235,9 +285,15 @@ export class Bird {
   }
 
   /** Advance the flap animation. `flapSpeed` in cycles/sec-ish; higher = faster flapping. */
-  update(dt: number, flapSpeed: number) {
+  /**
+   * `swimming` softens the wing motion into a gentle paddle stroke — used whenever the
+   * bird is submerged underwater, regardless of which species is selected.
+   */
+  update(dt: number, flapSpeed: number, swimming = false) {
     this.flapPhase += dt * flapSpeed;
-    const flap = Math.sin(this.flapPhase) * 0.65 + 0.25;
+    const flap = swimming
+      ? Math.sin(this.flapPhase) * 0.22 + 0.1
+      : Math.sin(this.flapPhase) * 0.65 + 0.25;
     this.leftWing.rotation.z = flap;
     this.rightWing.rotation.z = -flap;
   }

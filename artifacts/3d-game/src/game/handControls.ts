@@ -9,6 +9,8 @@ export interface HandControlState {
   roll: number;
   /** True while the hand is held in a closed fist (triggers boost + the barrel roll). */
   boost: boolean;
+  /** One-shot pulse: true for exactly the frame a fast upward hand flick is detected. */
+  backflip: boolean;
   landmarks: NormalizedLandmark[] | null;
 }
 
@@ -22,15 +24,23 @@ const FIST_HOLD_FRAMES = 3;
 const SMOOTHING_ALPHA = 0.35;
 const STEER_GAIN = 2.6;
 
-// Neutral flight point: dead-center of the camera frame. Palm positions are measured as an
-// offset from this point, so holding your hand here always means "fly straight".
-const NEUTRAL_X = 0.5;
-const NEUTRAL_Y = 0.5;
 // Max possible offset from center (palm coordinates are normalized 0..1).
 const MAX_OFFSET = 0.5;
 // Offsets smaller than this (in the same 0..0.5 units as MAX_OFFSET) are treated as "centered"
 // so small hand tremor / tracking jitter near the middle doesn't cause constant drift.
 const CENTER_DEADZONE = 0.035;
+
+// Sensitivity slider bounds exposed to the calibration UI.
+export const MIN_SENSITIVITY = 0.5;
+export const MAX_SENSITIVITY = 2.0;
+
+// A rapid upward palm flick faster than this (normalized units/sec, using the un-smoothed,
+// mirrored-frame Y velocity) triggers the automatic backflip gesture.
+const UPWARD_FLICK_VELOCITY_THRESHOLD = 1.8;
+const BACKFLIP_COOLDOWN_MS = 1200;
+// If the hand disappears shortly after a fast upward flick (common when the flick carries
+// the hand out of frame), still fire the backflip once rather than losing the gesture.
+const HAND_LOST_GRACE_MS = 300;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -64,6 +74,21 @@ export class HandTracker {
   private fistActive = false;
 
   private stopped = false;
+
+  // Calibrated neutral hand center — defaults to dead-center of frame, but the player can
+  // set it to wherever is comfortable for them via `captureNeutralCenter()`.
+  private originX = 0.5;
+  private originY = 0.5;
+  // Multiplier applied on top of STEER_GAIN, controlled by the calibration screen's slider.
+  private sensitivity = 1;
+
+  // Upward-flick backflip tracking: raw (un-smoothed, mirrored) palm Y + its timestamp from
+  // the previous frame, used to compute a velocity estimate independent of the roll/pitch
+  // smoothing (smoothing would blur out a fast, brief flick — see project memory).
+  private lastRawPalmY: number | null = null;
+  private lastFrameTimeMs: number | null = null;
+  private lastBackflipTimeMs = -Infinity;
+  private lastFastUpwardFlickTimeMs = -Infinity;
 
   constructor(
     videoEl: HTMLVideoElement,
@@ -121,16 +146,55 @@ export class HandTracker {
     });
   }
 
+  /** Sets the (mirrored-frame) point that counts as "fly straight" for steering offsets. */
+  setOrigin(x: number, y: number) {
+    this.originX = clamp(x, 0, 1);
+    this.originY = clamp(y, 0, 1);
+  }
+
+  getOrigin() {
+    return { x: this.originX, y: this.originY };
+  }
+
+  /** Scales hand displacement from the origin; 1 = default gain, >1 = twitchier, <1 = calmer. */
+  setSensitivity(multiplier: number) {
+    this.sensitivity = clamp(multiplier, MIN_SENSITIVITY, MAX_SENSITIVITY);
+  }
+
+  /**
+   * Captures the current smoothed palm position as the new neutral center, so the player can
+   * hold their hand wherever is comfortable and declare that "straight ahead". Returns the
+   * captured point for the calibration UI to draw a crosshair over, or null if no hand is
+   * currently visible to capture from.
+   */
+  captureNeutralCenter(): { x: number; y: number } | null {
+    if (!this.hasSmoothed) return null;
+    this.setOrigin(this.smoothedPalmX, this.smoothedPalmY);
+    return this.getOrigin();
+  }
+
   private handleResults(results: Results) {
     const hand = results.multiHandLandmarks?.[0];
+    const now = performance.now();
 
     if (!hand) {
       this.fistFrameCounter = 0;
+      // If the hand vanished shortly after a fast upward flick (the flick often carries the
+      // hand out of the webcam frame entirely), still honor the gesture once here.
+      const lostBackflip =
+        now - this.lastFastUpwardFlickTimeMs <= HAND_LOST_GRACE_MS &&
+        now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS;
+      if (lostBackflip) {
+        this.lastBackflipTimeMs = now;
+      }
+      this.lastRawPalmY = null;
+      this.lastFrameTimeMs = null;
       this.onUpdate({
         handDetected: false,
         pitch: 0,
         roll: 0,
         boost: false,
+        backflip: lostBackflip,
         landmarks: null,
       });
       return;
@@ -159,16 +223,39 @@ export class HandTracker {
       this.smoothedPalmY = SMOOTHING_ALPHA * py + (1 - SMOOTHING_ALPHA) * this.smoothedPalmY;
     }
 
-    // Offsets from the neutral center point (dead-center of frame = fly straight), with a
-    // small deadzone so tiny jitter near center doesn't cause constant steering drift.
-    const rawOffsetX = this.smoothedPalmX - NEUTRAL_X;
-    const rawOffsetY = NEUTRAL_Y - this.smoothedPalmY;
+    // Offsets from the calibrated neutral center point (holding the hand there = fly
+    // straight), with a small deadzone so tiny jitter near center doesn't cause constant
+    // steering drift.
+    const rawOffsetX = this.smoothedPalmX - this.originX;
+    const rawOffsetY = this.originY - this.smoothedPalmY;
     const offsetX = applyDeadzone(rawOffsetX, CENTER_DEADZONE, MAX_OFFSET);
     const offsetY = applyDeadzone(rawOffsetY, CENTER_DEADZONE, MAX_OFFSET);
 
     // Left/right moves the hand along X -> roll. Up/down moves the hand along Y -> pitch.
-    const roll = clamp(offsetX * STEER_GAIN, -1, 1);
-    const pitch = clamp(offsetY * STEER_GAIN, -1, 1);
+    const gain = STEER_GAIN * this.sensitivity;
+    const roll = clamp(offsetX * gain, -1, 1);
+    const pitch = clamp(offsetY * gain, -1, 1);
+
+    // Backflip gesture: a fast upward flick of the raw (un-smoothed) palm position, tracked
+    // independently of the smoothed steering signal so smoothing doesn't blur out the flick
+    // (see project memory on gesture-control smoothing tradeoffs).
+    let backflip = false;
+    if (this.lastRawPalmY !== null && this.lastFrameTimeMs !== null) {
+      const dtSec = (now - this.lastFrameTimeMs) / 1000;
+      if (dtSec > 0) {
+        // Palm Y decreases upward on screen; convert to a positive "upward velocity".
+        const upwardVelocity = (this.lastRawPalmY - py) / dtSec;
+        if (upwardVelocity > UPWARD_FLICK_VELOCITY_THRESHOLD) {
+          this.lastFastUpwardFlickTimeMs = now;
+          if (now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS) {
+            backflip = true;
+            this.lastBackflipTimeMs = now;
+          }
+        }
+      }
+    }
+    this.lastRawPalmY = py;
+    this.lastFrameTimeMs = now;
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];
@@ -205,6 +292,7 @@ export class HandTracker {
       pitch,
       roll,
       boost: this.fistActive,
+      backflip,
       landmarks: hand,
     });
   }

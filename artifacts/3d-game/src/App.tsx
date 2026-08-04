@@ -1,20 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
-import { Hand, MoveHorizontal, MoveVertical, Zap, X } from 'lucide-react';
+import { Hand, MoveHorizontal, MoveVertical, Zap, ArrowUp, X, Crosshair, ChevronLeft } from 'lucide-react';
 import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from '@/game/GameEngine';
 import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
-import { HandTracker, type HandControlState } from '@/game/handControls';
+import { HandTracker, MIN_SENSITIVITY, MAX_SENSITIVITY, type HandControlState } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 
-type FlightState = 'idle' | 'requesting' | 'flying' | 'denied' | 'unsupported';
+type FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'denied' | 'unsupported';
 
-const PREVIEW_WIDTH = 176;
-const PREVIEW_HEIGHT = 132;
+// The small in-flight HUD preview stays compact; the calibration screen gets a larger one
+// so the player can clearly see the crosshair and their hand while setting it up.
+const HUD_PREVIEW_WIDTH = 176;
+const HUD_PREVIEW_HEIGHT = 132;
+const CALIBRATION_PREVIEW_WIDTH = 360;
+const CALIBRATION_PREVIEW_HEIGHT = 270;
 
 const GESTURE_GUIDE = [
   {
     icon: Hand,
-    title: 'Open hand, centered',
+    title: 'Open hand, at your neutral center',
     description: 'Glide straight and steady.',
   },
   {
@@ -32,16 +36,29 @@ const GESTURE_GUIDE = [
     title: 'Close into a fist',
     description: 'Speed boost — and an automatic barrel roll the instant your fist closes.',
   },
+  {
+    icon: ArrowUp,
+    title: 'Flick your hand up, fast',
+    description: 'Triggers an automatic backflip along your flight path.',
+  },
 ] as const;
 
+/**
+ * Draws the webcam frame + hand skeleton onto a preview canvas, optionally with a crosshair
+ * over the configured neutral steering origin. Shared by both the small in-flight HUD
+ * preview and the larger calibration-screen preview.
+ */
 function drawHandPreview(
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
   landmarks: NormalizedLandmark[] | null,
+  width: number,
+  height: number,
+  origin?: { x: number; y: number } | null,
 ) {
   ctx.save();
-  ctx.clearRect(0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
-  ctx.drawImage(video, 0, 0, PREVIEW_WIDTH, PREVIEW_HEIGHT);
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(video, 0, 0, width, height);
 
   if (landmarks) {
     ctx.strokeStyle = 'rgba(255, 214, 165, 0.9)';
@@ -50,18 +67,40 @@ function drawHandPreview(
     for (const [start, end] of HAND_CONNECTIONS) {
       const a = landmarks[start];
       const b = landmarks[end];
-      ctx.moveTo(a.x * PREVIEW_WIDTH, a.y * PREVIEW_HEIGHT);
-      ctx.lineTo(b.x * PREVIEW_WIDTH, b.y * PREVIEW_HEIGHT);
+      ctx.moveTo(a.x * width, a.y * height);
+      ctx.lineTo(b.x * width, b.y * height);
     }
     ctx.stroke();
 
     ctx.fillStyle = '#ff8a5c';
     for (const point of landmarks) {
       ctx.beginPath();
-      ctx.arc(point.x * PREVIEW_WIDTH, point.y * PREVIEW_HEIGHT, 2.6, 0, Math.PI * 2);
+      ctx.arc(point.x * width, point.y * height, 2.6, 0, Math.PI * 2);
       ctx.fill();
     }
   }
+
+  if (origin) {
+    // `origin` comes from HandTracker in its mirrored-frame coordinate space (X is already
+    // flipped to match the mirrored steering math), but this canvas draws the raw video and
+    // raw landmarks un-mirrored — the whole canvas gets flipped horizontally afterward via
+    // CSS (`scale-x-[-1]`) for display. So the crosshair must be un-mirrored back to raw
+    // canvas space here, or it would land on the wrong side once the CSS flip is applied.
+    const cx = (1 - origin.x) * width;
+    const cy = origin.y * height;
+    ctx.strokeStyle = 'rgba(94, 234, 212, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 12, cy);
+    ctx.lineTo(cx + 12, cy);
+    ctx.moveTo(cx, cy - 12);
+    ctx.lineTo(cx, cy + 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   ctx.restore();
 }
 
@@ -72,10 +111,12 @@ function describeStatus(state: {
   pitch: number;
   boost: boolean;
   barrelRolling: boolean;
+  backflipping: boolean;
 }) {
   if (!state.handDetected) return 'Status: No Hand Detected';
   if (state.boost) return 'Status: Fist (Boost) Active';
   if (state.barrelRolling) return 'Status: Barrel Roll Detected';
+  if (state.backflipping) return 'Status: Backflip!';
   if (state.roll > 0) return 'Status: Steering Right';
   if (state.roll < 0) return 'Status: Steering Left';
   if (state.pitch > 0) return 'Status: Pitching Up';
@@ -83,20 +124,32 @@ function describeStatus(state: {
   return 'Status: Flying Straight';
 }
 
+function sensitivityLabel(value: number) {
+  if (value < 0.85) return 'Low';
+  if (value > 1.4) return 'High';
+  return 'Medium';
+}
+
 function App() {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hudPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const calibrationPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   const trackerRef = useRef<HandTracker | null>(null);
   const previewRafRef = useRef<number | null>(null);
   const latestLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
+  const neutralOriginRef = useRef<{ x: number; y: number } | null>(null);
   const barrelRollingRef = useRef(false);
+  const backflippingRef = useRef(false);
 
-  const [flightState, setFlightState] = useState<FlightState>('idle');
+  const [flightState, setFlightState] = useState<FlightState>('menu');
   const [handDetected, setHandDetected] = useState(false);
   const [boosting, setBoosting] = useState(false);
   const [barrelRolling, setBarrelRolling] = useState(false);
+  const [backflipping, setBackflipping] = useState(false);
+  const [underwater, setUnderwater] = useState(false);
+  const [surfaceSplash, setSurfaceSplash] = useState(false);
   const [statusText, setStatusText] = useState('Status: No Hand Detected');
 
   const [selectedBird, setSelectedBird] = useState<BirdType>('pigeon');
@@ -106,6 +159,9 @@ function App() {
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
 
+  const [sensitivity, setSensitivity] = useState(1);
+  const [calibrated, setCalibrated] = useState(false);
+
   useEffect(() => {
     setBestScore(getBestScore());
   }, []);
@@ -113,6 +169,10 @@ function App() {
   useEffect(() => {
     barrelRollingRef.current = barrelRolling;
   }, [barrelRolling]);
+
+  useEffect(() => {
+    backflippingRef.current = backflipping;
+  }, [backflipping]);
 
   const stopEverything = useCallback(() => {
     trackerRef.current?.stop();
@@ -124,11 +184,16 @@ function App() {
     const stream = videoRef.current?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((track) => track.stop());
     if (videoRef.current) videoRef.current.srcObject = null;
+    neutralOriginRef.current = null;
   }, []);
 
   useEffect(() => stopEverything, [stopEverything]);
 
-  const handleEnableFlight = useCallback(async () => {
+  // Requests camera access and starts hand tracking, then hands control to the calibration
+  // screen. The GameEngine itself isn't created until "Start Flying" — the tracker's output
+  // is what carries the calibration (origin + sensitivity), so the engine doesn't need it
+  // directly.
+  const handleContinueToCalibration = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setFlightState('unsupported');
       return;
@@ -136,6 +201,8 @@ function App() {
 
     setFlightState('requesting');
     setScore(0);
+    setCalibrated(false);
+    neutralOriginRef.current = null;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -144,28 +211,18 @@ function App() {
       });
 
       const video = videoRef.current;
-      if (!video || !canvasContainerRef.current) throw new Error('Missing video/canvas target');
+      if (!video) throw new Error('Missing video target');
       video.srcObject = stream;
       await video.play();
 
-      const engine = new GameEngine(canvasContainerRef.current, {
-        birdType: selectedBird,
-        mapType: selectedMap,
-        weather: selectedWeather,
-        ringChallenge: ringChallengeEnabled,
-        onScoreChange: (total) => {
-          setScore(total);
-          setBestScore(saveBestScoreIfHigher(total));
-        },
-        onBarrelRoll: () => setBarrelRolling(true),
-      });
-      engineRef.current = engine;
-      await engine.start();
-
+      // Defined once and never recreated: it always forwards to whichever engine is
+      // currently active (a no-op during calibration, since engineRef.current is still
+      // null), and keeps the live preview/status state fresh on both the calibration and
+      // flying screens.
       const tracker = new HandTracker(
         video,
         (state: HandControlState) => {
-          engine.applyControls(state);
+          engineRef.current?.applyControls(state);
           latestLandmarksRef.current = state.landmarks;
           setHandDetected(state.handDetected);
           setBoosting(state.boost);
@@ -176,6 +233,7 @@ function App() {
               pitch: state.pitch,
               boost: state.boost,
               barrelRolling: barrelRollingRef.current,
+              backflipping: backflippingRef.current,
             }),
           );
         },
@@ -184,27 +242,31 @@ function App() {
       trackerRef.current = tracker;
       await tracker.start();
 
-      // Mounting the preview canvas happens once flightState flips to 'flying' (below); the
-      // draw-loop effect keyed on flightState picks it up as soon as it's in the DOM.
-      setFlightState('flying');
+      setFlightState('calibrating');
     } catch (error) {
-      console.error('Failed to start flight', error);
+      console.error('Failed to start hand tracking', error);
       setFlightState('denied');
     }
-  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled]);
+  }, []);
 
-  // Starts the webcam-preview draw loop only once the preview canvas is actually mounted
-  // (flightState === 'flying'), instead of grabbing the ref before React has rendered it.
+  // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
+  // (the larger calibration one, or the compact in-flight HUD one), including a crosshair
+  // over the configured neutral center while calibrating.
   useEffect(() => {
-    if (flightState !== 'flying') return;
+    if (flightState !== 'calibrating' && flightState !== 'flying') return;
     const video = videoRef.current;
-    const previewCtx = previewCanvasRef.current?.getContext('2d') ?? null;
-    if (!video || !previewCtx) return;
+    const canvas = flightState === 'calibrating' ? calibrationPreviewCanvasRef.current : hudPreviewCanvasRef.current;
+    const ctx = canvas?.getContext('2d') ?? null;
+    if (!video || !ctx || !canvas) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    const showCrosshair = flightState === 'calibrating';
 
     let rafId: number;
     const drawPreview = () => {
       if (video.readyState >= 2) {
-        drawHandPreview(previewCtx, video, latestLandmarksRef.current);
+        drawHandPreview(ctx, video, latestLandmarksRef.current, width, height, showCrosshair ? neutralOriginRef.current : null);
       }
       rafId = requestAnimationFrame(drawPreview);
     };
@@ -214,26 +276,82 @@ function App() {
     return () => cancelAnimationFrame(rafId);
   }, [flightState]);
 
+  const handleSetNeutralCenter = useCallback(() => {
+    const captured = trackerRef.current?.captureNeutralCenter() ?? null;
+    if (!captured) return;
+    neutralOriginRef.current = captured;
+    setCalibrated(true);
+  }, []);
+
+  const handleSensitivityChange = useCallback((value: number) => {
+    setSensitivity(value);
+    trackerRef.current?.setSensitivity(value);
+  }, []);
+
+  const handleStartFlying = useCallback(async () => {
+    if (!canvasContainerRef.current) return;
+
+    const engine = new GameEngine(canvasContainerRef.current, {
+      birdType: selectedBird,
+      mapType: selectedMap,
+      weather: selectedWeather,
+      ringChallenge: ringChallengeEnabled,
+      onScoreChange: (total) => {
+        setScore(total);
+        setBestScore(saveBestScoreIfHigher(total));
+      },
+      onBarrelRoll: () => setBarrelRolling(true),
+      onBackflip: () => setBackflipping(true),
+      onWaterTransition: (state) => {
+        setUnderwater(state === 'submerged');
+        if (state === 'surfaced') setSurfaceSplash(true);
+      },
+    });
+    engineRef.current = engine;
+    await engine.start();
+    setFlightState('flying');
+  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled]);
+
   useEffect(() => {
     if (!barrelRolling) return;
     const timeout = window.setTimeout(() => setBarrelRolling(false), 850);
     return () => window.clearTimeout(timeout);
   }, [barrelRolling]);
 
-  const handleStopFlight = useCallback(() => {
+  useEffect(() => {
+    if (!backflipping) return;
+    const timeout = window.setTimeout(() => setBackflipping(false), 950);
+    return () => window.clearTimeout(timeout);
+  }, [backflipping]);
+
+  useEffect(() => {
+    if (!surfaceSplash) return;
+    const timeout = window.setTimeout(() => setSurfaceSplash(false), 700);
+    return () => window.clearTimeout(timeout);
+  }, [surfaceSplash]);
+
+  const handleBackToMenu = useCallback(() => {
     stopEverything();
-    setFlightState('idle');
+    setFlightState('menu');
     setHandDetected(false);
     setBoosting(false);
     setBarrelRolling(false);
+    setBackflipping(false);
+    setUnderwater(false);
+    setCalibrated(false);
     setStatusText('Status: No Hand Detected');
   }, [stopEverything]);
+
+  const handleStopFlight = handleBackToMenu;
+
+  const flying = flightState === 'flying';
+  const calibrating = flightState === 'calibrating';
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-background">
       <div ref={canvasContainerRef} className="absolute inset-0" />
 
-      {flightState === 'flying' && (
+      {flying && (
         <>
           {/* CSS-only speed-blur / motion-streak vignette around the screen edges during
               Boost — a lightweight stand-in for a full post-processing motion-blur pass,
@@ -247,6 +365,26 @@ function App() {
               boxShadow: 'inset 0 0 140px 40px rgba(255,180,110,0.45)',
             }}
           />
+          {/* Brief water-droplet screen flash the moment the bird breaks back into the air
+              after a dive. */}
+          <div
+            className="pointer-events-none absolute inset-0 transition-opacity duration-150"
+            style={{
+              opacity: surfaceSplash ? 1 : 0,
+              background:
+                'radial-gradient(ellipse at center, rgba(255,255,255,0) 30%, rgba(214,244,255,0.5) 75%, rgba(160,220,255,0.75) 100%)',
+            }}
+          />
+          {/* Blue tint overlay while submerged, on top of the underwater fog/lighting already
+              applied inside the 3D scene itself. */}
+          <div
+            className="pointer-events-none absolute inset-0 transition-opacity duration-500"
+            style={{
+              opacity: underwater ? 1 : 0,
+              background: 'linear-gradient(rgba(20,110,150,0.18), rgba(10,60,90,0.32))',
+            }}
+          />
+
           <div className="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 text-center">
             <p className="rounded-full bg-card/70 px-5 py-2 text-sm font-medium tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm">
               {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
@@ -287,14 +425,30 @@ function App() {
             >
               Barrel Roll
             </span>
+            <span
+              className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
+                backflipping ? 'bg-secondary text-secondary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
+              }`}
+            >
+              Backflip
+            </span>
+            {selectedMap === 'ocean' && (
+              <span
+                className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
+                  underwater ? 'bg-sky-500 text-white opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
+                }`}
+              >
+                Diving
+              </span>
+            )}
           </div>
 
           <div className="absolute bottom-6 right-6 flex flex-col items-end gap-1.5">
             <div className="overflow-hidden rounded-2xl border border-border/60 bg-card/80 shadow-lg backdrop-blur-sm">
               <canvas
-                ref={previewCanvasRef}
-                width={PREVIEW_WIDTH}
-                height={PREVIEW_HEIGHT}
+                ref={hudPreviewCanvasRef}
+                width={HUD_PREVIEW_WIDTH}
+                height={HUD_PREVIEW_HEIGHT}
                 className="block scale-x-[-1]"
               />
             </div>
@@ -307,7 +461,7 @@ function App() {
 
       <video ref={videoRef} className="hidden" muted playsInline />
 
-      {flightState !== 'flying' && (
+      {flightState === 'menu' && (
         <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
           <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
             <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
@@ -315,8 +469,8 @@ function App() {
             </p>
             <h1 className="mb-3 text-3xl font-semibold text-foreground">Bird Flight</h1>
             <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-              Glide over endless landscapes using nothing but your hand. Here's how the controls
-              work:
+              Glide over endless landscapes — and dive beneath the waves — using nothing but
+              your hand. Here's how the controls work:
             </p>
 
             <ul className="mb-8 flex flex-col gap-3 text-left">
@@ -430,29 +584,124 @@ function App() {
               </button>
             </div>
 
-            {flightState === 'denied' && (
-              <p className="mb-4 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
-                Camera access was blocked. Allow camera permissions in your browser and try again.
-              </p>
-            )}
-            {flightState === 'unsupported' && (
-              <p className="mb-4 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
-                This browser does not support webcam access, so hand tracking cannot run here.
-              </p>
-            )}
-
             <button
               type="button"
-              onClick={handleEnableFlight}
-              disabled={flightState === 'requesting'}
+              onClick={handleContinueToCalibration}
               className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90 disabled:opacity-60"
             >
-              {flightState === 'requesting' ? 'Waking up the sky…' : 'Got It, Start Flying!'}
+              Continue to Calibration
             </button>
 
             <p className="mt-4 text-xs text-muted-foreground">
               Your camera feed stays on this page and is only used to read hand position.
             </p>
+          </div>
+        </div>
+      )}
+
+      {(flightState === 'requesting' || flightState === 'denied' || flightState === 'unsupported') && (
+        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
+          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
+            <h1 className="mb-3 text-2xl font-semibold text-foreground">Bird Flight</h1>
+            {flightState === 'requesting' && (
+              <p className="mb-6 text-sm leading-relaxed text-muted-foreground">Waking up the sky…</p>
+            )}
+            {flightState === 'denied' && (
+              <p className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
+                Camera access was blocked. Allow camera permissions in your browser and try again.
+              </p>
+            )}
+            {flightState === 'unsupported' && (
+              <p className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
+                This browser does not support webcam access, so hand tracking cannot run here.
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={handleBackToMenu}
+              className="w-full rounded-full bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20"
+            >
+              Back to Menu
+            </button>
+          </div>
+        </div>
+      )}
+
+      {calibrating && (
+        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
+          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
+            <button
+              type="button"
+              onClick={handleBackToMenu}
+              className="mb-4 flex items-center gap-1 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+              Back
+            </button>
+
+            <h1 className="mb-2 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
+            <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
+              Hold your hand comfortably in front of the camera, wherever feels natural, then
+              set that as your neutral center — that's what "fly straight" will mean.
+            </p>
+
+            <div className="mb-4 overflow-hidden rounded-2xl border border-border/60 bg-muted/40 shadow-inner">
+              <canvas
+                ref={calibrationPreviewCanvasRef}
+                width={CALIBRATION_PREVIEW_WIDTH}
+                height={CALIBRATION_PREVIEW_HEIGHT}
+                className="block w-full scale-x-[-1]"
+              />
+            </div>
+            <p className="mb-5 text-xs font-medium tracking-wide text-muted-foreground">
+              {handDetected ? 'Hand detected — hold it where you want "straight" to be.' : 'Show your hand to the camera.'}
+            </p>
+
+            <button
+              type="button"
+              onClick={handleSetNeutralCenter}
+              disabled={!handDetected}
+              className="mb-2 flex w-full items-center justify-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Crosshair className="h-4 w-4" />
+              Set Neutral Hand Center
+            </button>
+            {calibrated && (
+              <p className="mb-5 text-xs font-semibold text-primary">Calibrated! Your neutral center is set.</p>
+            )}
+            {!calibrated && <div className="mb-5" />}
+
+            <div className="mb-6 text-left">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                  Steering Sensitivity
+                </p>
+                <p className="text-xs font-semibold text-foreground">
+                  {sensitivityLabel(sensitivity)} ({sensitivity.toFixed(1)}x)
+                </p>
+              </div>
+              <input
+                type="range"
+                min={MIN_SENSITIVITY}
+                max={MAX_SENSITIVITY}
+                step={0.1}
+                value={sensitivity}
+                onChange={(event) => handleSensitivityChange(Number(event.target.value))}
+                className="w-full accent-primary"
+              />
+              <div className="mt-1 flex justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
+                <span>Calm</span>
+                <span>Twitchy</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleStartFlying}
+              className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90"
+            >
+              Start Flying
+            </button>
           </div>
         </div>
       )}

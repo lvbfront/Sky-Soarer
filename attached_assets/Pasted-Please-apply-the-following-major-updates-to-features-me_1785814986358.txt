@@ -1,0 +1,33 @@
+Please apply the following major updates to features, mechanics, visual environments, onboarding flow, and controls:
+
+1. Onboarding Flow & Custom Hand Center Calibration (Fix Screen Obstruction):
+- Multi-Step Pre-Game Setup:
+  • Screen 1 (World & Character Selection): Choose Map (Mountain Valley vs Tropical Ocean & Islands), Bird Type (Pigeon, Falcon, Flamingo, Duck), and Toggle Ring Challenge Mode / Time of Day.
+  • Screen 2 (Control Calibration & Settings): Displays Sensitivity Controls and Hand Center Calibration before starting flight.
+- Custom Hand Center Origin: On Screen 2, display a live webcam preview box and instruct the user to hold their hand in their preferred "Neutral Flight Position" (e.g., lower-right corner or off to the side so it doesn't block the screen view).
+- Add a "Set Neutral Hand Center" button. Clicking this captures the hand's current (X, Y) coordinates and saves them as the absolute zero-point (steering origin) for flight steering.
+- Pitch and Roll mapping will measure hand offsets relative to this custom origin point instead of forcing the hand to sit dead-center in front of the camera/face. Include a visual target crosshair over the webcam preview showing the configured neutral center.
+
+2. Steering Sensitivity Settings (On Calibration Screen):
+- Add a "Steering Sensitivity" slider (Low, Medium, High / 0.5x to 2.0x multiplier) on Screen 2 right alongside the hand calibration tool.
+- Scale hand displacement inputs relative to the custom origin by this selected factor so high sensitivity allows quick turning with small hand movements, while low sensitivity creates sweeping floaty turns.
+
+3. Seamless Water Surface Interaction & Water Splashes:
+- Remove any artificial invisible floor high above the ocean surface on the Ocean Map so the bird can fly all the way down to sea level (Y = 0).
+- When the bird skims or touches the water surface, spawn dynamic white water splash/spray particle effects dragging directly behind its body and wingtips.
+
+4. Diving & Underwater Environment (Dual Sky & Underwater World):
+- Seamless Diving Mechanic: When flying downward into the water surface (Y < 0), transition smooth flight mechanics into underwater swimming physics (increased drag, smooth floating momentum).
+- Underwater Aesthetic & World: When camera drops below water, dynamically switch lighting to vibrant cyan/blue underwater fog, caustic light rays, colorful coral reefs, low-poly sea flora, and ambient swimming fish and shark models.
+- Re-emergence: Pitching back upward above sea level (Y > 0) transitions seamlessly back to airborne sky flight with a momentary burst of water droplets on screen.
+
+5. New Playable Seabird: Duck / Diver:
+- Add a new playable option in the bird selection menu: "Duck / Seabird".
+- Give it distinct low-poly modeling (e.g., duck/puffin features) with specialized swimming animations while submerged underwater and flapping/gliding animations in the air.
+
+6. New Hand Gesture: Air Backflip Trick:
+- Implement a new gesture: Rapid upward hand flick (moving the hand quickly up out of view or high above the threshold and back).
+- Trigger: Performs a full pitch-up 360-degree vertical backflip animation along the flight path without breaking forward momentum.
+
+7. Retain Existing Gameplay & Fixes:
+- Keep existing birds (Pigeon, Falcon, Flamingo), fixed straight-ahead Boost roll (no unintended right turns), visible front-spawning target rings, bottom-right webcam overlay during gameplay with status text, and the Stop Game button.
