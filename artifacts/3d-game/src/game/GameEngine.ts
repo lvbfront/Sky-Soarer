@@ -92,13 +92,15 @@ const WEATHER_LOOKS: Record<WeatherPreset, WeatherLook> = {
 
 // Underwater look — a fixed cyan/blue palette independent of the surface weather preset,
 // since sunlight/moonlight above doesn't meaningfully change how it looks a few meters down.
-const UNDERWATER_BACKGROUND = '#0b4a68';
-const UNDERWATER_FOG_DENSITY = 0.05;
-const UNDERWATER_HEMI_SKY = '#2f8fb0';
-const UNDERWATER_HEMI_GROUND = '#052437';
-const UNDERWATER_HEMI_INTENSITY = 0.6;
-const UNDERWATER_AMBIENT_COLOR = '#7fd8ff';
-const UNDERWATER_AMBIENT_INTENSITY = 0.4;
+// Brighter and less foggy than a "deep ocean" look, since the reef now sits in a shallow band
+// just below the surface and should read as vibrant, not murky.
+const UNDERWATER_BACKGROUND = '#0f7a9c';
+const UNDERWATER_FOG_DENSITY = 0.035;
+const UNDERWATER_HEMI_SKY = '#4fc0dd';
+const UNDERWATER_HEMI_GROUND = '#063049';
+const UNDERWATER_HEMI_INTENSITY = 0.75;
+const UNDERWATER_AMBIENT_COLOR = '#a0ecff';
+const UNDERWATER_AMBIENT_INTENSITY = 0.55;
 
 export interface GameEngineOptions {
   birdType: BirdType;
@@ -152,8 +154,9 @@ const GLIDE_FLAP_MULTIPLIER = 0.55;
 
 // Over open water there is no altitude floor except the seabed itself, so the bird can dive
 // to (and below) true sea level. Over solid ground (terrain map, or an island on the ocean
-// map) the old hard floor above the surface is kept unchanged.
-const SEABED_FLOOR_Y = -34;
+// map) the old hard floor above the surface is kept unchanged. The seabed sits close to the
+// surface — a shallow, densely-populated reef band rather than a deep empty ocean.
+const SEABED_FLOOR_Y = -15;
 // Small hysteresis band around the water surface so skimming exactly at sea level doesn't
 // rapidly flicker between airborne/underwater state.
 const UNDERWATER_HYSTERESIS = 0.4;

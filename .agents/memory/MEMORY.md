@@ -7,3 +7,4 @@
 - [Decouple visual sweep from physics](decouple-visual-sweep-from-physics.md) — a one-shot animation (e.g. barrel roll) must not share a variable with a continuously-controlled physics value (e.g. steering roll), or the animation corrupts gameplay.
 - [Canvas mirror + coordinate-space overlay bug](canvas-mirror-coordinate-overlay.md) — a stored point already in mirrored-space must be un-mirrored before drawing on a canvas that gets CSS-flipped for display.
 - [Gesture fallback before detection guard](gesture-fallback-before-detection-guard.md) — a hand-lost fallback trigger fires with handDetected:false; check one-shot gesture flags before any `if (!handDetected) return` guard, not after.
+- [Box calibration via corner-pair averaging](box-calibration-corner-averaging.md) — 4-corner gesture calibration: average corners sharing a side, use asymmetric per-axis extents, deadzone in normalized space not raw pixels.

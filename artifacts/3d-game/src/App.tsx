@@ -1,21 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
-import { Hand, MoveHorizontal, MoveVertical, Zap, ArrowUp, X, Crosshair, ChevronLeft } from 'lucide-react';
+import { Hand, MoveHorizontal, MoveVertical, Zap, ArrowUp, X, Crosshair, ChevronLeft, RotateCcw } from 'lucide-react';
 import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from '@/game/GameEngine';
 import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
-import { HandTracker, MIN_SENSITIVITY, MAX_SENSITIVITY, type HandControlState } from '@/game/handControls';
+import {
+  HandTracker,
+  MIN_SENSITIVITY,
+  MAX_SENSITIVITY,
+  type HandControlState,
+  type ControlMode,
+  type CalibrationPoint,
+  type CalibrationCorner,
+} from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 
 type FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'denied' | 'unsupported';
 
 // The small in-flight HUD preview stays compact; the calibration screen gets a larger one
-// so the player can clearly see the crosshair and their hand while setting it up.
+// so the player can clearly see the crosshair/box and their hand while setting it up.
 const HUD_PREVIEW_WIDTH = 176;
 const HUD_PREVIEW_HEIGHT = 132;
 const CALIBRATION_PREVIEW_WIDTH = 360;
 const CALIBRATION_PREVIEW_HEIGHT = 270;
 
-const GESTURE_GUIDE = [
+const GESTURE_GUIDE_HAND = [
   {
     icon: Hand,
     title: 'Open hand, at your neutral center',
@@ -43,10 +51,90 @@ const GESTURE_GUIDE = [
   },
 ] as const;
 
+const GESTURE_GUIDE_FINGER = [
+  {
+    icon: Hand,
+    title: 'Point your index finger, at your neutral center',
+    description: 'Glide straight and steady — cursor-style flight.',
+  },
+  {
+    icon: MoveHorizontal,
+    title: 'Move your fingertip left / right',
+    description: 'Turn and roll that way.',
+  },
+  {
+    icon: MoveVertical,
+    title: 'Move your fingertip up / down',
+    description: 'Pitch up to climb, down to dive.',
+  },
+  {
+    icon: Zap,
+    title: 'Pinch thumb + finger, or fold your hand',
+    description: 'Speed boost — and an automatic barrel roll the instant you trigger it.',
+  },
+  {
+    icon: ArrowUp,
+    title: 'Flick your finger up, fast',
+    description: 'Triggers an automatic backflip along your flight path.',
+  },
+] as const;
+
+interface CalibrationPointsMap {
+  center: CalibrationPoint | null;
+  topLeft: CalibrationPoint | null;
+  topRight: CalibrationPoint | null;
+  bottomLeft: CalibrationPoint | null;
+  bottomRight: CalibrationPoint | null;
+}
+
+const EMPTY_CALIBRATION: CalibrationPointsMap = {
+  center: null,
+  topLeft: null,
+  topRight: null,
+  bottomLeft: null,
+  bottomRight: null,
+};
+
+type CalibrationStepKey = keyof CalibrationPointsMap;
+
+const CALIBRATION_STEPS: { key: CalibrationStepKey; title: string; instruction: string; buttonLabel: string }[] = [
+  {
+    key: 'center',
+    title: 'Step 1 of 5 — Neutral Center',
+    instruction:
+      'Hold your hand (or finger) comfortably in front of the camera, wherever feels natural. This is where "fly straight" will be.',
+    buttonLabel: 'Set Center',
+  },
+  {
+    key: 'topLeft',
+    title: 'Step 2 of 5 — Top-Left Boundary',
+    instruction: 'Move to the top-left edge of your comfortable range, then lock it in.',
+    buttonLabel: 'Set Top-Left',
+  },
+  {
+    key: 'topRight',
+    title: 'Step 3 of 5 — Top-Right Boundary',
+    instruction: 'Move to the top-right edge of your comfortable range, then lock it in.',
+    buttonLabel: 'Set Top-Right',
+  },
+  {
+    key: 'bottomLeft',
+    title: 'Step 4 of 5 — Bottom-Left Boundary',
+    instruction: 'Move to the bottom-left edge of your comfortable range, then lock it in.',
+    buttonLabel: 'Set Bottom-Left',
+  },
+  {
+    key: 'bottomRight',
+    title: 'Step 5 of 5 — Bottom-Right Boundary',
+    instruction: 'Move to the bottom-right edge of your comfortable range, then lock it in.',
+    buttonLabel: 'Set Bottom-Right',
+  },
+];
+
 /**
- * Draws the webcam frame + hand skeleton onto a preview canvas, optionally with a crosshair
- * over the configured neutral steering origin. Shared by both the small in-flight HUD
- * preview and the larger calibration-screen preview.
+ * Draws the webcam frame + hand skeleton onto a preview canvas, optionally with the
+ * in-progress calibration box (center crosshair + up to 4 corner markers) overlaid. Shared by
+ * both the small in-flight HUD preview and the larger calibration-screen preview.
  */
 function drawHandPreview(
   ctx: CanvasRenderingContext2D,
@@ -54,7 +142,8 @@ function drawHandPreview(
   landmarks: NormalizedLandmark[] | null,
   width: number,
   height: number,
-  origin?: { x: number; y: number } | null,
+  calibration?: CalibrationPointsMap | null,
+  controlMode?: ControlMode,
 ) {
   ctx.save();
   ctx.clearRect(0, 0, width, height);
@@ -78,43 +167,84 @@ function drawHandPreview(
       ctx.arc(point.x * width, point.y * height, 2.6, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    if (controlMode === 'finger') {
+      // Highlight the index fingertip distinctly — it's the actual tracked point in Single
+      // Finger Steering mode, not the palm center.
+      const tip = landmarks[8];
+      ctx.fillStyle = '#5eead4';
+      ctx.beginPath();
+      ctx.arc(tip.x * width, tip.y * height, 6, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
-  if (origin) {
-    // `origin` comes from HandTracker in its mirrored-frame coordinate space (X is already
-    // flipped to match the mirrored steering math), but this canvas draws the raw video and
-    // raw landmarks un-mirrored — the whole canvas gets flipped horizontally afterward via
-    // CSS (`scale-x-[-1]`) for display. So the crosshair must be un-mirrored back to raw
-    // canvas space here, or it would land on the wrong side once the CSS flip is applied.
-    const cx = (1 - origin.x) * width;
-    const cy = origin.y * height;
-    ctx.strokeStyle = 'rgba(94, 234, 212, 0.95)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(cx - 12, cy);
-    ctx.lineTo(cx + 12, cy);
-    ctx.moveTo(cx, cy - 12);
-    ctx.lineTo(cx, cy + 12);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
-    ctx.stroke();
+  if (calibration) {
+    // Calibration points come from HandTracker in its mirrored-frame coordinate space (X is
+    // already flipped to match the mirrored steering math), but this canvas draws the raw
+    // video and raw landmarks un-mirrored — the whole canvas gets flipped horizontally
+    // afterward via CSS (`scale-x-[-1]`) for display. So every point here must be un-mirrored
+    // back to raw canvas space, or it would land on the wrong side once the CSS flip applies.
+    const toCanvas = (p: CalibrationPoint) => ({ x: (1 - p.x) * width, y: p.y * height });
+
+    const corners = [calibration.topLeft, calibration.topRight, calibration.bottomRight, calibration.bottomLeft];
+    if (corners.every((c): c is CalibrationPoint => c !== null)) {
+      ctx.strokeStyle = 'rgba(94, 234, 212, 0.7)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      corners.forEach((p, i) => {
+        const c = toCanvas(p);
+        if (i === 0) ctx.moveTo(c.x, c.y);
+        else ctx.lineTo(c.x, c.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    for (const corner of [calibration.topLeft, calibration.topRight, calibration.bottomLeft, calibration.bottomRight]) {
+      if (!corner) continue;
+      const c = toCanvas(corner);
+      ctx.fillStyle = 'rgba(255, 138, 92, 0.95)';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (calibration.center) {
+      const c = toCanvas(calibration.center);
+      ctx.strokeStyle = 'rgba(94, 234, 212, 0.95)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(c.x - 12, c.y);
+      ctx.lineTo(c.x + 12, c.y);
+      ctx.moveTo(c.x, c.y - 12);
+      ctx.lineTo(c.x, c.y + 12);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
 
   ctx.restore();
 }
 
 /** Small deadzone-aware label describing the current hand pose, shown under the webcam preview. */
-function describeStatus(state: {
-  handDetected: boolean;
-  roll: number;
-  pitch: number;
-  boost: boolean;
-  barrelRolling: boolean;
-  backflipping: boolean;
-}) {
+function describeStatus(
+  state: {
+    handDetected: boolean;
+    roll: number;
+    pitch: number;
+    boost: boolean;
+    barrelRolling: boolean;
+    backflipping: boolean;
+  },
+  controlMode: ControlMode,
+) {
   if (!state.handDetected) return 'Status: No Hand Detected';
-  if (state.boost) return 'Status: Fist (Boost) Active';
+  if (state.boost) return controlMode === 'finger' ? 'Status: Pinch/Fold (Boost) Active' : 'Status: Fist (Boost) Active';
   if (state.barrelRolling) return 'Status: Barrel Roll Detected';
   if (state.backflipping) return 'Status: Backflip!';
   if (state.roll > 0) return 'Status: Steering Right';
@@ -139,7 +269,7 @@ function App() {
   const trackerRef = useRef<HandTracker | null>(null);
   const previewRafRef = useRef<number | null>(null);
   const latestLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
-  const neutralOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const calibrationPointsRef = useRef<CalibrationPointsMap>({ ...EMPTY_CALIBRATION });
   const barrelRollingRef = useRef(false);
   const backflippingRef = useRef(false);
 
@@ -156,11 +286,14 @@ function App() {
   const [selectedMap, setSelectedMap] = useState<MapType>('mountain');
   const [selectedWeather, setSelectedWeather] = useState<WeatherPreset>('sunny');
   const [ringChallengeEnabled, setRingChallengeEnabled] = useState(false);
+  const [controlMode, setControlMode] = useState<ControlMode>('hand');
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
 
   const [sensitivity, setSensitivity] = useState(1);
-  const [calibrated, setCalibrated] = useState(false);
+  const [calibrationStep, setCalibrationStep] = useState(0);
+
+  const calibrationComplete = calibrationStep >= CALIBRATION_STEPS.length;
 
   useEffect(() => {
     setBestScore(getBestScore());
@@ -184,15 +317,15 @@ function App() {
     const stream = videoRef.current?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((track) => track.stop());
     if (videoRef.current) videoRef.current.srcObject = null;
-    neutralOriginRef.current = null;
+    calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
   }, []);
 
   useEffect(() => stopEverything, [stopEverything]);
 
   // Requests camera access and starts hand tracking, then hands control to the calibration
   // screen. The GameEngine itself isn't created until "Start Flying" — the tracker's output
-  // is what carries the calibration (origin + sensitivity), so the engine doesn't need it
-  // directly.
+  // is what carries the calibration (center + box + sensitivity), so the engine doesn't need
+  // it directly.
   const handleContinueToCalibration = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setFlightState('unsupported');
@@ -201,8 +334,8 @@ function App() {
 
     setFlightState('requesting');
     setScore(0);
-    setCalibrated(false);
-    neutralOriginRef.current = null;
+    setCalibrationStep(0);
+    calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -227,18 +360,22 @@ function App() {
           setHandDetected(state.handDetected);
           setBoosting(state.boost);
           setStatusText(
-            describeStatus({
-              handDetected: state.handDetected,
-              roll: state.roll,
-              pitch: state.pitch,
-              boost: state.boost,
-              barrelRolling: barrelRollingRef.current,
-              backflipping: backflippingRef.current,
-            }),
+            describeStatus(
+              {
+                handDetected: state.handDetected,
+                roll: state.roll,
+                pitch: state.pitch,
+                boost: state.boost,
+                barrelRolling: barrelRollingRef.current,
+                backflipping: backflippingRef.current,
+              },
+              controlMode,
+            ),
           );
         },
         () => setFlightState('denied'),
       );
+      tracker.setControlMode(controlMode);
       trackerRef.current = tracker;
       await tracker.start();
 
@@ -247,11 +384,11 @@ function App() {
       console.error('Failed to start hand tracking', error);
       setFlightState('denied');
     }
-  }, []);
+  }, [controlMode]);
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
-  // (the larger calibration one, or the compact in-flight HUD one), including a crosshair
-  // over the configured neutral center while calibrating.
+  // (the larger calibration one, or the compact in-flight HUD one), including the in-progress
+  // calibration box while calibrating.
   useEffect(() => {
     if (flightState !== 'calibrating' && flightState !== 'flying') return;
     const video = videoRef.current;
@@ -261,12 +398,20 @@ function App() {
 
     const width = canvas.width;
     const height = canvas.height;
-    const showCrosshair = flightState === 'calibrating';
+    const showCalibration = flightState === 'calibrating';
 
     let rafId: number;
     const drawPreview = () => {
       if (video.readyState >= 2) {
-        drawHandPreview(ctx, video, latestLandmarksRef.current, width, height, showCrosshair ? neutralOriginRef.current : null);
+        drawHandPreview(
+          ctx,
+          video,
+          latestLandmarksRef.current,
+          width,
+          height,
+          showCalibration ? calibrationPointsRef.current : null,
+          controlMode,
+        );
       }
       rafId = requestAnimationFrame(drawPreview);
     };
@@ -274,13 +419,26 @@ function App() {
     previewRafRef.current = rafId;
 
     return () => cancelAnimationFrame(rafId);
-  }, [flightState]);
+  }, [flightState, controlMode]);
 
-  const handleSetNeutralCenter = useCallback(() => {
-    const captured = trackerRef.current?.captureNeutralCenter() ?? null;
-    if (!captured) return;
-    neutralOriginRef.current = captured;
-    setCalibrated(true);
+  // Captures whichever calibration point the current step needs (neutral center, or one of
+  // the 4 box corners), stores it for the overlay, and advances to the next step.
+  const handleCaptureCalibrationStep = useCallback(() => {
+    const step = CALIBRATION_STEPS[calibrationStep];
+    if (!step || !trackerRef.current) return;
+    const point =
+      step.key === 'center'
+        ? trackerRef.current.captureNeutralCenter()
+        : trackerRef.current.captureCorner(step.key as CalibrationCorner);
+    if (!point) return;
+    calibrationPointsRef.current = { ...calibrationPointsRef.current, [step.key]: point };
+    setCalibrationStep((s) => s + 1);
+  }, [calibrationStep]);
+
+  const handleResetCalibration = useCallback(() => {
+    trackerRef.current?.resetCalibration();
+    calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
+    setCalibrationStep(0);
   }, []);
 
   const handleSensitivityChange = useCallback((value: number) => {
@@ -338,7 +496,7 @@ function App() {
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
-    setCalibrated(false);
+    setCalibrationStep(0);
     setStatusText('Status: No Hand Detected');
   }, [stopEverything]);
 
@@ -346,6 +504,8 @@ function App() {
 
   const flying = flightState === 'flying';
   const calibrating = flightState === 'calibrating';
+  const gestureGuide = controlMode === 'finger' ? GESTURE_GUIDE_FINGER : GESTURE_GUIDE_HAND;
+  const currentCalibrationStep = CALIBRATION_STEPS[calibrationStep] ?? null;
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-background">
@@ -387,7 +547,11 @@ function App() {
 
           <div className="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 text-center">
             <p className="rounded-full bg-card/70 px-5 py-2 text-sm font-medium tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm">
-              {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
+              {handDetected
+                ? controlMode === 'finger'
+                  ? 'Point your finger to glide'
+                  : 'Tilt your palm to glide'
+                : 'Show your hand to the camera to steer'}
             </p>
           </div>
 
@@ -473,8 +637,42 @@ function App() {
               your hand. Here's how the controls work:
             </p>
 
+            <div className="mb-6 text-left">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                Control mode
+              </p>
+              <div className="flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={() => setControlMode('hand')}
+                  className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
+                    controlMode === 'hand'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                  }`}
+                >
+                  <span className="block text-sm font-semibold text-foreground">Full Hand Steering</span>
+                  <span className="block text-xs text-muted-foreground">Steer with your whole palm — the classic feel.</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setControlMode('finger')}
+                  className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
+                    controlMode === 'finger'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                  }`}
+                >
+                  <span className="block text-sm font-semibold text-foreground">Single Finger Steering</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Point your index finger for precise, cursor-style flight.
+                  </span>
+                </button>
+              </div>
+            </div>
+
             <ul className="mb-8 flex flex-col gap-3 text-left">
-              {GESTURE_GUIDE.map(({ icon: Icon, title, description }) => (
+              {gestureGuide.map(({ icon: Icon, title, description }) => (
                 <li
                   key={title}
                   className="flex items-center gap-3 rounded-2xl bg-muted/60 px-4 py-3"
@@ -640,10 +838,30 @@ function App() {
             </button>
 
             <h1 className="mb-2 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
-            <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
-              Hold your hand comfortably in front of the camera, wherever feels natural, then
-              set that as your neutral center — that's what "fly straight" will mean.
-            </p>
+
+            <div className="mb-4 flex items-center justify-center gap-1.5">
+              {CALIBRATION_STEPS.map((step, i) => (
+                <span
+                  key={step.key}
+                  className={`h-1.5 flex-1 rounded-full transition-colors ${
+                    i < calibrationStep ? 'bg-primary' : i === calibrationStep ? 'bg-primary/50' : 'bg-border'
+                  }`}
+                />
+              ))}
+            </div>
+
+            {!calibrationComplete && currentCalibrationStep && (
+              <>
+                <p className="mb-1 text-sm font-semibold text-foreground">{currentCalibrationStep.title}</p>
+                <p className="mb-5 text-sm leading-relaxed text-muted-foreground">{currentCalibrationStep.instruction}</p>
+              </>
+            )}
+            {calibrationComplete && (
+              <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
+                Your control range is calibrated — flight pitch and roll are now mapped to fit exactly
+                within the box you just drew.
+              </p>
+            )}
 
             <div className="mb-4 overflow-hidden rounded-2xl border border-border/60 bg-muted/40 shadow-inner">
               <canvas
@@ -654,22 +872,37 @@ function App() {
               />
             </div>
             <p className="mb-5 text-xs font-medium tracking-wide text-muted-foreground">
-              {handDetected ? 'Hand detected — hold it where you want "straight" to be.' : 'Show your hand to the camera.'}
+              {handDetected
+                ? `${controlMode === 'finger' ? 'Finger' : 'Hand'} detected — hold it at the target position.`
+                : `Show your ${controlMode === 'finger' ? 'finger' : 'hand'} to the camera.`}
             </p>
 
-            <button
-              type="button"
-              onClick={handleSetNeutralCenter}
-              disabled={!handDetected}
-              className="mb-2 flex w-full items-center justify-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Crosshair className="h-4 w-4" />
-              Set Neutral Hand Center
-            </button>
-            {calibrated && (
-              <p className="mb-5 text-xs font-semibold text-primary">Calibrated! Your neutral center is set.</p>
+            {!calibrationComplete && (
+              <button
+                type="button"
+                onClick={handleCaptureCalibrationStep}
+                disabled={!handDetected}
+                className="mb-2 flex w-full items-center justify-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Crosshair className="h-4 w-4" />
+                {currentCalibrationStep?.buttonLabel}
+              </button>
             )}
-            {!calibrated && <div className="mb-5" />}
+            {calibrationComplete && (
+              <p className="mb-2 text-xs font-semibold text-primary">Calibrated! Your control range is set.</p>
+            )}
+
+            {calibrationStep > 0 && (
+              <button
+                type="button"
+                onClick={handleResetCalibration}
+                className="mb-5 flex w-full items-center justify-center gap-1.5 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Start Over
+              </button>
+            )}
+            {calibrationStep === 0 && <div className="mb-5" />}
 
             <div className="mb-6 text-left">
               <div className="mb-2 flex items-center justify-between">
@@ -698,7 +931,8 @@ function App() {
             <button
               type="button"
               onClick={handleStartFlying}
-              className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90"
+              disabled={!calibrationComplete}
+              className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               Start Flying
             </button>

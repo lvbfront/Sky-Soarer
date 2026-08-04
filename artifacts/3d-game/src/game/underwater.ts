@@ -1,37 +1,48 @@
 import * as THREE from 'three';
 
-// Reef band: coral/flora/fish/shark all live in this depth range below the water surface
-// (y = 0 at water level), regardless of how deep the bird actually dives.
-const REEF_DEPTH_MIN = -26;
-const REEF_DEPTH_MAX = -16;
+// Reef band: coral/flora/anemones/fish/shark all live in this depth range below the water
+// surface (y = 0 at water level). The seabed sits close to the surface (see
+// GameEngine's SEABED_FLOOR_Y) so this reads as a shallow, richly populated reef rather than
+// a deep empty ocean.
+const REEF_DEPTH_MIN = -13;
+const REEF_DEPTH_MAX = -4;
 
-const REEF_SPAWN_INTERVAL = 1.4;
-const REEF_SPAWN_DISTANCE_MIN = 40;
-const REEF_SPAWN_DISTANCE_MAX = 85;
-const REEF_LATERAL_OFFSET = 40;
-const REEF_MAX_ACTIVE = 14;
-const REEF_DESPAWN_BEHIND_DISTANCE = 45;
+const REEF_SPAWN_INTERVAL = 0.55;
+const REEF_SPAWN_DISTANCE_MIN = 28;
+const REEF_SPAWN_DISTANCE_MAX = 65;
+const REEF_LATERAL_OFFSET = 32;
+const REEF_MAX_ACTIVE = 32;
+const REEF_DESPAWN_BEHIND_DISTANCE = 42;
 
-const FISH_COUNT = 7;
-const BUBBLE_POOL_SIZE = 160;
-const BUBBLE_SPAWN_PER_SECOND = 14;
+const FISH_PER_SCHOOL = 6;
+const BUBBLE_POOL_SIZE = 200;
+const BUBBLE_SPAWN_PER_SECOND = 18;
 const BUBBLE_RISE_SPEED_MIN = 1.4;
 const BUBBLE_RISE_SPEED_MAX = 2.6;
 const BUBBLE_LIFETIME = 3.2;
 const BUBBLE_HIDDEN_Y = -5000;
 
-const CAUSTIC_RAY_COUNT = 5;
+const CAUSTIC_RAY_COUNT = 7;
+
+type ReefKind = 'coral' | 'flora' | 'anemone';
 
 interface ActiveReefItem {
   group: THREE.Group;
   position: THREE.Vector3;
   forwardAtSpawn: THREE.Vector3;
   swayPhase: number;
-  isFlora: boolean;
+  kind: ReefKind;
+}
+
+interface FishSchool {
+  center: THREE.Vector3;
+  driftOffset: THREE.Vector3;
+  hueBase: number;
 }
 
 interface Fish {
   group: THREE.Group;
+  schoolIndex: number;
   phase: number;
   radius: number;
   speed: number;
@@ -46,10 +57,11 @@ interface CausticRay {
 }
 
 /**
- * Everything decorative that appears once the bird dives below the water's surface: coral
- * reefs and swaying flora, a schooling group of fish, a patrolling shark, pulsing caustic
- * light-ray planes, and a rising bubble stream. Lazily built on first `setActive(true)` so
- * mountain-map and airborne-only ocean sessions never pay any cost for it.
+ * Everything decorative that appears once the bird dives below the water's surface: bright
+ * low-poly coral, swaying sea anemones and glowing flora, several colorful schools of fish, a
+ * patrolling shark, pulsing caustic light-ray planes, and a rising bubble stream. Lazily built
+ * on first `setActive(true)` so mountain-map and airborne-only ocean sessions never pay any
+ * cost for it.
  */
 export class UnderwaterEnvironment {
   private scene: THREE.Scene;
@@ -61,12 +73,12 @@ export class UnderwaterEnvironment {
   private reefPool: ActiveReefItem[] = [];
   private reefSpawnTimer = 0;
   private coralMaterials: THREE.MeshStandardMaterial[] = [];
-  private floraMaterial: THREE.MeshStandardMaterial | null = null;
+  private floraMaterials: THREE.MeshStandardMaterial[] = [];
+  private anemoneMaterials: THREE.MeshStandardMaterial[] = [];
 
   private fishGroup: THREE.Group | null = null;
   private fish: Fish[] = [];
-  private schoolCenter = new THREE.Vector3();
-  private schoolDrift = new THREE.Vector3();
+  private schools: FishSchool[] = [];
 
   private sharkGroup: THREE.Group | null = null;
   private sharkPhase = 0;
@@ -113,21 +125,45 @@ export class UnderwaterEnvironment {
     const group = new THREE.Group();
     const bladeCount = 4 + Math.floor(Math.random() * 4);
     for (let i = 0; i < bladeCount; i += 1) {
-      const blade = new THREE.Mesh(new THREE.ConeGeometry(0.08, 1.6 + Math.random() * 1.2, 4), this.floraMaterial!);
+      const material = this.floraMaterials[Math.floor(Math.random() * this.floraMaterials.length)];
+      const blade = new THREE.Mesh(new THREE.ConeGeometry(0.08, 1.6 + Math.random() * 1.2, 4), material);
       blade.position.set((Math.random() - 0.5) * 1.8, 0.8, (Math.random() - 0.5) * 1.8);
-      blade.userData.baseX = blade.position.x;
       blade.userData.phaseOffset = Math.random() * Math.PI * 2;
       group.add(blade);
     }
     return group;
   }
 
-  private buildFishMesh(): THREE.Group {
+  /** Squat radial dome of thin tentacles — sways gently, glows brightly (anemones). */
+  private buildAnemone(): THREE.Group {
     const group = new THREE.Group();
+    const material = this.anemoneMaterials[Math.floor(Math.random() * this.anemoneMaterials.length)];
+    const base = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 4), material);
+    base.scale.y = 0.5;
+    group.add(base);
+    const tentacleCount = 7 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < tentacleCount; i += 1) {
+      const angle = (i / tentacleCount) * Math.PI * 2 + Math.random() * 0.2;
+      const radius = 0.22;
+      const tentacle = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.5 + Math.random() * 0.35, 4), material);
+      tentacle.position.set(Math.cos(angle) * radius, 0.2, Math.sin(angle) * radius);
+      tentacle.rotation.x = Math.cos(angle) * 0.5;
+      tentacle.rotation.z = -Math.sin(angle) * 0.5;
+      tentacle.userData.phaseOffset = Math.random() * Math.PI * 2;
+      group.add(tentacle);
+    }
+    return group;
+  }
+
+  private buildFishMesh(hueBase: number): THREE.Group {
+    const group = new THREE.Group();
+    const hue = (hueBase + (Math.random() - 0.5) * 0.06 + 1) % 1;
     const material = new THREE.MeshStandardMaterial({
-      color: new THREE.Color().setHSL(0.55 + Math.random() * 0.15, 0.6, 0.55),
+      color: new THREE.Color().setHSL(hue, 0.75, 0.6),
+      emissive: new THREE.Color().setHSL(hue, 0.75, 0.28),
+      emissiveIntensity: 0.18,
       flatShading: true,
-      roughness: 0.6,
+      roughness: 0.55,
     });
     const body = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.6, 6), material);
     body.rotation.z = Math.PI / 2;
@@ -170,30 +206,51 @@ export class UnderwaterEnvironment {
     if (this.built) return;
     this.built = true;
 
+    // Bright, slightly emissive materials so the shallow reef reads as vibrant even in the
+    // dimmer parts of the fog, rather than needing strong directional light to look colorful.
     this.coralMaterials = [
-      new THREE.MeshStandardMaterial({ color: '#ff7f6b', flatShading: true, roughness: 0.7 }),
-      new THREE.MeshStandardMaterial({ color: '#ffb347', flatShading: true, roughness: 0.7 }),
-      new THREE.MeshStandardMaterial({ color: '#c86bd6', flatShading: true, roughness: 0.7 }),
-      new THREE.MeshStandardMaterial({ color: '#5ec9c2', flatShading: true, roughness: 0.7 }),
+      new THREE.MeshStandardMaterial({ color: '#ff5d73', emissive: '#ff2d55', emissiveIntensity: 0.28, flatShading: true, roughness: 0.55 }),
+      new THREE.MeshStandardMaterial({ color: '#ffb238', emissive: '#ff8a00', emissiveIntensity: 0.28, flatShading: true, roughness: 0.55 }),
+      new THREE.MeshStandardMaterial({ color: '#c96bff', emissive: '#8b2dff', emissiveIntensity: 0.28, flatShading: true, roughness: 0.55 }),
+      new THREE.MeshStandardMaterial({ color: '#3fe0d0', emissive: '#00c2b3', emissiveIntensity: 0.28, flatShading: true, roughness: 0.55 }),
+      new THREE.MeshStandardMaterial({ color: '#ffe14d', emissive: '#ffb700', emissiveIntensity: 0.22, flatShading: true, roughness: 0.55 }),
     ];
-    this.floraMaterial = new THREE.MeshStandardMaterial({ color: '#2f9e6b', flatShading: true, roughness: 0.8 });
+    this.floraMaterials = [
+      new THREE.MeshStandardMaterial({ color: '#37e08a', emissive: '#0fae63', emissiveIntensity: 0.3, flatShading: true, roughness: 0.6 }),
+      new THREE.MeshStandardMaterial({ color: '#5ce6ff', emissive: '#1fb8e6', emissiveIntensity: 0.3, flatShading: true, roughness: 0.6 }),
+    ];
+    this.anemoneMaterials = [
+      new THREE.MeshStandardMaterial({ color: '#ff77c8', emissive: '#ff2f9e', emissiveIntensity: 0.35, flatShading: true, roughness: 0.5 }),
+      new THREE.MeshStandardMaterial({ color: '#ff9d4d', emissive: '#ff6a00', emissiveIntensity: 0.3, flatShading: true, roughness: 0.5 }),
+      new THREE.MeshStandardMaterial({ color: '#8f7bff', emissive: '#5c3dff', emissiveIntensity: 0.3, flatShading: true, roughness: 0.5 }),
+    ];
 
     this.reefGroup = new THREE.Group();
     this.scene.add(this.reefGroup);
 
+    // Several distinct schools (not just one), each with its own hue and drift offset relative
+    // to the bird, so the reef feels populated by multiple colorful groups of fish at once.
+    this.schools = [
+      { center: new THREE.Vector3(), driftOffset: new THREE.Vector3(0, -3, 10), hueBase: 0.55 },
+      { center: new THREE.Vector3(), driftOffset: new THREE.Vector3(-9, -5, 13), hueBase: 0.09 },
+      { center: new THREE.Vector3(), driftOffset: new THREE.Vector3(8, -2, 9), hueBase: 0.86 },
+    ];
     this.fishGroup = new THREE.Group();
     this.scene.add(this.fishGroup);
-    for (let i = 0; i < FISH_COUNT; i += 1) {
-      const group = this.buildFishMesh();
-      this.fishGroup.add(group);
-      this.fish.push({
-        group,
-        phase: Math.random() * Math.PI * 2,
-        radius: 2 + Math.random() * 3,
-        speed: 0.6 + Math.random() * 0.6,
-        heightOffset: (Math.random() - 0.5) * 3,
-      });
-    }
+    this.schools.forEach((school, schoolIndex) => {
+      for (let i = 0; i < FISH_PER_SCHOOL; i += 1) {
+        const group = this.buildFishMesh(school.hueBase);
+        this.fishGroup!.add(group);
+        this.fish.push({
+          group,
+          schoolIndex,
+          phase: Math.random() * Math.PI * 2,
+          radius: 2 + Math.random() * 3,
+          speed: 0.6 + Math.random() * 0.6,
+          heightOffset: (Math.random() - 0.5) * 3,
+        });
+      }
+    });
 
     this.sharkGroup = this.buildShark();
     this.scene.add(this.sharkGroup);
@@ -202,9 +259,9 @@ export class UnderwaterEnvironment {
     this.scene.add(this.causticGroup);
     for (let i = 0; i < CAUSTIC_RAY_COUNT; i += 1) {
       const material = new THREE.MeshBasicMaterial({
-        color: new THREE.Color('#bdf3ff'),
+        color: new THREE.Color('#d4f9ff'),
         transparent: true,
-        opacity: 0.12,
+        opacity: 0.14,
         side: THREE.DoubleSide,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
@@ -213,7 +270,7 @@ export class UnderwaterEnvironment {
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 14), material);
       mesh.rotation.x = -Math.PI / 2.3;
       this.causticGroup.add(mesh);
-      this.causticRays.push({ mesh, material, phase: Math.random() * Math.PI * 2, baseOpacity: 0.08 + Math.random() * 0.08 });
+      this.causticRays.push({ mesh, material, phase: Math.random() * Math.PI * 2, baseOpacity: 0.1 + Math.random() * 0.1 });
     }
 
     this.bubblePositions = new Float32Array(BUBBLE_POOL_SIZE * 3).fill(BUBBLE_HIDDEN_Y);
@@ -250,7 +307,8 @@ export class UnderwaterEnvironment {
   }
 
   private spawnReefItem(birdPosition: THREE.Vector3, forward: THREE.Vector3) {
-    const isFlora = Math.random() < 0.4;
+    const roll = Math.random();
+    const kind: ReefKind = roll < 0.45 ? 'coral' : roll < 0.72 ? 'flora' : 'anemone';
     const distance = REEF_SPAWN_DISTANCE_MIN + Math.random() * (REEF_SPAWN_DISTANCE_MAX - REEF_SPAWN_DISTANCE_MIN);
     const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
     const lateral = (Math.random() - 0.5) * 2 * REEF_LATERAL_OFFSET;
@@ -265,9 +323,9 @@ export class UnderwaterEnvironment {
     if (item) {
       item.group.visible = true;
     } else {
-      const group = isFlora ? this.buildFlora() : this.buildCoral();
+      const group = kind === 'coral' ? this.buildCoral() : kind === 'flora' ? this.buildFlora() : this.buildAnemone();
       this.reefGroup!.add(group);
-      item = { group, position, forwardAtSpawn: forward.clone(), swayPhase: Math.random() * Math.PI * 2, isFlora };
+      item = { group, position, forwardAtSpawn: forward.clone(), swayPhase: Math.random() * Math.PI * 2, kind };
     }
     item.position.copy(position);
     item.forwardAtSpawn.copy(forward);
@@ -303,14 +361,13 @@ export class UnderwaterEnvironment {
     }
     for (let i = this.activeReef.length - 1; i >= 0; i -= 1) {
       const item = this.activeReef[i];
-      if (item.isFlora) {
-        item.swayPhase += dt * 1.4;
+      if (item.kind !== 'coral') {
+        item.swayPhase += dt * (item.kind === 'anemone' ? 1.8 : 1.4);
+        const amplitude = item.kind === 'anemone' ? 0.25 : 0.18;
         for (const child of item.group.children) {
           const mesh = child as THREE.Mesh;
-          const baseX = (mesh.userData.baseX as number) ?? 0;
           const phaseOffset = (mesh.userData.phaseOffset as number) ?? 0;
-          mesh.rotation.z = Math.sin(item.swayPhase + phaseOffset) * 0.18;
-          mesh.position.x = baseX;
+          mesh.rotation.z = Math.sin(item.swayPhase + phaseOffset) * amplitude;
         }
       }
       const delta = birdPosition.clone().sub(item.position);
@@ -322,16 +379,25 @@ export class UnderwaterEnvironment {
       }
     }
 
-    // Schooling fish: a slowly drifting school center near the bird, with each fish
-    // wandering on its own sine orbit around that center.
-    const desiredSchoolCenter = birdPosition.clone().addScaledVector(forward, 10).add(new THREE.Vector3(0, -3, 0));
-    this.schoolCenter.lerp(desiredSchoolCenter, 0.02);
+    // Schooling fish: each school has its own slowly-drifting center near the bird (offset
+    // laterally/vertically/ahead so the schools don't overlap), with each fish wandering on
+    // its own sine orbit around that center.
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+    for (const school of this.schools) {
+      const desiredCenter = birdPosition
+        .clone()
+        .addScaledVector(forward, school.driftOffset.z)
+        .addScaledVector(right, school.driftOffset.x)
+        .add(new THREE.Vector3(0, school.driftOffset.y, 0));
+      school.center.lerp(desiredCenter, 0.02);
+    }
     for (const f of this.fish) {
+      const school = this.schools[f.schoolIndex];
       f.phase += dt * f.speed;
       f.group.position.set(
-        this.schoolCenter.x + Math.cos(f.phase) * f.radius,
-        this.schoolCenter.y + f.heightOffset + Math.sin(f.phase * 1.7) * 0.6,
-        this.schoolCenter.z + Math.sin(f.phase) * f.radius,
+        school.center.x + Math.cos(f.phase) * f.radius,
+        school.center.y + f.heightOffset + Math.sin(f.phase * 1.7) * 0.6,
+        school.center.z + Math.sin(f.phase) * f.radius,
       );
       f.group.rotation.y = -f.phase + Math.PI / 2;
     }
@@ -342,7 +408,7 @@ export class UnderwaterEnvironment {
     this.sharkPrevPosition.copy(this.sharkPosition);
     this.sharkPosition.set(
       birdPosition.x + Math.sin(this.sharkPhase) * 18,
-      REEF_DEPTH_MIN - 4 + Math.sin(this.sharkPhase * 0.6) * 2,
+      REEF_DEPTH_MIN - 2 + Math.sin(this.sharkPhase * 0.6) * 1.5,
       birdPosition.z + Math.cos(this.sharkPhase * 0.7) * 22,
     );
     if (this.sharkGroup) {
@@ -356,7 +422,7 @@ export class UnderwaterEnvironment {
     // Caustic rays: pulse opacity independently and drift a slow rotation, positioned above
     // wherever the bird currently is so they always read as "sunlight streaming down".
     if (this.causticGroup) {
-      this.causticGroup.position.set(birdPosition.x, 4, birdPosition.z);
+      this.causticGroup.position.set(birdPosition.x, 2, birdPosition.z);
       for (const ray of this.causticRays) {
         ray.phase += dt * 0.5;
         ray.material.opacity = ray.baseOpacity + Math.sin(ray.phase) * ray.baseOpacity * 0.6;
