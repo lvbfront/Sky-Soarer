@@ -9,3 +9,4 @@
 - [Gesture fallback before detection guard](gesture-fallback-before-detection-guard.md) — a hand-lost fallback trigger fires with handDetected:false; check one-shot gesture flags before any `if (!handDetected) return` guard, not after.
 - [Box calibration via corner-pair averaging](box-calibration-corner-averaging.md) — 4-corner gesture calibration: average corners sharing a side, use asymmetric per-axis extents, deadzone in normalized space not raw pixels.
 - [Mirrored-canvas pointer-drag mapping](mirrored-canvas-pointer-drag.md) — a pointer event's clientX/Y on a CSS-mirrored canvas maps directly to mirrored-space stored coordinates; no extra flip needed.
+- [MediaPipe per-frame error handling](mediapipe-frame-error-handling.md) — never re-throw from a `hands.send()` frame failure; log and skip, or one bad frame crashes the whole app.

@@ -179,6 +179,21 @@ export class RingManager {
     return collectedPosition;
   }
 
+  /** World position of the nearest active (uncollected) ring, for the directional guide arrow — or null if none are active. */
+  getNextRingPosition(birdPosition: THREE.Vector3): THREE.Vector3 | null {
+    if (this.active.length === 0) return null;
+    let closest = this.active[0];
+    let closestDistSq = birdPosition.distanceToSquared(closest.position);
+    for (let i = 1; i < this.active.length; i += 1) {
+      const distSq = birdPosition.distanceToSquared(this.active[i].position);
+      if (distSq < closestDistSq) {
+        closestDistSq = distSq;
+        closest = this.active[i];
+      }
+    }
+    return closest.position.clone();
+  }
+
   dispose() {
     for (const ring of this.active) {
       this.scene.remove(ring.mesh);

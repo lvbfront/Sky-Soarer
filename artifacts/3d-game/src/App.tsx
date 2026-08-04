@@ -436,6 +436,21 @@ function App() {
     setCalibrationStep(0);
   }, []);
 
+  // Switching control mode mid-calibration (or after finishing it) invalidates any points
+  // already captured, since they were captured for a different tracked point (palm vs
+  // fingertip) — so changing modes always resets calibration back to step 1.
+  const handleSelectControlMode = useCallback(
+    (mode: ControlMode) => {
+      if (mode === controlMode) return;
+      setControlMode(mode);
+      trackerRef.current?.setControlMode(mode);
+      trackerRef.current?.resetCalibration();
+      calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
+      setCalibrationStep(0);
+    },
+    [controlMode],
+  );
+
   // Drag-to-fine-tune: once a corner has been captured, the player can grab its handle
   // directly on the webcam preview and drag it to a new spot. Because the canvas is displayed
   // mirrored (CSS `scale-x-[-1]`) but draws calibration points un-mirrored (see
@@ -699,30 +714,6 @@ function App() {
               your hand. Here's how the controls work:
             </p>
 
-            <div className="mb-6 flex items-center justify-between rounded-2xl bg-muted/60 px-4 py-3 text-left">
-              <span>
-                <span className="block text-sm font-semibold text-foreground">Index Finger Pointer Mode</span>
-                <span className="block text-xs text-muted-foreground">
-                  Steer with just your index fingertip instead of your whole palm.
-                </span>
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={controlMode === 'finger'}
-                onClick={() => setControlMode((mode) => (mode === 'finger' ? 'hand' : 'finger'))}
-                className={`relative h-6 w-11 flex-none rounded-full transition-colors ${
-                  controlMode === 'finger' ? 'bg-primary' : 'bg-border'
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                    controlMode === 'finger' ? 'translate-x-5' : ''
-                  }`}
-                />
-              </button>
-            </div>
-
             <ul className="mb-8 flex flex-col gap-3 text-left">
               {gestureGuide.map(({ icon: Icon, title, description }) => (
                 <li
@@ -889,7 +880,39 @@ function App() {
               Back
             </button>
 
-            <h1 className="mb-2 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
+            <h1 className="mb-4 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
+
+            <div className="mb-5 text-left">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                Control Mode
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleSelectControlMode('hand')}
+                  className={`rounded-2xl border px-3 py-2.5 text-center transition ${
+                    controlMode === 'hand'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                  }`}
+                >
+                  <span className="block text-sm font-semibold text-foreground">Full Hand Steering</span>
+                  <span className="block text-xs text-muted-foreground">Track your whole palm</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSelectControlMode('finger')}
+                  className={`rounded-2xl border px-3 py-2.5 text-center transition ${
+                    controlMode === 'finger'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                  }`}
+                >
+                  <span className="block text-sm font-semibold text-foreground">Index Finger Steering</span>
+                  <span className="block text-xs text-muted-foreground">Track just your fingertip</span>
+                </button>
+              </div>
+            </div>
 
             <div className="mb-4 flex items-center justify-center gap-1.5">
               {CALIBRATION_STEPS.map((step, i) => (

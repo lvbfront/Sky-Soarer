@@ -8,6 +8,7 @@ import { CloudManager } from './clouds';
 import { RingBurstEffect } from './ringBurst';
 import { UnderwaterEnvironment } from './underwater';
 import { WaterBurstEffect } from './waterBurst';
+import { RingGuideArrow } from './ringGuide';
 import { WindAudio, SoundEffects } from './audio';
 import type { HandControlState } from './handControls';
 
@@ -95,12 +96,15 @@ const WEATHER_LOOKS: Record<WeatherPreset, WeatherLook> = {
 // Brighter and less foggy than a "deep ocean" look, since the reef now sits in a shallow band
 // just below the surface and should read as vibrant, not murky.
 const UNDERWATER_BACKGROUND = '#0f7a9c';
-const UNDERWATER_FOG_DENSITY = 0.035;
+// Lighter fog + brighter hemi/ambient than the original pass — the reef sits close to the
+// surface and needs to stay visible out to its full spawn distance instead of fogging out
+// to near-black well before items are close enough to read clearly.
+const UNDERWATER_FOG_DENSITY = 0.022;
 const UNDERWATER_HEMI_SKY = '#4fc0dd';
 const UNDERWATER_HEMI_GROUND = '#063049';
-const UNDERWATER_HEMI_INTENSITY = 0.75;
+const UNDERWATER_HEMI_INTENSITY = 0.9;
 const UNDERWATER_AMBIENT_COLOR = '#a0ecff';
-const UNDERWATER_AMBIENT_INTENSITY = 0.55;
+const UNDERWATER_AMBIENT_INTENSITY = 0.7;
 
 export interface GameEngineOptions {
   birdType: BirdType;
@@ -187,6 +191,7 @@ export class GameEngine {
   private ringBurst: RingBurstEffect | null;
   private underwaterEnv: UnderwaterEnvironment | null;
   private waterBurst: WaterBurstEffect | null;
+  private ringGuide: RingGuideArrow | null;
   private score = 0;
 
   private options: GameEngineOptions;
@@ -262,6 +267,7 @@ export class GameEngine {
     this.clouds = new CloudManager(this.scene);
     this.rings = options.ringChallenge ? new RingManager(this.scene) : null;
     this.ringBurst = options.ringChallenge ? new RingBurstEffect(this.scene) : null;
+    this.ringGuide = options.ringChallenge ? new RingGuideArrow(this.scene) : null;
 
     this.bird = new Bird(options.birdType);
     this.bird.group.position.set(0, 26, 0);
@@ -595,6 +601,7 @@ export class GameEngine {
         this.ringBurst?.trigger(collectedAt);
         this.options.onScoreChange?.(this.score);
       }
+      this.ringGuide?.update(dt, bird.position, forward, this.rings.getNextRingPosition(bird.position));
     }
     this.ringBurst?.update(dt);
     this.waterBurst?.update(dt);
@@ -672,6 +679,7 @@ export class GameEngine {
     this.ringBurst?.dispose();
     this.underwaterEnv?.dispose();
     this.waterBurst?.dispose();
+    this.ringGuide?.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);

@@ -7,12 +7,18 @@ import * as THREE from 'three';
 const REEF_DEPTH_MIN = -13;
 const REEF_DEPTH_MAX = -4;
 
-const REEF_SPAWN_INTERVAL = 0.55;
-const REEF_SPAWN_DISTANCE_MIN = 28;
-const REEF_SPAWN_DISTANCE_MAX = 65;
+const REEF_SPAWN_INTERVAL = 0.38;
+const REEF_SPAWN_DISTANCE_MIN = 16;
+const REEF_SPAWN_DISTANCE_MAX = 46;
 const REEF_LATERAL_OFFSET = 32;
 const REEF_MAX_ACTIVE = 32;
 const REEF_DESPAWN_BEHIND_DISTANCE = 42;
+// Used only once, the instant the bird dives (or re-dives): scatters a full population of
+// reef items in a ring all around the bird's current position instead of relying purely on
+// the ahead-only spawn stream above, which alone would leave the reef empty for the many
+// seconds it takes new items to spawn in and drift close enough to see through the fog.
+const REEF_SEED_DISTANCE_MIN = 6;
+const REEF_SEED_DISTANCE_MAX = 40;
 
 const FISH_PER_SCHOOL = 6;
 const BUBBLE_POOL_SIZE = 200;
@@ -26,6 +32,11 @@ const CAUSTIC_RAY_COUNT = 7;
 const CAUSTIC_FLOOR_RIPPLE_COUNT = 12;
 
 type ReefKind = 'coral' | 'flora' | 'anemone' | 'shell';
+
+function pickReefKind(): ReefKind {
+  const roll = Math.random();
+  return roll < 0.4 ? 'coral' : roll < 0.65 ? 'flora' : roll < 0.85 ? 'anemone' : 'shell';
+}
 
 interface ActiveReefItem {
   group: THREE.Group;
@@ -91,6 +102,7 @@ export class UnderwaterEnvironment {
   private activeReef: ActiveReefItem[] = [];
   private reefPool: ActiveReefItem[] = [];
   private reefSpawnTimer = 0;
+  private pendingSeed = false;
   private coralMaterials: THREE.MeshStandardMaterial[] = [];
   private floraMaterials: THREE.MeshStandardMaterial[] = [];
   private anemoneMaterials: THREE.MeshStandardMaterial[] = [];
@@ -369,8 +381,10 @@ export class UnderwaterEnvironment {
 
   /** Toggles visibility of the whole underwater scene; builds it lazily on first activation. */
   setActive(active: boolean) {
+    const activating = active && !this.active;
     if (active) this.ensureBuilt();
     this.active = active;
+    if (activating) this.pendingSeed = true;
     if (this.reefGroup) this.reefGroup.visible = active;
     if (this.fishGroup) this.fishGroup.visible = active;
     if (this.sharkGroup) this.sharkGroup.visible = active;
@@ -384,8 +398,6 @@ export class UnderwaterEnvironment {
   }
 
   private spawnReefItem(birdPosition: THREE.Vector3, forward: THREE.Vector3) {
-    const roll = Math.random();
-    const kind: ReefKind = roll < 0.4 ? 'coral' : roll < 0.65 ? 'flora' : roll < 0.85 ? 'anemone' : 'shell';
     const distance = REEF_SPAWN_DISTANCE_MIN + Math.random() * (REEF_SPAWN_DISTANCE_MAX - REEF_SPAWN_DISTANCE_MIN);
     const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
     const lateral = (Math.random() - 0.5) * 2 * REEF_LATERAL_OFFSET;
@@ -395,7 +407,26 @@ export class UnderwaterEnvironment {
       .addScaledVector(forward, distance)
       .addScaledVector(right, lateral);
     position.y = depth;
+    this.addReefItem(position, forward, pickReefKind());
+  }
 
+  /** Scatters one reef item at a random angle all the way around the bird (not just ahead),
+   * within a much closer range than the normal streaming spawn — used to instantly populate
+   * the reef the moment the bird dives, instead of waiting for the ahead-only stream to fill in. */
+  private spawnReefItemAround(birdPosition: THREE.Vector3, forward: THREE.Vector3) {
+    const angle = Math.random() * Math.PI * 2;
+    const distance = REEF_SEED_DISTANCE_MIN + Math.random() * (REEF_SEED_DISTANCE_MAX - REEF_SEED_DISTANCE_MIN);
+    const dir = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
+    const depth = REEF_DEPTH_MIN + Math.random() * (REEF_DEPTH_MAX - REEF_DEPTH_MIN);
+
+    const position = new THREE.Vector3(birdPosition.x, 0, birdPosition.z).addScaledVector(dir, distance);
+    position.y = depth;
+    // Seeded items still use the bird's current forward as their "forward at spawn" reference
+    // so the normal despawn-behind check continues to make sense once streaming resumes.
+    this.addReefItem(position, forward, pickReefKind());
+  }
+
+  private addReefItem(position: THREE.Vector3, forward: THREE.Vector3, kind: ReefKind) {
     let item = this.reefPool.pop();
     if (item) {
       item.group.visible = true;
@@ -409,12 +440,42 @@ export class UnderwaterEnvironment {
               ? this.buildAnemone()
               : this.buildShell();
       this.reefGroup!.add(group);
-      item = { group, position, forwardAtSpawn: forward.clone(), swayPhase: Math.random() * Math.PI * 2, kind };
+      item = { group, position: position.clone(), forwardAtSpawn: forward.clone(), swayPhase: Math.random() * Math.PI * 2, kind };
     }
     item.position.copy(position);
     item.forwardAtSpawn.copy(forward);
     item.group.position.copy(position);
     this.activeReef.push(item);
+  }
+
+  /**
+   * Called the instant the bird transitions into underwater (every dive, not just the first):
+   * snaps the fish schools straight to the bird's neighborhood, clears out any reef items left
+   * over from a previous dive far away, and instantly fills the reef around the bird's current
+   * position — so the world reads as alive from frame one instead of slowly populating in over
+   * several seconds. (The shark doesn't need seeding: its patrol position is already computed
+   * fresh from `birdPosition` every frame, never lerped, so it's never stuck far away.)
+   */
+  private seedOnActivate(birdPosition: THREE.Vector3, forward: THREE.Vector3) {
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+    for (const school of this.schools) {
+      const desiredCenter = birdPosition
+        .clone()
+        .addScaledVector(forward, school.driftOffset.z)
+        .addScaledVector(right, school.driftOffset.x);
+      desiredCenter.y = REEF_DEPTH_MAX - school.depthFraction * (REEF_DEPTH_MAX - REEF_DEPTH_MIN);
+      school.center.copy(desiredCenter);
+    }
+
+    for (const item of this.activeReef) {
+      item.group.visible = false;
+      this.reefPool.push(item);
+    }
+    this.activeReef = [];
+    while (this.activeReef.length < REEF_MAX_ACTIVE) {
+      this.spawnReefItemAround(birdPosition, forward);
+    }
+    this.reefSpawnTimer = REEF_SPAWN_INTERVAL;
   }
 
   private spawnBubble(origin: THREE.Vector3) {
@@ -436,6 +497,11 @@ export class UnderwaterEnvironment {
   /** Call every frame while active is true; safe to call while inactive too (becomes a no-op). */
   update(dt: number, birdPosition: THREE.Vector3, forward: THREE.Vector3) {
     if (!this.active || !this.built) return;
+
+    if (this.pendingSeed) {
+      this.pendingSeed = false;
+      this.seedOnActivate(birdPosition, forward);
+    }
 
     // Reef streaming: same spawn-ahead / despawn-behind pattern as CloudManager.
     this.reefSpawnTimer -= dt;

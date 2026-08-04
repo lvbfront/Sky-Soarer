@@ -42,9 +42,15 @@ const NORMALIZED_DEADZONE = 0.06;
 export const MIN_SENSITIVITY = 0.5;
 export const MAX_SENSITIVITY = 2.0;
 
-// A rapid upward flick faster than this (normalized units/sec, using the un-smoothed,
-// raw-frame Y velocity of whichever point is currently tracked) triggers the backflip gesture.
-const UPWARD_FLICK_VELOCITY_THRESHOLD = 1.8;
+// A rapid upward flick of the raw (un-smoothed) tracked point triggers the backflip gesture.
+// Detected over a short rolling time window (see `trackedYHistory`) rather than a single
+// frame-to-frame delta, so one noisy MediaPipe frame can't mask (or falsely fabricate) the
+// gesture, and detection stays consistent across different camera frame rates.
+const FLICK_WINDOW_MS = 220;
+// The tracked point must travel at least this far (in normalized 0..1 frame units) within the
+// window for it to count as an intentional flick rather than ordinary steering motion/jitter.
+const FLICK_MIN_DISTANCE = 0.1;
+const UPWARD_FLICK_VELOCITY_THRESHOLD = 1.1;
 const BACKFLIP_COOLDOWN_MS = 1200;
 // If the hand disappears shortly after a fast upward flick (common when the flick carries
 // the hand out of frame), still fire the backflip once rather than losing the gesture.
@@ -124,11 +130,10 @@ export class HandTracker {
   // screen's slider; 1 = default, >1 = twitchier, <1 = calmer.
   private sensitivity = 1;
 
-  // Upward-flick backflip tracking: raw (un-smoothed) tracked-point Y + its timestamp from the
-  // previous frame, used to compute a velocity estimate independent of the roll/pitch smoothing
-  // (smoothing would blur out a fast, brief flick — see project memory).
-  private lastRawTrackedY: number | null = null;
-  private lastFrameTimeMs: number | null = null;
+  // Upward-flick backflip tracking: a short rolling history of the raw (un-smoothed)
+  // tracked-point Y + its timestamp, used to compute a velocity estimate independent of the
+  // roll/pitch smoothing (smoothing would blur out a fast, brief flick — see project memory).
+  private trackedYHistory: { y: number; t: number }[] = [];
   private lastBackflipTimeMs = -Infinity;
   private lastFastUpwardFlickTimeMs = -Infinity;
 
@@ -168,7 +173,14 @@ export class HandTracker {
           try {
             await this.hands.send({ image: this.videoEl });
           } catch (error) {
-            if (!this.stopped) throw error;
+            // A single frame occasionally failing inside MediaPipe's internal WASM/WebGL
+            // pipeline (e.g. a transient GL context hiccup) shouldn't take down the whole
+            // tracking session with an uncaught rejection — log it and keep going, since the
+            // next frame usually recovers on its own. The narrower "deleted object" error from
+            // a stop()-during-flight race is already avoided by the `this.stopped` check above.
+            if (!this.stopped) {
+              console.warn('HandTracker: a frame failed to process, skipping it', error);
+            }
           }
         },
         width: 480,
@@ -192,6 +204,10 @@ export class HandTracker {
   /** Full Hand Steering tracks the palm center; Single Finger Steering tracks the index fingertip. */
   setControlMode(mode: ControlMode) {
     this.controlMode = mode;
+    // Switching which point is tracked (palm vs fingertip) can jump the raw Y position
+    // discontinuously — clear the flick-detection history so that jump can't be misread as a
+    // real upward flick.
+    this.trackedYHistory = [];
   }
 
   getControlMode() {
@@ -281,8 +297,7 @@ export class HandTracker {
       if (lostBackflip) {
         this.lastBackflipTimeMs = now;
       }
-      this.lastRawTrackedY = null;
-      this.lastFrameTimeMs = null;
+      this.trackedYHistory = [];
       this.onUpdate({
         handDetected: false,
         pitch: 0,
@@ -337,13 +352,21 @@ export class HandTracker {
 
     // Backflip gesture: a fast upward flick of the raw (un-smoothed) tracked point, tracked
     // independently of the smoothed steering signal so smoothing doesn't blur out the flick
-    // (see project memory on gesture-control smoothing tradeoffs).
+    // (see project memory on gesture-control smoothing tradeoffs). Detected over a short
+    // rolling window rather than a single frame-to-frame delta, so one noisy frame can't mask
+    // (or falsely fabricate) the gesture.
+    this.trackedYHistory.push({ y: trackedRawY, t: now });
+    while (this.trackedYHistory.length > 0 && now - this.trackedYHistory[0].t > FLICK_WINDOW_MS) {
+      this.trackedYHistory.shift();
+    }
     let backflip = false;
-    if (this.lastRawTrackedY !== null && this.lastFrameTimeMs !== null) {
-      const dtSec = (now - this.lastFrameTimeMs) / 1000;
-      if (dtSec > 0) {
-        // Y decreases upward on screen; convert to a positive "upward velocity".
-        const upwardVelocity = (this.lastRawTrackedY - trackedRawY) / dtSec;
+    if (this.trackedYHistory.length >= 2) {
+      const oldest = this.trackedYHistory[0];
+      const dtSec = (now - oldest.t) / 1000;
+      // Y decreases upward on screen, so a positive delta here means the point moved up.
+      const upwardDistance = oldest.y - trackedRawY;
+      if (dtSec > 0.03 && upwardDistance > FLICK_MIN_DISTANCE) {
+        const upwardVelocity = upwardDistance / dtSec;
         if (upwardVelocity > UPWARD_FLICK_VELOCITY_THRESHOLD) {
           this.lastFastUpwardFlickTimeMs = now;
           if (now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS) {
@@ -353,8 +376,6 @@ export class HandTracker {
         }
       }
     }
-    this.lastRawTrackedY = trackedRawY;
-    this.lastFrameTimeMs = now;
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];
