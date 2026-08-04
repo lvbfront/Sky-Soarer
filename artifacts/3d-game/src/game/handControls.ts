@@ -7,8 +7,8 @@ export interface HandControlState {
   pitch: number;
   /** -1 (bank left) .. 1 (bank right), smoothed */
   roll: number;
+  /** True while the hand is held in a closed fist (triggers boost + the barrel roll). */
   boost: boolean;
-  flipTriggered: boolean;
   landmarks: NormalizedLandmark[] | null;
 }
 
@@ -18,10 +18,6 @@ const PALM_POINTS = [0, 5, 9, 13, 17];
 const FIST_CLOSE_RATIO = 0.62;
 const FIST_OPEN_RATIO = 0.8;
 const FIST_HOLD_FRAMES = 3;
-
-// Angular velocity of the hand's heading line (radians/sec) that counts as a "flick".
-const FLIP_ANGULAR_VELOCITY_THRESHOLD = 8.5;
-const FLIP_COOLDOWN_MS = 1400;
 
 const SMOOTHING_ALPHA = 0.35;
 const STEER_GAIN = 2.6;
@@ -67,9 +63,7 @@ export class HandTracker {
   private fistFrameCounter = 0;
   private fistActive = false;
 
-  private lastHeadingAngle = 0;
-  private lastHeadingTime = 0;
-  private lastFlipTime = -Infinity;
+  private stopped = false;
 
   constructor(
     videoEl: HTMLVideoElement,
@@ -99,7 +93,15 @@ export class HandTracker {
     try {
       this.camera = new Camera(this.videoEl, {
         onFrame: async () => {
-          await this.hands.send({ image: this.videoEl });
+          // Guard against frames still in flight from `requestAnimationFrame` right after
+          // `stop()` was called — sending into (or closing) a Hands instance mid-flight is
+          // what triggers MediaPipe's "Cannot pass deleted object as a pointer" wasm error.
+          if (this.stopped) return;
+          try {
+            await this.hands.send({ image: this.videoEl });
+          } catch (error) {
+            if (!this.stopped) throw error;
+          }
         },
         width: 480,
         height: 360,
@@ -112,8 +114,11 @@ export class HandTracker {
   }
 
   stop() {
+    this.stopped = true;
     this.camera?.stop();
-    void this.hands.close();
+    this.hands.close().catch(() => {
+      // Benign during teardown if a send() was already in flight when stop() was called.
+    });
   }
 
   private handleResults(results: Results) {
@@ -126,7 +131,6 @@ export class HandTracker {
         pitch: 0,
         roll: 0,
         boost: false,
-        flipTriggered: false,
         landmarks: null,
       });
       return;
@@ -196,39 +200,11 @@ export class HandTracker {
       this.fistFrameCounter = 0;
     }
 
-    // Air flip: watch the angular velocity of the line across the knuckles (a fast wrist
-    // twist spins this line quickly even though the smoothed steering signal stays calm).
-    const indexMcp = hand[5];
-    const pinkyMcp = hand[17];
-    const headingAngle = Math.atan2(pinkyMcp.y - indexMcp.y, pinkyMcp.x - indexMcp.x);
-    const now = performance.now();
-    let flipTriggered = false;
-
-    if (this.lastHeadingTime > 0) {
-      const dt = (now - this.lastHeadingTime) / 1000;
-      if (dt > 0.001) {
-        let delta = headingAngle - this.lastHeadingAngle;
-        while (delta > Math.PI) delta -= Math.PI * 2;
-        while (delta < -Math.PI) delta += Math.PI * 2;
-        const angularVelocity = Math.abs(delta / dt);
-        if (
-          angularVelocity > FLIP_ANGULAR_VELOCITY_THRESHOLD &&
-          now - this.lastFlipTime > FLIP_COOLDOWN_MS
-        ) {
-          flipTriggered = true;
-          this.lastFlipTime = now;
-        }
-      }
-    }
-    this.lastHeadingAngle = headingAngle;
-    this.lastHeadingTime = now;
-
     this.onUpdate({
       handDetected: true,
       pitch,
       roll,
       boost: this.fistActive,
-      flipTriggered,
       landmarks: hand,
     });
   }

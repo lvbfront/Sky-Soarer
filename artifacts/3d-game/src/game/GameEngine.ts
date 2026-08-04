@@ -1,12 +1,32 @@
 import * as THREE from 'three';
-import { Bird } from './bird';
+import { Bird, type BirdType } from './bird';
 import { TerrainManager } from './terrain';
-import { WindAudio } from './audio';
+import { OceanManager } from './ocean';
+import { RingManager } from './rings';
+import { SplashEffect } from './splash';
+import { WindAudio, SoundEffects } from './audio';
 import type { HandControlState } from './handControls';
+
+export type MapType = 'mountain' | 'ocean';
+
+export const MAP_OPTIONS: { id: MapType; name: string; tagline: string }[] = [
+  { id: 'mountain', name: 'Mountain Valley', tagline: 'Rolling procedural hills.' },
+  { id: 'ocean', name: 'Tropical Ocean & Islands', tagline: 'Skim the waves between palm-dotted islands.' },
+];
+
+export interface GameEngineOptions {
+  birdType: BirdType;
+  mapType: MapType;
+  ringChallenge: boolean;
+  onScoreChange?: (score: number) => void;
+  onBarrelRoll?: () => void;
+}
 
 const BASE_SPEED = 9;
 const BOOST_SPEED = 20;
 const SPEED_LERP = 0.04;
+const RING_SPEED_PULSE = 7;
+const SPEED_PULSE_DECAY_PER_SEC = 9;
 
 const BASE_FOV = 58;
 const BOOST_FOV = 72;
@@ -32,9 +52,17 @@ export class GameEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
-  private terrain: TerrainManager;
+  private environment: TerrainManager | OceanManager;
+  private ocean: OceanManager | null;
   private bird: Bird;
   private wind = new WindAudio();
+  private sfx = new SoundEffects();
+
+  private rings: RingManager | null;
+  private splash: SplashEffect | null;
+  private score = 0;
+
+  private options: GameEngineOptions;
 
   private clock = new THREE.Clock();
   private animationHandle: number | null = null;
@@ -45,6 +73,7 @@ export class GameEngine {
   private currentRoll = 0;
 
   private speed = BASE_SPEED;
+  private speedPulse = 0;
   private boosting = false;
 
   private flipProgress: number | null = null; // null when not flipping
@@ -56,10 +85,13 @@ export class GameEngine {
 
   private disposed = false;
 
-  constructor(private container: HTMLDivElement) {
+  constructor(private container: HTMLDivElement, options: GameEngineOptions) {
+    this.options = options;
+
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color('#cfe8f0');
-    this.scene.fog = new THREE.FogExp2(0xdcefe6, 0.0068);
+    const isOcean = options.mapType === 'ocean';
+    this.scene.background = new THREE.Color(isOcean ? '#bfe6ef' : '#cfe8f0');
+    this.scene.fog = new THREE.FogExp2(isOcean ? 0xbfe6ef : 0xdcefe6, 0.0068);
 
     this.camera = new THREE.PerspectiveCamera(
       BASE_FOV,
@@ -75,24 +107,35 @@ export class GameEngine {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 
-    this.buildSky();
+    this.buildSky(isOcean);
     this.buildLighting();
 
-    this.terrain = new TerrainManager(this.scene);
-    this.bird = new Bird();
+    if (isOcean) {
+      const ocean = new OceanManager(this.scene);
+      this.environment = ocean;
+      this.ocean = ocean;
+      this.splash = new SplashEffect(this.scene);
+    } else {
+      this.environment = new TerrainManager(this.scene);
+      this.ocean = null;
+      this.splash = null;
+    }
+    this.rings = options.ringChallenge ? new RingManager(this.scene) : null;
+
+    this.bird = new Bird(options.birdType);
     this.bird.group.position.set(0, 26, 0);
     this.scene.add(this.bird.group);
 
-    this.terrain.update(this.bird.group.position);
+    this.environment.update(this.bird.group.position);
 
     window.addEventListener('resize', this.handleResize);
   }
 
-  private buildSky() {
+  private buildSky(isOcean: boolean) {
     // Soft pastel gradient sky using a large inverted sphere with a vertex-colored gradient.
     const skyGeometry = new THREE.SphereGeometry(900, 24, 16);
-    const colorTop = new THREE.Color('#a9d3e6');
-    const colorBottom = new THREE.Color('#fbe3c9');
+    const colorTop = new THREE.Color(isOcean ? '#7ec3e0' : '#a9d3e6');
+    const colorBottom = new THREE.Color(isOcean ? '#fdeecb' : '#fbe3c9');
     const position = skyGeometry.attributes.position;
     const colors: number[] = [];
     for (let i = 0; i < position.count; i += 1) {
@@ -180,11 +223,16 @@ export class GameEngine {
 
     this.targetPitch = state.pitch;
     this.targetRoll = state.roll;
+
+    const wasBoosting = this.boosting;
     this.boosting = state.boost;
 
-    if (state.flipTriggered && this.flipProgress === null) {
+    // The barrel roll now fires automatically the instant a fist closes (boost starts),
+    // instead of needing a separate fast wrist-flick gesture.
+    if (!wasBoosting && this.boosting && this.flipProgress === null) {
       this.flipProgress = 0;
       this.flipStartRoll = this.currentRoll;
+      this.options.onBarrelRoll?.();
     }
   }
 
@@ -211,7 +259,8 @@ export class GameEngine {
     // Turning: bank angle steers yaw, like a real glider.
     this.headingYaw -= rollAngle * dt * 0.6;
 
-    const targetSpeed = this.boosting ? BOOST_SPEED : BASE_SPEED;
+    this.speedPulse = Math.max(0, this.speedPulse - SPEED_PULSE_DECAY_PER_SEC * dt);
+    const targetSpeed = (this.boosting ? BOOST_SPEED : BASE_SPEED) + this.speedPulse;
     this.speed += (targetSpeed - this.speed) * SPEED_LERP;
 
     const forward = new THREE.Vector3(
@@ -223,7 +272,7 @@ export class GameEngine {
     const bird = this.bird.group;
     bird.position.addScaledVector(forward, this.speed * dt);
 
-    const minAltitude = this.terrain.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
+    const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
     if (bird.position.y < minAltitude) bird.position.y = minAltitude;
     if (bird.position.y > 140) bird.position.y = 140;
 
@@ -239,7 +288,23 @@ export class GameEngine {
     const flapSpeed = this.boosting ? 16 : 7;
     this.bird.update(dt, flapSpeed);
 
-    this.terrain.update(bird.position);
+    this.environment.update(bird.position);
+
+    if (this.rings) {
+      const collected = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
+      if (collected) {
+        this.score += 1;
+        this.speedPulse = RING_SPEED_PULSE;
+        this.sfx.playChime();
+        this.options.onScoreChange?.(this.score);
+      }
+    }
+
+    if (this.splash && this.ocean) {
+      const waterSurfaceY = this.ocean.heightAtWorld(bird.position.x, bird.position.z);
+      const isOverWater = this.ocean.isOverWater(bird.position.x, bird.position.z);
+      this.splash.update(dt, bird.position, forward, waterSurfaceY, isOverWater);
+    }
 
     // Camera follow: heavy lerp for a floaty, relaxed feel.
     const behind = forward.clone().multiplyScalar(-CAMERA_BACK_DISTANCE);
@@ -263,6 +328,10 @@ export class GameEngine {
     return this.speed;
   }
 
+  getScore() {
+    return this.score;
+  }
+
   isBoosting() {
     return this.boosting;
   }
@@ -276,6 +345,9 @@ export class GameEngine {
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     window.removeEventListener('resize', this.handleResize);
     this.wind.stop();
+    this.sfx.dispose();
+    this.rings?.dispose();
+    this.splash?.dispose();
     this.renderer.dispose();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);

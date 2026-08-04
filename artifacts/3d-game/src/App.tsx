@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
-import { Hand, MoveHorizontal, MoveVertical, RotateCw, Zap, X } from 'lucide-react';
-import { GameEngine } from '@/game/GameEngine';
+import { Hand, MoveHorizontal, MoveVertical, Zap, X } from 'lucide-react';
+import { GameEngine, MAP_OPTIONS, type MapType } from '@/game/GameEngine';
+import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
 import { HandTracker, type HandControlState } from '@/game/handControls';
 
 type FlightState = 'idle' | 'requesting' | 'flying' | 'denied' | 'unsupported';
@@ -28,12 +29,7 @@ const GESTURE_GUIDE = [
   {
     icon: Zap,
     title: 'Close into a fist',
-    description: 'Speed boost.',
-  },
-  {
-    icon: RotateCw,
-    title: 'Flick your wrist fast',
-    description: 'Trigger a barrel roll.',
+    description: 'Speed boost — and an automatic barrel roll the instant your fist closes.',
   },
 ] as const;
 
@@ -102,6 +98,11 @@ function App() {
   const [barrelRolling, setBarrelRolling] = useState(false);
   const [statusText, setStatusText] = useState('Status: No Hand Detected');
 
+  const [selectedBird, setSelectedBird] = useState<BirdType>('pigeon');
+  const [selectedMap, setSelectedMap] = useState<MapType>('mountain');
+  const [ringChallengeEnabled, setRingChallengeEnabled] = useState(false);
+  const [score, setScore] = useState(0);
+
   useEffect(() => {
     barrelRollingRef.current = barrelRolling;
   }, [barrelRolling]);
@@ -127,6 +128,7 @@ function App() {
     }
 
     setFlightState('requesting');
+    setScore(0);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -139,7 +141,13 @@ function App() {
       video.srcObject = stream;
       await video.play();
 
-      const engine = new GameEngine(canvasContainerRef.current);
+      const engine = new GameEngine(canvasContainerRef.current, {
+        birdType: selectedBird,
+        mapType: selectedMap,
+        ringChallenge: ringChallengeEnabled,
+        onScoreChange: (total) => setScore(total),
+        onBarrelRoll: () => setBarrelRolling(true),
+      });
       engineRef.current = engine;
       await engine.start();
 
@@ -150,14 +158,13 @@ function App() {
           latestLandmarksRef.current = state.landmarks;
           setHandDetected(state.handDetected);
           setBoosting(state.boost);
-          if (state.flipTriggered) setBarrelRolling(true);
           setStatusText(
             describeStatus({
               handDetected: state.handDetected,
               roll: state.roll,
               pitch: state.pitch,
               boost: state.boost,
-              barrelRolling: state.flipTriggered || barrelRollingRef.current,
+              barrelRolling: barrelRollingRef.current,
             }),
           );
         },
@@ -173,7 +180,7 @@ function App() {
       console.error('Failed to start flight', error);
       setFlightState('denied');
     }
-  }, []);
+  }, [selectedBird, selectedMap, ringChallengeEnabled]);
 
   // Starts the webcam-preview draw loop only once the preview canvas is actually mounted
   // (flightState === 'flying'), instead of grabbing the ref before React has rendered it.
@@ -222,6 +229,14 @@ function App() {
               {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
             </p>
           </div>
+
+          {ringChallengeEnabled && (
+            <div className="pointer-events-none absolute left-6 top-6">
+              <p className="rounded-full bg-card/80 px-5 py-2 text-sm font-semibold tracking-wide text-foreground shadow-sm backdrop-blur-sm">
+                Score: {score}
+              </p>
+            </div>
+          )}
 
           <div className="absolute right-6 top-6">
             <button
@@ -277,11 +292,11 @@ function App() {
             </p>
             <h1 className="mb-3 text-3xl font-semibold text-foreground">Bird Flight</h1>
             <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-              Glide over endless rolling hills using nothing but your hand. Here's how the
-              controls work:
+              Glide over endless landscapes using nothing but your hand. Here's how the controls
+              work:
             </p>
 
-            <ul className="mb-6 flex flex-col gap-3 text-left">
+            <ul className="mb-8 flex flex-col gap-3 text-left">
               {GESTURE_GUIDE.map(({ icon: Icon, title, description }) => (
                 <li
                   key={title}
@@ -297,6 +312,76 @@ function App() {
                 </li>
               ))}
             </ul>
+
+            <div className="mb-6 text-left">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                Choose your bird
+              </p>
+              <div className="flex flex-col gap-2">
+                {BIRD_OPTIONS.map((bird) => (
+                  <button
+                    key={bird.id}
+                    type="button"
+                    onClick={() => setSelectedBird(bird.id)}
+                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
+                      selectedBird === bird.id
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold text-foreground">{bird.name}</span>
+                    <span className="block text-xs text-muted-foreground">{bird.tagline}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-6 text-left">
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
+                Choose your map
+              </p>
+              <div className="flex flex-col gap-2">
+                {MAP_OPTIONS.map((map) => (
+                  <button
+                    key={map.id}
+                    type="button"
+                    onClick={() => setSelectedMap(map.id)}
+                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
+                      selectedMap === map.id
+                        ? 'border-primary bg-primary/10'
+                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+                    }`}
+                  >
+                    <span className="block text-sm font-semibold text-foreground">{map.name}</span>
+                    <span className="block text-xs text-muted-foreground">{map.tagline}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mb-6 flex items-center justify-between rounded-2xl bg-muted/60 px-4 py-3 text-left">
+              <span>
+                <span className="block text-sm font-semibold text-foreground">Ring Challenge</span>
+                <span className="block text-xs text-muted-foreground">
+                  Fly through glowing rings to score points.
+                </span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={ringChallengeEnabled}
+                onClick={() => setRingChallengeEnabled((v) => !v)}
+                className={`relative h-6 w-11 flex-none rounded-full transition-colors ${
+                  ringChallengeEnabled ? 'bg-primary' : 'bg-border'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                    ringChallengeEnabled ? 'translate-x-5' : ''
+                  }`}
+                />
+              </button>
+            </div>
 
             {flightState === 'denied' && (
               <p className="mb-4 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
