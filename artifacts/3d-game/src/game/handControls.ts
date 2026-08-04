@@ -7,7 +7,7 @@ export interface HandControlState {
   pitch: number;
   /** -1 (bank left) .. 1 (bank right), smoothed */
   roll: number;
-  /** True while the hand is held in a closed fist, or (Finger mode) pinched/folded (triggers boost + the barrel roll). */
+  /** True while the hand is held in a closed fist / fingers folded into the palm (triggers boost + the barrel roll), in either control mode. */
   boost: boolean;
   /** One-shot pulse: true for exactly the frame a fast upward flick is detected. */
   backflip: boolean;
@@ -26,18 +26,11 @@ export interface CalibrationPoint {
 
 const FINGER_TIPS = [4, 8, 12, 16, 20];
 const PALM_POINTS = [0, 5, 9, 13, 17];
-const THUMB_TIP = 4;
 const INDEX_TIP = 8;
 
 const FIST_CLOSE_RATIO = 0.62;
 const FIST_OPEN_RATIO = 0.8;
 const FIST_HOLD_FRAMES = 3;
-
-// Index+thumb pinch, used for Boost in Single Finger Steering mode (distance normalized by
-// hand scale, same idea as the fist ratio below but only between two fingertips).
-const PINCH_CLOSE_RATIO = 0.35;
-const PINCH_OPEN_RATIO = 0.55;
-const PINCH_HOLD_FRAMES = 3;
 
 const SMOOTHING_ALPHA = 0.35;
 
@@ -111,9 +104,6 @@ export class HandTracker {
 
   private fistFrameCounter = 0;
   private fistActive = false;
-
-  private pinchFrameCounter = 0;
-  private pinchActive = false;
 
   private stopped = false;
 
@@ -248,6 +238,16 @@ export class HandTracker {
     return point;
   }
 
+  /**
+   * Directly sets one corner of the calibration box to an explicit point (rather than reading
+   * the live tracked position, as `captureCorner` does) and recomputes the box immediately.
+   * Used by the calibration screen's drag-to-fine-tune corner handles.
+   */
+  setCorner(corner: CalibrationCorner, point: CalibrationPoint) {
+    this.corners[corner] = { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
+    this.recomputeBox();
+  }
+
   /** Clears the neutral center and all captured corners back to their defaults. */
   resetCalibration() {
     this.originX = 0.5;
@@ -273,7 +273,6 @@ export class HandTracker {
 
     if (!hand) {
       this.fistFrameCounter = 0;
-      this.pinchFrameCounter = 0;
       // If the hand vanished shortly after a fast upward flick (the flick often carries the
       // hand out of the webcam frame entirely), still honor the gesture once here.
       const lostBackflip =
@@ -387,30 +386,9 @@ export class HandTracker {
       this.fistFrameCounter = 0;
     }
 
-    // Pinch detection (index tip <-> thumb tip distance, normalized by hand size) — only used
-    // to trigger Boost in Single Finger Steering mode, alongside a folded hand (fist).
-    const pinchRatio = dist2D(hand[THUMB_TIP], hand[INDEX_TIP]) / handScale;
-    if (this.pinchActive) {
-      if (pinchRatio > PINCH_OPEN_RATIO) {
-        this.pinchFrameCounter += 1;
-        if (this.pinchFrameCounter >= PINCH_HOLD_FRAMES) {
-          this.pinchActive = false;
-          this.pinchFrameCounter = 0;
-        }
-      } else {
-        this.pinchFrameCounter = 0;
-      }
-    } else if (pinchRatio < PINCH_CLOSE_RATIO) {
-      this.pinchFrameCounter += 1;
-      if (this.pinchFrameCounter >= PINCH_HOLD_FRAMES) {
-        this.pinchActive = true;
-        this.pinchFrameCounter = 0;
-      }
-    } else {
-      this.pinchFrameCounter = 0;
-    }
-
-    const boost = this.controlMode === 'finger' ? this.fistActive || this.pinchActive : this.fistActive;
+    // Boost is a closed fist / folded hand in both control modes — Finger mode only changes
+    // which point steers, not the boost gesture.
+    const boost = this.fistActive;
 
     this.onUpdate({
       handDetected: true,

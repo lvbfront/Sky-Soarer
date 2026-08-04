@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
 import { Hand, MoveHorizontal, MoveVertical, Zap, ArrowUp, X, Crosshair, ChevronLeft, RotateCcw } from 'lucide-react';
 import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from '@/game/GameEngine';
@@ -69,8 +69,8 @@ const GESTURE_GUIDE_FINGER = [
   },
   {
     icon: Zap,
-    title: 'Pinch thumb + finger, or fold your hand',
-    description: 'Speed boost — and an automatic barrel roll the instant you trigger it.',
+    title: 'Close into a fist',
+    description: 'Speed boost — and an automatic barrel roll the instant your fist closes.',
   },
   {
     icon: ArrowUp,
@@ -232,19 +232,16 @@ function drawHandPreview(
 }
 
 /** Small deadzone-aware label describing the current hand pose, shown under the webcam preview. */
-function describeStatus(
-  state: {
-    handDetected: boolean;
-    roll: number;
-    pitch: number;
-    boost: boolean;
-    barrelRolling: boolean;
-    backflipping: boolean;
-  },
-  controlMode: ControlMode,
-) {
+function describeStatus(state: {
+  handDetected: boolean;
+  roll: number;
+  pitch: number;
+  boost: boolean;
+  barrelRolling: boolean;
+  backflipping: boolean;
+}) {
   if (!state.handDetected) return 'Status: No Hand Detected';
-  if (state.boost) return controlMode === 'finger' ? 'Status: Pinch/Fold (Boost) Active' : 'Status: Fist (Boost) Active';
+  if (state.boost) return 'Status: Fist (Boost) Active';
   if (state.barrelRolling) return 'Status: Barrel Roll Detected';
   if (state.backflipping) return 'Status: Backflip!';
   if (state.roll > 0) return 'Status: Steering Right';
@@ -270,6 +267,7 @@ function App() {
   const previewRafRef = useRef<number | null>(null);
   const latestLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const calibrationPointsRef = useRef<CalibrationPointsMap>({ ...EMPTY_CALIBRATION });
+  const draggingCornerRef = useRef<CalibrationCorner | null>(null);
   const barrelRollingRef = useRef(false);
   const backflippingRef = useRef(false);
 
@@ -360,17 +358,14 @@ function App() {
           setHandDetected(state.handDetected);
           setBoosting(state.boost);
           setStatusText(
-            describeStatus(
-              {
-                handDetected: state.handDetected,
-                roll: state.roll,
-                pitch: state.pitch,
-                boost: state.boost,
-                barrelRolling: barrelRollingRef.current,
-                backflipping: backflippingRef.current,
-              },
-              controlMode,
-            ),
+            describeStatus({
+              handDetected: state.handDetected,
+              roll: state.roll,
+              pitch: state.pitch,
+              boost: state.boost,
+              barrelRolling: barrelRollingRef.current,
+              backflipping: backflippingRef.current,
+            }),
           );
         },
         () => setFlightState('denied'),
@@ -439,6 +434,73 @@ function App() {
     trackerRef.current?.resetCalibration();
     calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
     setCalibrationStep(0);
+  }, []);
+
+  // Drag-to-fine-tune: once a corner has been captured, the player can grab its handle
+  // directly on the webcam preview and drag it to a new spot. Because the canvas is displayed
+  // mirrored (CSS `scale-x-[-1]`) but draws calibration points un-mirrored (see
+  // drawHandPreview), a pointer's fractional position within the element's own bounding box
+  // maps 1:1 onto the stored (mirrored-space) calibration point — no extra flip needed here.
+  const getCalibrationPointFromEvent = useCallback((event: { clientX: number; clientY: number }): CalibrationPoint | null => {
+    const canvas = calibrationPreviewCanvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return null;
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  }, []);
+
+  const findNearestCorner = useCallback((point: CalibrationPoint): CalibrationCorner | null => {
+    const HIT_RADIUS = 0.09;
+    const corners = calibrationPointsRef.current;
+    let nearest: CalibrationCorner | null = null;
+    let nearestDist = HIT_RADIUS;
+    (['topLeft', 'topRight', 'bottomLeft', 'bottomRight'] as CalibrationCorner[]).forEach((corner) => {
+      const value = corners[corner];
+      if (!value) return;
+      const dist = Math.hypot(value.x - point.x, value.y - point.y);
+      if (dist < nearestDist) {
+        nearestDist = dist;
+        nearest = corner;
+      }
+    });
+    return nearest;
+  }, []);
+
+  const handleCornerPointerDown = useCallback(
+    (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      const point = getCalibrationPointFromEvent(event);
+      if (!point) return;
+      const corner = findNearestCorner(point);
+      if (!corner) return;
+      draggingCornerRef.current = corner;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    },
+    [getCalibrationPointFromEvent, findNearestCorner],
+  );
+
+  const handleCornerPointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLCanvasElement>) => {
+      const corner = draggingCornerRef.current;
+      if (!corner) return;
+      const point = getCalibrationPointFromEvent(event);
+      if (!point) return;
+      calibrationPointsRef.current = { ...calibrationPointsRef.current, [corner]: point };
+      trackerRef.current?.setCorner(corner, point);
+      event.preventDefault();
+    },
+    [getCalibrationPointFromEvent],
+  );
+
+  const handleCornerPointerUp = useCallback((event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!draggingCornerRef.current) return;
+    draggingCornerRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }, []);
 
   const handleSensitivityChange = useCallback((value: number) => {
@@ -637,38 +699,28 @@ function App() {
               your hand. Here's how the controls work:
             </p>
 
-            <div className="mb-6 text-left">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                Control mode
-              </p>
-              <div className="flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={() => setControlMode('hand')}
-                  className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
-                    controlMode === 'hand'
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
+            <div className="mb-6 flex items-center justify-between rounded-2xl bg-muted/60 px-4 py-3 text-left">
+              <span>
+                <span className="block text-sm font-semibold text-foreground">Index Finger Pointer Mode</span>
+                <span className="block text-xs text-muted-foreground">
+                  Steer with just your index fingertip instead of your whole palm.
+                </span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={controlMode === 'finger'}
+                onClick={() => setControlMode((mode) => (mode === 'finger' ? 'hand' : 'finger'))}
+                className={`relative h-6 w-11 flex-none rounded-full transition-colors ${
+                  controlMode === 'finger' ? 'bg-primary' : 'bg-border'
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                    controlMode === 'finger' ? 'translate-x-5' : ''
                   }`}
-                >
-                  <span className="block text-sm font-semibold text-foreground">Full Hand Steering</span>
-                  <span className="block text-xs text-muted-foreground">Steer with your whole palm — the classic feel.</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setControlMode('finger')}
-                  className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
-                    controlMode === 'finger'
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                  }`}
-                >
-                  <span className="block text-sm font-semibold text-foreground">Single Finger Steering</span>
-                  <span className="block text-xs text-muted-foreground">
-                    Point your index finger for precise, cursor-style flight.
-                  </span>
-                </button>
-              </div>
+                />
+              </button>
             </div>
 
             <ul className="mb-8 flex flex-col gap-3 text-left">
@@ -863,18 +915,25 @@ function App() {
               </p>
             )}
 
-            <div className="mb-4 overflow-hidden rounded-2xl border border-border/60 bg-muted/40 shadow-inner">
+            <div className="mb-2 overflow-hidden rounded-2xl border border-border/60 bg-muted/40 shadow-inner">
               <canvas
                 ref={calibrationPreviewCanvasRef}
                 width={CALIBRATION_PREVIEW_WIDTH}
                 height={CALIBRATION_PREVIEW_HEIGHT}
-                className="block w-full scale-x-[-1]"
+                className="block w-full cursor-crosshair scale-x-[-1] touch-none"
+                onPointerDown={handleCornerPointerDown}
+                onPointerMove={handleCornerPointerMove}
+                onPointerUp={handleCornerPointerUp}
+                onPointerCancel={handleCornerPointerUp}
               />
             </div>
-            <p className="mb-5 text-xs font-medium tracking-wide text-muted-foreground">
+            <p className="mb-1 text-xs font-medium tracking-wide text-muted-foreground">
               {handDetected
                 ? `${controlMode === 'finger' ? 'Finger' : 'Hand'} detected — hold it at the target position.`
                 : `Show your ${controlMode === 'finger' ? 'finger' : 'hand'} to the camera.`}
+            </p>
+            <p className="mb-5 text-xs text-muted-foreground">
+              You can also drag any orange corner dot directly on the preview to fine-tune it.
             </p>
 
             {!calibrationComplete && (
