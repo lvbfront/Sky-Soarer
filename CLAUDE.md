@@ -1,6 +1,9 @@
 # CLAUDE.md — Sky Soarer ("Bird Flight")
 
-Guidance for Claude Code (and humans) working in this repository. The repo is named **Sky Soarer**, and the game calls itself **Bird Flight** in its UI, `<title>`, and `replit.md`. It was built on Replit with Replit Agent. `replit.md` is the original agent's running notes; this file supersedes it but leaves it untouched. `.agents/memory/*.md` holds lessons that agent recorded while fixing bugs, and those are still worth reading before you touch controls or tricks.
+Guidance for Claude Code (and humans) working in this repository. The repo is named **Sky Soarer**, and the game calls itself **Bird Flight** in its UI, `<title>` and `replit.md`. It was built on Replit with Replit Agent. It has since been cleaned into a standalone game repo that builds on any OS, deploys to Vercel as a static site, and still runs on Replit.
+
+- `replit.md` is the original agent's running notes. It is kept unchanged as history, but **it is stale**: it describes template packages that have been deleted (api-server, db, mockup-sandbox), a port-5000 API server, and audio starting on "Continue". Where the two disagree, this file wins.
+- `.agents/memory/*.md` holds lessons that agent recorded while fixing bugs. Read them before you touch the controls or tricks.
 
 ---
 
@@ -40,73 +43,79 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 
 | Area | Library | Version |
 |---|---|---|
-| Monorepo | pnpm workspaces | pnpm 10.x (lockfile v9), `minimumReleaseAge: 1440` |
+| Monorepo | pnpm workspace with a single package, `artifacts/3d-game` | pnpm **10.33.0**, pinned in `packageManager` (lockfile v9). `minimumReleaseAge: 1440` needs pnpm 10.16+. |
 | Language | TypeScript | ~5.9.3 |
-| Runtime | Node | Replit uses `nodejs-24`. Node 22.22 also works. |
+| Runtime | Node | `engines: >=20.19` (Vite 7's minimum). Replit uses `nodejs-24`, and Node 22.22 is verified. |
 | Bundler / dev server | Vite | ^7.3.2 (7.3.6 resolved) |
-| UI | React / React DOM | 19.1.0 (pinned; the catalog comment says expo needs it) |
-| Styling | Tailwind CSS v4 (`@tailwindcss/vite`), shadcn/ui "new-york" scaffold | ^4.1.14 |
+| UI | React / React DOM | 19.1.0 |
+| Styling | Tailwind CSS v4 (`@tailwindcss/vite`) with `tw-animate-css` and `@tailwindcss/typography` imported in `index.css` | ^4.1.14 (4.3.3 resolved) |
 | Icons | lucide-react | ^0.545.0 |
 | 3D | three (vanilla, **no** React Three Fiber) | ^0.185.1 (`@types/three` ^0.185.3) |
 | Hand tracking | `@mediapipe/hands` + `@mediapipe/camera_utils` (legacy "Solutions" API) | 0.4.1675469240 / 0.3.1675466862 |
 | Noise | simplex-noise (v4 `createNoise2D`) | ^4.0.3 |
 | Audio | Web Audio API, fully synthesized (no audio files) | — |
-| Replit dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | catalog |
+| Replit-only dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | loaded only when `REPL_ID` is set |
 
-Every dependency of `@workspace/3d-game` is listed under `devDependencies`. That is harmless, because Vite bundles them all. Shared versions come from the `catalog:` block in `pnpm-workspace.yaml`.
+- Runtime libraries are listed in `dependencies`, and build tooling in `devDependencies`, in `artifacts/3d-game/package.json`.
+- Shared versions come from the `catalog:` block in `pnpm-workspace.yaml`.
+- The only root devDependencies are `typescript` and `prettier`.
 
 ---
 
 ## 3. Running locally
 
-### Commands (run from the repo root)
+### Commands (run from the repo root; no env vars needed)
 
 ```bash
-pnpm install --frozen-lockfile          # ~10 s; the root preinstall script refuses npm/yarn
-
-# Dev server for the game. PORT and BASE_PATH are REQUIRED; vite.config.ts throws without them.
-PORT=5000 BASE_PATH=/ pnpm --filter @workspace/3d-game run dev
-#   -> http://localhost:5000/  (binds 0.0.0.0, strictPort, allowedHosts: true)
-
-# Production build of the game only -> artifacts/3d-game/dist/public
-PORT=5000 BASE_PATH=/ pnpm --filter @workspace/3d-game run build
-
-# Serve the production build
-PORT=5001 BASE_PATH=/ pnpm --filter @workspace/3d-game run serve
-
-# Typecheck everything: tsc --build for lib/*, then each artifact's and scripts' own tsc --noEmit
-pnpm run typecheck
-pnpm --filter @workspace/3d-game run typecheck   # game only
+pnpm install --frozen-lockfile   # ~2 s warm; the root preinstall script refuses npm/yarn
+pnpm dev                         # Vite dev server  -> http://localhost:5173/
+pnpm run typecheck               # tsc --noEmit for the game
+pnpm run build                   # typecheck, then vite build -> artifacts/3d-game/dist/public
+pnpm preview                     # serve the production build -> http://localhost:4173/
 ```
 
-Results of a verification run (Node 22.22.2, pnpm 10.33.0, Linux x64):
+These are aliases for `pnpm --filter @workspace/3d-game run dev|build|serve|typecheck`. Both servers bind `0.0.0.0`. The dev server uses `strictPort`.
 
-- `pnpm install --frozen-lockfile` succeeds in about 8.5 s.
-- `pnpm run typecheck` passes with no errors in any package.
-- `pnpm --filter @workspace/3d-game run build` succeeds when `PORT`/`BASE_PATH` are set. It prints one warning: *"Some chunks are larger than 500 kB"*. The JS bundle is a single 844 kB file (234 kB gzip), and the CSS is 103 kB.
-- `pnpm run build` from the root **fails**: `mockup-sandbox`'s `vite.config.ts` throws `PORT environment variable is required`. The game's build throws the same error if the variables aren't set. The build only works on Replit because each artifact's `.replit-artifact/artifact.toml` injects `PORT`/`BASE_PATH`.
-- The dev server was ready in about 270 ms on `PORT`. The Replit artifact config uses **port 24982** for the game, 8080 for the API server, and 8081 for the mockup sandbox. Nothing actually uses port 5000, and `replit.md`'s "port 5000" note for the API server is wrong: `artifact.toml` says 8080.
-- Headless Chromium with a fake camera reached the calibration screen in both dev and prod builds, so MediaPipe's `Hands` constructs correctly in the prod bundle. `GameEngine` rendered both maps through SwiftShader WebGL. The console printed two three.js deprecation warnings (see §9).
+Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/`BASE_PATH`/`REPL_ID` set):
 
-### Environment variables
+- `pnpm install --frozen-lockfile` succeeds.
+- `pnpm run typecheck` passes.
+- `pnpm run build` succeeds from the root. It emits a 1.7 kB `index.html`, 31 kB of CSS and one 844 kB JS chunk (234 kB gzip), plus Vite's "chunk larger than 500 kB" warning.
+- The Vercel commands (`npx --yes pnpm@10.33.0 install --frozen-lockfile` and `… run build`) also succeed in a shell with **no global pnpm**. The nested `pnpm` calls in the root scripts resolve to the npx-provided pnpm.
+- The dev server starts on 5173 with defaults. It also starts with Replit's env (`PORT=24982 BASE_PATH=/ REPL_ID=…`), and then the Replit plugins load.
+- Headless Chromium with a fake camera reached the calibration screen on the production preview. Deep links such as `/some/route` return `index.html`.
+- The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
-| Var | Needed by | Notes |
+### Environment variables (all optional)
+
+| Var | Default | Notes |
 |---|---|---|
-| `PORT` | game, mockup-sandbox, api-server | Required. The Vite configs throw without it, even for `vite build`. |
-| `BASE_PATH` | game, mockup-sandbox | Required. Becomes Vite `base`. Use `/` locally. |
-| `REPL_ID` | game (optional) | If set and `NODE_ENV !== 'production'`, the cartographer and dev-banner Replit plugins load. |
-| `DATABASE_URL` | `lib/db` only | The game doesn't use it. `scripts/post-merge.sh` runs `pnpm --filter db push`, which needs it. |
+| `PORT` | 5173 for dev, 4173 for preview | Replit sets 24982 through `artifact.toml`. An invalid value throws. |
+| `BASE_PATH` | `/` | Becomes Vite `base`. Set it only when serving from a sub-path. |
+| `REPL_ID` | unset | Set automatically inside a Repl. When set, it loads `runtime-error-modal`, plus `cartographer` and `dev-banner` in non-production builds. |
 
-The game needs **no secrets and no backend**.
+The game needs **no secrets, no backend and no database**.
 
 ### Browser, webcam and network requirements
 
-- A **secure context** (`https://` or `http://localhost`), because `getUserMedia` refuses plain-HTTP LAN IPs.
+- A **secure context** (`https://` or `http://localhost`), because `getUserMedia` refuses plain-HTTP LAN IPs. Vercel deployments are HTTPS.
 - A webcam. The app requests 480×360 with `facingMode: 'user'`.
 - **WebGL.** WebGL2 is preferred, since three r185 targets it.
 - **Network access to `cdn.jsdelivr.net`.** The MediaPipe wasm, model and `.data` files are loaded at runtime from `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/…`, set by `locateFile` in `handControls.ts`. If the CDN is blocked, **the UI shows no error**. The calibration screen just says "Show your hand to the camera", and the console logs `HandTracker: a frame failed to process` on every frame. This was reproduced in the sandbox.
 - A desktop Chromium, Edge or Firefox with a decent GPU is the target. Mobile isn't designed for: there's no touch fallback, and the layout assumes a large screen.
 - In headless screenshot tools, WebGL often fails with no GPU. Launch Chromium with `--use-angle=swiftshader --enable-unsafe-swiftshader` to render, and expect very low FPS.
+
+### Deploying
+
+- **Vercel:** `vercel.json` at the repo root holds everything:
+  - the framework preset is set to "Other" (`"framework": null`)
+  - install and build use a pinned pnpm through `npx`
+  - `outputDirectory` is `artifacts/3d-game/dist/public`
+  - there's an SPA rewrite to `/index.html`; Vercel serves real files first, so assets are unaffected
+
+  Leave the project's Root Directory as the repo root.
+- **Replit:** `.replit` plus `artifacts/3d-game/.replit-artifact/artifact.toml` handle dev on port 24982 and a static production deploy from the same `dist/public`.
+- **Any other static host:** run `pnpm run build`, publish `artifacts/3d-game/dist/public`, and add a catch-all rewrite to `/index.html`. The rewrite is optional, because there's no client router.
 
 ---
 
@@ -114,52 +123,43 @@ The game needs **no secrets and no backend**.
 
 ```
 .
-├── artifacts/                 # Replit "artifacts" = deployable apps
-│   ├── 3d-game/               # ★ THE GAME (@workspace/3d-game)
-│   │   ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
-│   │   ├── index.html         # <title>Bird Flight</title>, Google Fonts Inter, favicon
-│   │   ├── vite.config.ts     # requires PORT/BASE_PATH; aliases @ -> src, @assets -> /attached_assets
-│   │   ├── components.json    # shadcn config
-│   │   └── src/
-│   │       ├── main.tsx       # createRoot(<App/>)
-│   │       ├── App.tsx        # ★ all React UI: menu, calibration wizard, HUD, state machine (~1030 lines)
-│   │       ├── index.css      # Tailwind v4 + shadcn theme tokens (warm pastel palette)
-│   │       ├── game/          # ★ framework-free Three.js game code
-│   │       │   ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
-│   │       │   ├── handControls.ts # MediaPipe wrapper: tracking, calibration box, fist/flick gesture detection
-│   │       │   ├── bird.ts         # 4 procedural low-poly birds + wing flap
-│   │       │   ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
-│   │       │   ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
-│   │       │   ├── underwater.ts   # reef/fish/shark/caustics/bubbles (lazy-built)
-│   │       │   ├── clouds.ts       # flyable cloud clusters in the flight corridor
-│   │       │   ├── rings.ts        # Ring Challenge spawning + hit test
-│   │       │   ├── ringGuide.ts    # arrow pointing to nearest ring
-│   │       │   ├── ringBurst.ts    # star-burst particles (custom ShaderMaterial)
-│   │       │   ├── waterBurst.ts   # surfacing droplet particles (copy of ringBurst, retuned)
-│   │       │   ├── splash.ts       # skimming spray particles (PointsMaterial – fade is broken)
-│   │       │   ├── audio.ts        # WindAudio (filtered noise) + SoundEffects (ring chime)
-│   │       │   └── highscore.ts    # localStorage best score ("bird-flight-best-score")
-│   │       ├── components/ui/ # 55 shadcn components — UNUSED by the game (scaffold leftovers)
-│   │       ├── hooks/         # use-toast, use-mobile — unused
-│   │       ├── lib/utils.ts   # cn() helper
-│   │       └── pages/not-found.tsx # unused (no router is mounted)
-│   ├── api-server/            # Express 5 + pino template, only GET /api/healthz. NOT used by the game.
-│   └── mockup-sandbox/        # Replit "Canvas" component-preview tool (port 8081). NOT part of the game.
-├── lib/                       # template libs, unused by the game
-│   ├── api-spec/              # openapi.yaml + orval config (health check only)
-│   ├── api-zod/               # generated zod schemas
-│   ├── api-client-react/      # generated react-query client (listed as a game dep but never imported)
-│   └── db/                    # drizzle + pg, empty schema, throws if DATABASE_URL is missing when imported
-├── scripts/                   # hello.ts + post-merge.sh (Replit post-merge hook)
-├── attached_assets/           # the two feature-request prompts the user pasted into Replit Agent
+├── artifacts/
+│   └── 3d-game/               # ★ THE GAME (@workspace/3d-game) — the only workspace package
+│       ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
+│       ├── index.html         # <title>Bird Flight</title>, meta/OG description, Google Fonts Inter, favicon
+│       ├── vite.config.ts     # PORT/BASE_PATH defaults; Replit plugins only when REPL_ID is set; @ -> src
+│       ├── public/            # favicon.svg, robots.txt (copied as-is into dist/public)
+│       └── src/
+│           ├── main.tsx       # createRoot(<App/>)
+│           ├── App.tsx        # ★ all React UI: menu, calibration wizard, HUD, state machine (~1030 lines)
+│           ├── index.css      # Tailwind v4 + theme tokens (warm pastel palette)
+│           └── game/          # ★ framework-free Three.js game code
+│               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
+│               ├── handControls.ts # MediaPipe wrapper: tracking, calibration box, fist/flick gesture detection
+│               ├── bird.ts         # 4 procedural low-poly birds + wing flap
+│               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
+│               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
+│               ├── underwater.ts   # reef/fish/shark/caustics/bubbles (lazy-built)
+│               ├── clouds.ts       # flyable cloud clusters in the flight corridor
+│               ├── rings.ts        # Ring Challenge spawning + hit test
+│               ├── ringGuide.ts    # arrow pointing to nearest ring
+│               ├── ringBurst.ts    # star-burst particles (custom ShaderMaterial)
+│               ├── waterBurst.ts   # surfacing droplet particles (copy of ringBurst, retuned)
+│               ├── splash.ts       # skimming spray particles (PointsMaterial – fade is broken)
+│               ├── audio.ts        # WindAudio (filtered noise) + SoundEffects (ring chime)
+│               └── highscore.ts    # localStorage best score ("bird-flight-best-score")
+├── attached_assets/           # the two feature-request prompts the user pasted into Replit Agent (history only)
 ├── .agents/memory/            # Replit Agent's lessons-learned notes (read these!)
 ├── .replit, .replitignore     # Replit workspace config
-├── pnpm-workspace.yaml        # workspace globs, version catalog, supply-chain guard, platform overrides
+├── vercel.json                # Vercel static deploy config
+├── package.json               # root scripts (dev/build/preview/typecheck), packageManager pnpm@10.33.0
+├── pnpm-workspace.yaml        # workspace glob, version catalog, minimumReleaseAge, security overrides
+├── pnpm-lock.yaml
 ├── tsconfig.base.json         # shared strict-ish TS options (strictFunctionTypes: false, noUnusedLocals: false)
-└── replit.md                  # original agent notes (keep as is)
+└── replit.md                  # original agent notes (kept as is; partly stale)
 ```
 
-In short, everything that matters for gameplay is in `artifacts/3d-game/src/App.tsx` and `artifacts/3d-game/src/game/*`. Everything else is Replit pnpm-workspace template scaffolding.
+The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `PNPM_WORKSPACE` agent stack and its artifact system expect that layout, so moving it would break Replit.
 
 ---
 
@@ -338,25 +338,31 @@ In short, everything that matters for gameplay is in `artifacts/3d-game/src/App.
   - Prettier is installed but there's no config file, so defaults apply apart from the quote style already used in the code.
   - There's no ESLint and **no tests**.
 - **Imports.** Use the `@/` alias for `src`. Use `import * as THREE from 'three'`. Put `type` imports inline, as in `import { Bird, type BirdType }`.
-- **React style.** One big `App` function component. Every handler is wrapped in `useCallback`. Refs mirror state that the long-lived tracker closure needs to read, such as `barrelRollingRef`. Styling is Tailwind utility classes with inline styles for gradients, and there's no shadcn component usage.
-- **Verification habit:** always run `pnpm --filter @workspace/3d-game run typecheck`, and check visual changes in a real browser with a webcam.
+- **React style.** One big `App` function component. Every handler is wrapped in `useCallback`. Refs mirror state that the long-lived tracker closure needs to read, such as `barrelRollingRef`. Styling is Tailwind utility classes with inline styles for gradients. There's no component library: the shadcn scaffold was removed. Theme tokens such as `bg-card` and `text-primary` still come from `index.css`.
+- **Verification habit:** always run `pnpm run build` from the root, which also typechecks, and check visual changes in a real browser with a webcam.
+- **Dependencies:** anything imported at runtime goes in the game's `dependencies`, and build tooling in `devDependencies`. Prefer `catalog:` versions for shared tooling. New packages must be at least 1 day old (`minimumReleaseAge`). Don't reintroduce platform-specific `overrides`.
 
 ---
 
-## 8. Replit-specific pieces and what to change to run elsewhere
+## 8. Replit-specific pieces (kept, and still working)
 
-| Item | What it does | Off-Replit action |
+| Item | What it does | Elsewhere |
 |---|---|---|
-| `.replit` | `modules = ["nodejs-24"]`, autoscale deployment, `postMerge` hook, agent stack `PNPM_WORKSPACE` | Ignore it. Use Node 22+ and pnpm 10. |
-| `artifacts/*/.replit-artifact/artifact.toml` | Declares each app's service, port (game **24982**, API 8080, mockup 8081), and env (`PORT`, `BASE_PATH`). The game deploys as a **static** site from `artifacts/3d-game/dist/public` with a `/* → /index.html` rewrite. | Set `PORT`/`BASE_PATH` yourself, or give them defaults in `vite.config.ts`. Any static host works (Netlify, Vercel, GitHub Pages, S3). Add the SPA rewrite, though it's only cosmetic because there's no router. |
-| `vite.config.ts` | **Throws** if `PORT` or `BASE_PATH` is missing. Loads `@replit/vite-plugin-runtime-error-modal` always, and cartographer/dev-banner only when `REPL_ID` is set. | Default `PORT` to 5173 and `BASE_PATH` to `/`. Optionally drop the runtime-error-modal plugin. |
-| `pnpm-workspace.yaml` `overrides` | **Strips the native binaries for every platform except linux-x64-gnu**: esbuild, rollup, lightningcss, the tailwind oxide engine, and ngrok. | **On macOS, Windows or Linux arm64, `pnpm install` produces a toolchain that can't run** (rollup, esbuild and tailwind can't find a native binary). Delete those override lines and regenerate the lockfile to develop anywhere other than linux-x64. Keep the `esbuild: 0.27.3` and `@esbuild-kit/esm-loader` security overrides. |
-| `minimumReleaseAge: 1440` | Supply-chain guard: packages must be at least 1 day old, with an exception for `@replit/*`. | Keep it. It needs pnpm 10.16 or later. |
-| `scripts/post-merge.sh` | Runs `pnpm install --frozen-lockfile && pnpm --filter db push` after Agent merges. | Not needed. `db push` fails without `DATABASE_URL`. |
-| `.replitignore`, `.gitignore` `.local/` `.cache/` | Replit cache dirs. | Harmless. |
-| Root dep `@replit/connectors-sdk` | Never imported anywhere. | Can be removed. |
-| `index.html` meta | "Bird Flight — built on Replit. Update this description…" | Placeholder copy. Rewrite it. |
-| `artifacts/mockup-sandbox`, `artifacts/api-server`, `lib/*` | Replit template scaffolding (the Canvas preview, and an Express + Drizzle + OpenAPI stack). | Not used by the game. It's safe to exclude or delete, but it breaks root `pnpm run build` without `PORT`. |
+| `.replit` | `modules = ["nodejs-24"]`, autoscale deployment with a `pnpm store prune` post-build, agent stack `PNPM_WORKSPACE`. The `postMerge` hook was removed along with `scripts/post-merge.sh`, which ran `pnpm --filter db push` for the deleted db package. | Ignored. |
+| `artifacts/3d-game/.replit-artifact/artifact.toml` | Declares the game service on **port 24982**, sets `PORT=24982` and `BASE_PATH=/`, runs `pnpm --filter @workspace/3d-game run dev` in development, and deploys the build **statically** from `artifacts/3d-game/dist/public` with a `/* → /index.html` rewrite. | Ignored. Vercel uses `vercel.json`. |
+| `vite.config.ts` Replit plugins | `@replit/vite-plugin-runtime-error-modal`, plus `cartographer` and `dev-banner` in non-production builds, are imported dynamically **only when `REPL_ID` is set**. | Not loaded. They're still installed as devDependencies, so Replit keeps working. |
+| `PORT` / `BASE_PATH` | Injected by `artifact.toml` on Replit. | Optional. Defaults are 5173 or 4173 and `/`. |
+| `pnpm-workspace.yaml` `minimumReleaseAgeExclude: '@replit/*'` | Lets Replit's own packages bypass the 1-day release-age guard. | Harmless. |
+| `.replitignore`, `.gitignore` `.local/` `.cache/` | Replit cache directories. | Harmless. |
+| `replit.md`, `.agents/memory/`, `attached_assets/` | Replit Agent's notes, memories and pasted prompts. | Documentation and history only. |
+
+What was removed to make the repo standalone:
+- **Deleted packages:** `artifacts/api-server` (the Express health-check template), `artifacts/mockup-sandbox` (Replit's Canvas preview) and `lib/*` (api-spec, api-zod, api-client-react, db).
+- **Deleted scripts:** `scripts/`, including `post-merge.sh` and its hook.
+- **Deleted game files:** 55 unused shadcn components, `hooks/`, `pages/`, `lib/utils.ts` and `components.json`.
+- **Dropped dependencies:** the unused `@replit/connectors-sdk`, wouter, react-query, Radix, zod, framer-motion and other scaffold deps.
+- **Removed overrides:** the linux-x64-only native-binary overrides in `pnpm-workspace.yaml`. The lockfile now carries every platform's esbuild, rollup, lightningcss and tailwind binaries.
+- **Kept overrides:** the `esbuild: 0.27.3` and `@esbuild-kit/esm-loader → tsx` security overrides, and `minimumReleaseAge: 1440`.
 
 There is no Replit DB, Replit Auth or Replit secrets usage anywhere. The game is 100% client-side.
 
@@ -364,7 +370,7 @@ There is no Replit DB, Replit Auth or Replit secrets usage anywhere. The game is
 
 ## 9. Known issues, bugs, fragile areas and tech debt
 
-These come from code reading plus a headless run. None has been fixed.
+These come from code reading plus a headless run. The game logic hasn't been changed yet, so all of them are still open. The build and portability problems (env vars required, linux-x64-only installs, template scaffolding, placeholder meta description) were fixed by the standalone cleanup and have been removed from this list.
 
 ### Gameplay and control bugs
 1. **Steering and boost latch when the hand is lost.** `applyControls` returns early on `handDetected: false` before it updates `targetPitch`, `targetRoll` or `boosting`. If the hand leaves the frame mid-turn or mid-boost, the bird **keeps turning or boosting forever** until the hand comes back. `HandTracker` also never clears `fistActive` on hand loss, so boost can resume latched.
@@ -394,19 +400,19 @@ These come from code reading plus a headless run. None has been fixed.
 17. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
 18. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
 19. **Main-thread stutter.** Tile generation is synchronous: crossing a tile boundary builds 7 tiles of noise on the main thread. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
-20. **Bundle size.** It's a single 844 kB JS chunk, mostly three.js and MediaPipe. The unused shadcn, Radix and react-query code is tree-shaken out, but it still costs install time. The 103 kB of CSS comes from the full shadcn theme and Tailwind.
+20. **One large JS chunk.** It's 844 kB (234 kB gzip), mostly three.js and MediaPipe, with no code splitting. CSS is now 31 kB.
 
 ### three.js deprecations (seen in the console on r185)
 21. `THREE.Clock` is deprecated in favor of `THREE.Timer`.
 22. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
 
 ### Tech debt
-23. **Template leftovers:** about 55 unused shadcn components, the hooks, `pages/not-found.tsx`, the wouter/react-query/`@workspace/api-client-react` deps, the api-server, the mockup-sandbox, `lib/*`, and `@replit/connectors-sdk`.
-24. **A god component and a god class.** `App.tsx` mixes UI, tracker lifecycle, canvas drawing and the calibration state machine. `GameEngine.update` is a roughly 170-line function.
-25. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
-26. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector and the ring hit test is easy to unit-test and currently isn't.
-27. **Inconsistent naming.** The repo is "Sky-Soarer", the UI is "Bird Flight", and the localStorage key is `bird-flight-best-score`.
-28. **Stale `replit.md`** in places: API port 5000 vs 8080, and audio starting on "Continue".
+23. **A god component and a god class.** `App.tsx` mixes UI, tracker lifecycle, canvas drawing and the calibration state machine. `GameEngine.update` is a roughly 170-line function.
+24. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
+25. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector and the ring hit test is easy to unit-test and currently isn't.
+26. **Inconsistent naming.** The repo and root package are "Sky Soarer" / `sky-soarer`, the UI is "Bird Flight", the game package is `@workspace/3d-game`, and the localStorage key is `bird-flight-best-score`.
+27. **Stale `replit.md`.** It is kept as is by request (see the top of this file).
+28. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
 
 ---
 
@@ -416,7 +422,7 @@ These come from code reading plus a headless run. None has been fixed.
 1. On `handDetected: false`, ease `targetPitch` and `targetRoll` to 0 and clear `boosting`, while keeping the backflip check first. Also reset `fistActive` on hand loss.
 2. Despawn rings, clouds and reef items by distance from the bird, or by an angle-aware test, rather than only by axial distance along the spawn-time forward.
 3. Make the sky dome and decorative clouds follow the bird on XZ, the way the starfield already does.
-4. Surface MediaPipe load failures in the UI with a timeout and a clear message. Consider self-hosting the MediaPipe assets under `public/` so there's no runtime CDN dependency.
+4. Surface MediaPipe load failures in the UI with a timeout and a clear message. Consider self-hosting the MediaPipe assets under `public/` so there's no runtime CDN dependency. Vercel would then serve them from the same origin.
 5. Add a **keyboard and mouse fallback** (WASD or arrows, Space for boost, a key for backflip) behind the same `HandControlState` interface. This helps accessibility, users without a webcam, and debugging.
 
 **P1: controls feel**
@@ -433,7 +439,7 @@ These come from code reading plus a headless run. None has been fixed.
 12. Remove per-frame `Vector3` allocations by using scratch vectors.
 13. Dispose geometries, materials and textures properly, and call `forceContextLoss()` on engine teardown.
 14. Generate tiles incrementally (one per frame) or in a worker. Bound `islandCache`.
-15. Code-split: lazy-load MediaPipe and three. Drop the unused shadcn, Radix and react-query packages to shrink the bundle.
+15. Code-split: lazy-load MediaPipe and the engine after the menu, so the first paint doesn't wait for 844 kB of JS.
 
 **P3: visuals and gameplay**
 
@@ -445,10 +451,9 @@ These come from code reading plus a headless run. None has been fixed.
 
 **P4: code quality**
 
-21. Delete the template scaffolding, or move it out of the workspace, so `pnpm run build` works standalone.
-22. Remove the linux-x64-only `overrides` so contributors on macOS, Windows or arm can install. Give `PORT` and `BASE_PATH` sensible defaults.
-23. Add a `MapEnvironment` interface for Terrain and Ocean, split `App.tsx` into screens and hooks (`useHandTracker`, `useGameEngine`), and break `GameEngine.update` into named steps.
-24. Add Vitest unit tests for the tracker math and ring hit tests, plus ESLint and Prettier configs, and a CI workflow that runs typecheck, build and tests.
+21. Add a `MapEnvironment` interface for Terrain and Ocean, split `App.tsx` into screens and hooks (`useHandTracker`, `useGameEngine`), and break `GameEngine.update` into named steps.
+22. Add Vitest unit tests for the tracker math and ring hit tests, plus ESLint and Prettier configs, and a GitHub Actions workflow that runs `pnpm install --frozen-lockfile && pnpm run build` on Linux, macOS and Windows.
+23. Unify the naming (Sky Soarer vs Bird Flight), keeping the localStorage key backward-compatible.
 
 ---
 
