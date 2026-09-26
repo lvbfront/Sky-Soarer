@@ -1,6 +1,6 @@
 # CLAUDE.md — Sky Soarer ("Bird Flight")
 
-Guidance for Claude Code (and humans) working in this repository. The repo is named **Sky Soarer**, and the game calls itself **Bird Flight** in its UI, `<title>` and `replit.md`. It was built on Replit with Replit Agent. It has since been cleaned into a standalone game repo that builds on any OS, deploys to Vercel as a static site, and still runs on Replit.
+Guidance for Claude Code (and humans) working in this repository. The repo is named **Sky Soarer**. The landing page's hero title is **SKY SOARER**, the `<title>` is "Sky Soarer — Bird Flight", and the game still calls itself **Bird Flight** in `replit.md` and its storage keys. It was built on Replit with Replit Agent. It has since been cleaned into a standalone game repo that builds on any OS, deploys to Vercel as a static site, and still runs on Replit.
 
 - `replit.md` is the original agent's running notes. It is kept unchanged as history, but **it is stale**: it describes template packages that have been deleted (api-server, db, mockup-sandbox), a port-5000 API server, and audio starting on "Continue". Where the two disagree, this file wins.
 - `.agents/memory/*.md` holds lessons that agent recorded while fixing bugs. Read them before you touch the controls or tricks.
@@ -13,14 +13,15 @@ Bird Flight is a relaxing, endless 3D flight game. You steer a low-poly bird **w
 
 How a session plays:
 
-1. **Menu (Screen 1).** Choose:
-   - a bird: Pigeon, Falcon, Greater Flamingo, or Duck/Seabird
-   - a map: Mountain Valley, or Tropical Ocean & Islands
-   - a weather preset: Sunny Morning, Sunset Gold, or Starry Night
-   - whether Ring Challenge is on (the switch shows your best score)
+1. **Landing page, "The Ascent" (Screen 1).** A scroll-driven page over a live 3D backdrop. Scrolling climbs the bird from the ground to above the clouds, and each full-viewport chapter is one setup step (see §6.10):
+   - **0 · Hero (0 m):** the SKY SOARER title, tagline, a **Quick start** button that reuses the last saved settings and goes straight to pre-flight, and a "Scroll to ascend" hint.
+   - **1 · Choose your bird (300 m):** Pigeon, Falcon, Greater Flamingo, or Duck/Seabird. Prev/next buttons, ←/→ keys, or the name chips.
+   - **2 · Choose your world (1,200 m):** Mountain Valley, or Tropical Ocean & Islands. The 3D world switches live.
+   - **3 · Choose the sky (3,000 m):** Sunny Morning, Sunset Gold, or Starry Night. Sky and lighting crossfade live.
+   - **4 · Above the clouds (5,000 m):** the Ring Challenge switch (with best score), a summary of the choices, and **Begin pre-flight**, which saves the settings and asks for camera access.
 
-   Then click **Continue to Calibration**, which asks for camera access.
-2. **Calibration (Screen 2).**
+   Fixed instrument chrome: an altimeter rail (clickable chapter ticks), telemetry (speed, heading, V/S, lat/lon), a big altitude counter, and a **Sound** toggle for ambient wind (off by default).
+2. **Pre-flight: calibration (Screen 2).**
    - Steering always tracks the **palm center**. An Index Finger mode existed earlier and was removed.
    - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range.
    - Once a corner is captured you can drag it on the preview to fine-tune it.
@@ -52,6 +53,7 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 | Icons | lucide-react | ^0.545.0 |
 | 3D | three (vanilla, **no** React Three Fiber) | ^0.185.1 (`@types/three` ^0.185.3) |
 | Hand tracking | `@mediapipe/hands` (legacy "Solutions" API), assets self-hosted | **0.4.1675469240**, pinned exactly; this `package.json` entry is the only place the version lives |
+| Landing animation | GSAP + ScrollTrigger (`gsap` package, plugins are free) | ^3.15.0 |
 | Noise | simplex-noise (v4 `createNoise2D`) | ^4.0.3 |
 | Audio | Web Audio API, fully synthesized (no audio files) | — |
 | Replit-only dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | loaded only when `REPL_ID` is set |
@@ -80,10 +82,10 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
 
 - `pnpm install --frozen-lockfile` succeeds.
 - `pnpm run typecheck` passes.
-- `pnpm run build` succeeds from the root. It emits a 1.7 kB `index.html`, 31 kB of CSS, one 837 kB JS chunk (232 kB gzip), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
+- `pnpm run build` succeeds from the root. It emits a 1.9 kB `index.html`, 45 kB of CSS, a 908 kB entry chunk (264 kB gzip: React, three, GSAP, the landing), two lazy chunks (`handControls` 50 kB with the MediaPipe JS, `GameEngine` 33 kB), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
 - The Vercel commands (`npx --yes pnpm@10.33.0 install --frozen-lockfile` and `… run build`) also succeed in a shell with **no global pnpm**. The nested `pnpm` calls in the root scripts resolve to the npx-provided pnpm.
 - The dev server starts on 5173 with defaults. It also starts with Replit's env (`PORT=24982 BASE_PATH=/ REPL_ID=…`), and then the Replit plugins load.
-- Headless Chromium with a fake camera, and **every non-localhost request blocked**, reached the calibration screen on the production preview. Deep links such as `/some/route` return `index.html`. The startup error paths were also exercised in headless runs; see the P0 PR's test notes.
+- Headless Chromium with a fake camera, and **every non-localhost request blocked**, reached the calibration screen on the production preview. The landing redesign PR re-ran this with SwiftShader WebGL: every chapter, live bird/world/sky switching, snapping, reduced motion, Quick start, Back, and the error screen. It also confirmed that no `handControls`/MediaPipe/`GameEngine` request happens before **Begin pre-flight**. Deep links such as `/some/route` return `index.html`. The startup error paths were also exercised in headless runs; see the P0 PR's test notes.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -104,7 +106,7 @@ The game needs **no secrets, no backend and no database**.
 - **No third-party network access is needed at runtime.**
   - The MediaPipe wasm, packed graph `.data` and `.tflite` files are **self-hosted**. `vite-plugin-mediapipe-assets.ts` serves them from `node_modules/@mediapipe/hands` in dev and emits them into `dist/public/mediapipe/hands/` at build time. `locateFile` in `handControls.ts` points at `${BASE_URL}mediapipe/hands/`.
   - This adds about 24 MB to the deploy. A session downloads about 13 MB: `hands_solution_simd_wasm_bin.wasm` (6 MB), `hands_solution_packed_assets.data` (4.3 MB) and `hand_landmark_lite.tflite` (2 MB). The non-SIMD wasm and the `full` model are shipped as fallbacks and are only fetched if needed.
-  - Google Fonts (Inter) is the only external request, and the UI falls back to system fonts without it.
+  - Google Fonts (Inter, Instrument Serif for display type, JetBrains Mono for HUD readouts) is the only external request, and the UI falls back to system fonts without it.
   - If the files can't load, or the load (including the first frame through the graph) takes more than **30 s**, the startup screen shows a specific error with **Try Again**.
 - A desktop Chromium, Edge or Firefox with a decent GPU is the target. Mobile isn't designed for: there's no touch fallback, and the layout assumes a large screen.
 - In headless screenshot tools, WebGL often fails with no GPU. Launch Chromium with `--use-angle=swiftshader --enable-unsafe-swiftshader` to render, and expect very low FPS.
@@ -136,11 +138,19 @@ The game needs **no secrets, no backend and no database**.
 │       ├── public/            # favicon.svg, robots.txt (copied as-is into dist/public)
 │       └── src/
 │           ├── main.tsx       # createRoot(<App/>)
-│           ├── App.tsx        # ★ all React UI: menu, calibration wizard, HUD, state machine (~1030 lines)
-│           ├── index.css      # Tailwind v4 + theme tokens (warm pastel palette)
+│           ├── App.tsx        # ★ state machine, startup/teardown, lazy loaders, pre-flight + calibration screens, flight HUD
+│           ├── index.css      # Tailwind v4 + theme tokens; `ascent-*` landing utilities (glass, HUD type, grain)
+│           ├── landing/       # ★ the scroll-driven landing page ("The Ascent")
+│           │   ├── Landing.tsx     # chapters, GSAP ScrollTrigger (scrub + snap), intro timeline, HUD, keys, sound toggle
+│           │   └── content.ts      # chapter list, copy (bird personalities, world/sky details), formatters
 │           └── game/          # ★ framework-free Three.js game code
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
-│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures, TrackingStartError
+│               ├── LandingScene.ts # landing backdrop: scroll-progress-driven bird/camera/altitude, cloud deck, live swaps, dispose
+│               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing)
+│               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing)
+│               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings"), validated on read
+│               ├── trackingShared.ts # TrackingStartError + sensitivity bounds, importable without loading MediaPipe
+│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures (lazy-loaded)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
 │               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
@@ -189,14 +199,16 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ```
 
 - **React owns only the UI chrome.** `GameEngine` is a plain class that is mounted into a `div` ref, and it owns the `WebGLRenderer` and its own `requestAnimationFrame` loop. This is deliberate, so React re-renders never affect frame timing.
-- **Top-level state** is a string union in `App.tsx`: `FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'error'`. When the state is `'error'`, `startupError: { kind, detail }` picks the message. Everything else is local `useState` plus refs. There is no store, context or router.
-- **Startup sequence** (`handleContinueToCalibration`):
+- **Top-level state** is a string union in `App.tsx`: `FlightState = 'landing' | 'requesting' | 'calibrating' | 'flying' | 'error'`. When the state is `'error'`, `startupError: { kind, detail }` picks the message. Everything else is local `useState` plus refs. There is no store, context or router.
+- **Code splitting.** `handControls` (and with it the `@mediapipe/hands` JS) and `GameEngine` are loaded with dynamic `import()` through `loadHandTracking()` / `loadGameEngine()` in `App.tsx`. Both start when pre-flight begins. App code only imports *types* from those modules; runtime values it needs early live in `trackingShared.ts` and `presets.ts`. A failed import clears its cached promise so **Try Again** retries it, and a failed tracking import surfaces as `TrackingStartError('load-failed')`.
+- **Startup sequence** (`handleContinueToCalibration`, reached through `beginPreflight()` from **Begin pre-flight** or **Quick start**, which first save the settings):
   1. Check `isSecureContext` and that `getUserMedia` exists.
-  2. Call `getUserMedia` (the **only** camera stream; `@mediapipe/camera_utils` was removed because it opened a second stream).
-  3. Call `video.play()`.
-  4. Construct `new HandTracker(video, onUpdate)` and register it in `trackerRef`.
-  5. `await tracker.start()` loads the files, runs a warm-up frame, and starts the loop.
-  6. Switch to `'calibrating'`.
+  2. Kick off `loadHandTracking()` and prefetch `loadGameEngine()`.
+  3. Call `getUserMedia` (the **only** camera stream; `@mediapipe/camera_utils` was removed because it opened a second stream).
+  4. Call `video.play()`, then await the tracking module.
+  5. Construct `new HandTracker(video, onUpdate)` and register it in `trackerRef`.
+  6. `await tracker.start()` loads the files, runs a warm-up frame, and starts the loop.
+  7. Switch to `'calibrating'`.
 
   Any failure goes through `classifyStartupError()`:
 
@@ -213,7 +225,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
 - **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
-- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it. `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It also bails out if Back disposed the engine while `engine.start()` was awaiting.
+- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It checks the session id after awaiting the engine chunk, and bails out if Back disposed the engine while `engine.start()` was awaiting.
+- **The landing backdrop (`LandingScene`)** is created by an effect in `App` while `landingBackdropOn` is true, and it stays alive behind the landing *and* the pre-flight screens (holding the "above the clouds" shot). While `flightState` is `'requesting'` (tracking loading) or `'calibrating'` it is **paused** (`setPaused(true)`): no update and no render, so it doesn't compete with MediaPipe on the main thread. Before freezing it cuts to the pre-flight shot and renders that one frame, which the canvas then holds. That matters for Quick start, which is pressed from the hero. It resumes on Back or on the error screen. `handleStartFlying` calls `disposeLandingScene()` **before** constructing `GameEngine`, so only one WebGL context is ever live. Returning from flight rebuilds it. If WebGL can't start, the constructor throws, the error is logged, and the page runs over the CSS sky gradient on `<html>`. App also keeps the backdrop's bird/world/sky in sync with `settings`, so a Quick start swap shows behind pre-flight.
 
 ---
 
@@ -356,6 +369,27 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Skimming spray within 1.6 units of the water.
   - Uses `PointsMaterial`, which **ignores** its custom `opacity` attribute, so the particles never fade. This is a known, documented bug.
 
+### 6.10 Landing page ("The Ascent": `landing/Landing.tsx`, `game/LandingScene.ts`)
+- **Scene.** `LandingScene` is framework-free and follows the manager lifecycle (constructor → setters → `dispose()`). It reuses `Bird`, `TerrainManager`, `OceanManager`, `CloudManager` and the `sky.ts` builders, but **none of GameEngine's flight physics**. It never reads hand input, and GameEngine doesn't depend on it.
+  - The bird flies along +Z at a fixed speed with a slow lateral weave. It banks into the weave, pitches with the climb, and never drops below `ground + 5.5` (looking a little ahead).
+  - `SHOTS` holds one camera/altitude keyframe per chapter: bird altitude, displayed meters, camera and look offsets, a `shift` that frames the bird right of the text column, FOV, and extra yaw. Progress 0..1 interpolates neighbors with smootherstep. Camera X offsets are **positive** to put the bird on screen-right, because the camera looks along +Z, where screen-right is −X.
+  - Progress, pointer and ground-floor smoothing all use frame-rate-independent `1 - exp(-k·dt)`. It uses `performance.now()`, not the deprecated `THREE.Clock`.
+  - Each map lives in its own sub-`Scene` (`terrainRoot`/`oceanRoot`). The second map is built lazily the first time it's chosen, and a switch is hidden inside a short fog dip.
+  - Weather crossfades blend a resolved `LookState` between two `WEATHER_LOOKS` presets over 1.4 s. The blend repaints the sky dome gradient and updates fog, lights, starfield and horizon-cloud opacity.
+  - The **cloud deck** is 320 instanced puffs at y ≈ 105, wrapped around the bird on XZ. It and the CloudManager clusters (in `cloudRoot`) only show once the camera is above y = 55, because from the ground their undersides read as grey rock. The camera whites out while it's inside the deck, between chapters 2 and 3.
+  - Telemetry (displayed altitude, V/S, knots, heading, fictional lat/lon) is emitted every frame through `onTelemetry`. `Landing` writes it to the DOM through refs at about 16 Hz, never through React state.
+  - `setPaused(true)` cancels the rAF loop, then snaps to the target shot: it ends the intro dolly, jumps progress to its target, and runs `update(0)` plus one render, so the held frame is the intended shot rather than a mid-transition one. The cloud-deck visibility check uses the current frame's camera height for the same reason. Resuming restarts the loop without a time jump. A resize while paused re-renders the held frame once, because `setSize` clears the canvas.
+  - `dispose()` kills its GSAP tweens, frees every geometry, material and texture in one traversal, then calls `renderer.dispose()` and `forceContextLoss()`.
+- **Page.** Five `data-chapter` sections of at least `100svh` each.
+  - One scrubbed GSAP timeline (scrub 0.8) spans the whole page. Segment *k* runs from section *k*'s top to section *k+1*'s top, so chapter stops stay aligned even if a section grows taller than the viewport. Snap points are those tops: an array, so snapping is directional, with `inertia: false` so a fast fling can't skip chapters. The timeline is rebuilt on resize (debounced).
+  - Chapter content (`data-reveal`) rises in and falls away in both directions. The hero content scrubs up and out.
+  - The intro timeline (veil, per-character title rise, `data-intro="fade"` items, `data-hud` chrome) plays once per page load, together with the scene's camera dolly-in (`playIntro`).
+  - Pointer parallax moves the scene camera/bird (`setPointer`) and the title (`gsap.quickTo`).
+  - ←/→ step the bird only while chapter 1 is active.
+  - **Sound** starts a `WindAudio` from the toggle's click. Its intensity follows the vertical speed, and it's stopped on unmount.
+- **Reduced motion** (`prefers-reduced-motion: reduce`, read live by `usePrefersReducedMotion`): no scrub, no snapping, no intro choreography and no parallax. Chapters activate when centered, and the backdrop *cuts* to that chapter's shot (`setProgress(p, true)`) behind a quick fade. Reveals are opacity-only, bird/map/sky swaps are instant, and the bird's weave is reduced. Changing the setting rebuilds the scene.
+- **Settings.** `settings.ts` persists `{bird, map, weather, ringChallenge}` under `bird-flight-settings` when pre-flight begins, and validates every field on read. The landing starts from the saved choices, and **Quick start** uses them.
+
 ---
 
 ## 7. Coding conventions and patterns
@@ -373,6 +407,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Imports.** Use the `@/` alias for `src`. Use `import * as THREE from 'three'`. Put `type` imports inline, as in `import { Bird, type BirdType }`.
 - **React style.** One big `App` function component. Every handler is wrapped in `useCallback`. Refs mirror state that the long-lived tracker closure needs to read, such as `barrelRollingRef`. Styling is Tailwind utility classes with inline styles for gradients. There's no component library: the shadcn scaffold was removed. Theme tokens such as `bg-card` and `text-primary` still come from `index.css`.
 - **Verification habit:** always run `pnpm run build` from the root, which also typechecks, and check visual changes in a real browser with a webcam.
+- **Landing styling.** The landing and pre-flight screens use their own dark-glass look (`ascent-glass`, `ascent-glass-strong`, `ascent-hud`, `ascent-shadow` in `index.css`), `font-display` (Instrument Serif) for headings and `font-mono` (JetBrains Mono) for readouts. The in-flight HUD still uses the original warm theme tokens.
 - **Dependencies:** anything imported at runtime goes in the game's `dependencies`, and build tooling in `devDependencies`. Prefer `catalog:` versions for shared tooling. New packages must be at least 1 day old (`minimumReleaseAge`). Don't reintroduce platform-specific `overrides`.
 
 ---
@@ -434,7 +469,7 @@ These come from code reading plus headless runs.
 
 ### Robustness and UX
 6. **No keyboard, mouse or touch fallback**, and no pause. You can't play or debug without a webcam, and mobile is effectively unsupported.
-7. **Tall cards get clipped.** The menu, calibration and startup cards use `flex items-center justify-center overflow-y-auto`. When a card is taller than the window (the menu at a 720 px height), its top is cut off and **can't be scrolled to**, which can hide the calibration **Back** button. The usual fix is `my-auto` on the card, or `justify-start` combined with `min-h-full`.
+7. ~~**Tall cards get clipped.**~~ Fixed in the landing redesign. The menu card is gone, and the pre-flight cards sit in `PreflightLayer` (a `fixed overflow-y-auto` scroller around a `min-h-full` flex box), so a tall card starts at the top and scrolls. At 1280×720 the two-column calibration card (522 px) fits without scrolling, and the landing chapters are `min-h-svh`, so they grow instead of clipping.
 8. **Cryptic load-error detail.** When a MediaPipe file 404s, the detail under the friendly message is minified MediaPipe internals such as `TypeError: jt is not a function`. The friendly message is correct, but the detail line doesn't help users.
 9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
 
@@ -444,7 +479,7 @@ These come from code reading plus headless runs.
 12. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
 13. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
 14. **Main-thread stutter.** Tile generation is synchronous: crossing a tile boundary builds 7 tiles of noise on the main thread. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
-15. **Large downloads.** The JS is one 837 kB chunk (232 kB gzip) with no code splitting. On top of that, each session downloads about 13 MB of MediaPipe files.
+15. **Large downloads.** The entry chunk is 908 kB (264 kB gzip: React, three, GSAP). MediaPipe's JS and the engine are now split out and only loaded at pre-flight, but each session still downloads about 13 MB of MediaPipe files.
 
 ### three.js deprecations (seen in the console on r185)
 16. `THREE.Clock` is deprecated in favor of `THREE.Timer`.
@@ -458,6 +493,8 @@ These come from code reading plus headless runs.
 22. **Stale `replit.md`.** It is kept as is by request (see the top of this file). It still describes Finger mode and the CDN.
 23. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
 24. **The MediaPipe asset path lives in two places.** `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts` and `MEDIAPIPE_ASSET_DIR` in `handControls.ts` must stay in sync.
+25. **Landing and game stay separate.** The landing flight path is scripted and never uses GameEngine physics. Tuning the in-game feel doesn't change the landing, and the reverse is also true.
+26. **Landing performance is only verified headlessly.** It was checked with SwiftShader (software WebGL), which renders correctly but can't measure real frame rates. The 60 FPS target needs checking on a real mid-range laptop (see the PR test checklist).
 
 ---
 
@@ -465,7 +502,7 @@ These come from code reading plus headless runs.
 
 **P0: playability**
 1. Add a **keyboard and mouse fallback** (WASD or arrows, Space for boost, a key for backflip) behind the same `HandControlState` interface. This helps accessibility, users without a webcam, and debugging.
-2. Fix the clipped tall cards (§9 #7), so Back and Start Flying are always reachable on small windows.
+2. ~~Fix the clipped tall cards (§9 #7).~~ Done in the landing redesign.
 
 **P1: controls feel**
 
@@ -481,7 +518,7 @@ These come from code reading plus headless runs.
 9. Remove per-frame `Vector3` allocations by using scratch vectors.
 10. Dispose geometries, materials and textures properly, and call `forceContextLoss()` on engine teardown.
 11. Generate tiles incrementally (one per frame) or in a worker. Bound `islandCache`.
-12. Code-split: lazy-load MediaPipe and the engine after the menu. Consider dropping the unused `hand_landmark_full.tflite` from the build, since `modelComplexity` is 0.
+12. ~~Code-split: lazy-load MediaPipe and the engine.~~ Done (both load at pre-flight). Still open: consider dropping the unused `hand_landmark_full.tflite` from the build, since `modelComplexity` is 0.
 
 **P3: visuals and gameplay**
 
@@ -501,7 +538,11 @@ These come from code reading plus headless runs.
 
 ## 11. Gotchas for future changes
 
-- Don't start the camera or audio before a user gesture. Camera and tracking start on **Continue to Calibration**, and wind audio starts on **Start Flying**.
+- Don't start the camera or audio before a user gesture. Camera and tracking start on **Begin pre-flight** / **Quick start**. In-game wind audio starts on **Start Flying**, and the landing's ambient wind starts only from its **Sound** toggle click.
+- Keep MediaPipe and the engine lazy. Never add a runtime (non-`type`) import of `@/game/handControls`, `@mediapipe/hands` or `@/game/GameEngine` to `App.tsx`, `landing/*`, or anything they import statically. Put shared runtime values in `trackingShared.ts` / `presets.ts` instead. Check with `pnpm run build`: `handControls-*.js` and `GameEngine-*.js` must stay separate chunks.
+- Always dispose the `LandingScene` before constructing a `GameEngine` (`disposeLandingScene()` in `handleStartFlying`), so two WebGL contexts are never live at once.
+- Don't put Tailwind's plain `transition` utility (it includes `opacity` and `transform`) on elements GSAP animates (`data-hud`, `data-intro`, `data-reveal`). The CSS transition fights the tween and left the Sound button stuck at opacity 0. Use `transition-colors`.
+- Don't wrap text that has `ascent-shadow` in `overflow-hidden` masks. The clip turns the soft shadow into visible rectangles, so reveal it with opacity and a transform instead.
 - Don't fold the trick sweep into the steering angles (see memory note).
 - Don't move the `state.backflip` check below the `handDetected` guard in `applyControls`.
 - Don't re-throw from the per-frame `hands.send()` catch. Startup failures are different: `start()` surfaces them as `TrackingStartError` so the UI can show them.
@@ -511,4 +552,4 @@ These come from code reading plus headless runs.
 - Don't "fix" the mirrored overlay or drag math without reading the two canvas-mirror memory notes. The un-mirror at draw time and the *absence* of a flip in pointer handling are both intentional.
 - To flip a bird's facing direction, change the yaw offset on the outer group, never the mesh (see `three-js-mesh-orientation-fix.md`).
 - When adding a map, implement `update(position)` and `heightAtWorld(x, z)`. Add `isOverWater` if it has water, and wire it in the `GameEngine` constructor.
-- The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3.
+- The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3. In this repo's cloud sandbox, headless Chromium can't reach Google Fonts through the TLS proxy. For screenshots, route `fonts.googleapis.com`/`fonts.gstatic.com` through `curl` with Playwright's `page.route` rather than disabling certificate checks.
