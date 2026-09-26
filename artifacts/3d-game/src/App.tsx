@@ -5,16 +5,77 @@ import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPre
 import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
 import {
   HandTracker,
+  TrackingStartError,
   MIN_SENSITIVITY,
   MAX_SENSITIVITY,
   type HandControlState,
-  type ControlMode,
   type CalibrationPoint,
   type CalibrationCorner,
 } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 
-type FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'denied' | 'unsupported';
+type FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'error';
+
+type StartupErrorKind =
+  | 'insecure-context'
+  | 'unsupported'
+  | 'permission-denied'
+  | 'no-camera'
+  | 'camera-in-use'
+  | 'tracking-load-failed'
+  | 'tracking-timeout'
+  | 'unknown';
+
+interface StartupError {
+  kind: StartupErrorKind;
+  /** Raw error text, shown small under the friendly message to help with debugging. */
+  detail?: string;
+}
+
+const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
+  'insecure-context':
+    'Camera access needs a secure connection. Open the game over https:// (or on localhost) and try again.',
+  unsupported: 'This browser does not support webcam access, so hand tracking cannot run here.',
+  'permission-denied':
+    'Camera access was blocked. Allow camera access for this site in your browser settings, then try again.',
+  'no-camera': 'No camera was found. Connect a webcam and try again.',
+  'camera-in-use':
+    'Your camera is busy or could not be started. Close other apps or tabs that are using it, then try again.',
+  'tracking-load-failed':
+    'Hand tracking failed to load. Check your internet connection and try again.',
+  'tracking-timeout':
+    'Hand tracking took too long to load. Check your internet connection and try again.',
+  unknown: 'Something went wrong while starting the camera. Please try again.',
+};
+
+/** Maps a getUserMedia / video.play() / HandTracker failure onto a specific, user-facing error. */
+function classifyStartupError(error: unknown): StartupError {
+  const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  if (error instanceof TrackingStartError) {
+    const cause = error.cause instanceof Error ? `${error.cause.name}: ${error.cause.message}` : undefined;
+    return { kind: error.kind === 'timeout' ? 'tracking-timeout' : 'tracking-load-failed', detail: cause ?? detail };
+  }
+  const name = error instanceof DOMException || error instanceof Error ? error.name : '';
+  switch (name) {
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+    case 'SecurityError':
+      return { kind: 'permission-denied', detail };
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+    case 'OverconstrainedError':
+      return { kind: 'no-camera', detail };
+    case 'NotSupportedError':
+    case 'TypeError':
+      return { kind: 'unsupported', detail };
+    case 'NotReadableError':
+    case 'TrackStartError':
+    case 'AbortError':
+      return { kind: 'camera-in-use', detail };
+    default:
+      return { kind: 'unknown', detail };
+  }
+}
 
 // The small in-flight HUD preview stays compact; the calibration screen gets a larger one
 // so the player can clearly see the crosshair/box and their hand while setting it up.
@@ -23,7 +84,7 @@ const HUD_PREVIEW_HEIGHT = 132;
 const CALIBRATION_PREVIEW_WIDTH = 360;
 const CALIBRATION_PREVIEW_HEIGHT = 270;
 
-const GESTURE_GUIDE_HAND = [
+const GESTURE_GUIDE = [
   {
     icon: Hand,
     title: 'Open hand, at your neutral center',
@@ -51,34 +112,6 @@ const GESTURE_GUIDE_HAND = [
   },
 ] as const;
 
-const GESTURE_GUIDE_FINGER = [
-  {
-    icon: Hand,
-    title: 'Point your index finger, at your neutral center',
-    description: 'Glide straight and steady — cursor-style flight.',
-  },
-  {
-    icon: MoveHorizontal,
-    title: 'Move your fingertip left / right',
-    description: 'Turn and roll that way.',
-  },
-  {
-    icon: MoveVertical,
-    title: 'Move your fingertip up / down',
-    description: 'Pitch up to climb, down to dive.',
-  },
-  {
-    icon: Zap,
-    title: 'Close into a fist',
-    description: 'Speed boost — and an automatic barrel roll the instant your fist closes.',
-  },
-  {
-    icon: ArrowUp,
-    title: 'Flick your finger up, fast',
-    description: 'Triggers an automatic backflip along your flight path.',
-  },
-] as const;
-
 interface CalibrationPointsMap {
   center: CalibrationPoint | null;
   topLeft: CalibrationPoint | null;
@@ -102,7 +135,7 @@ const CALIBRATION_STEPS: { key: CalibrationStepKey; title: string; instruction: 
     key: 'center',
     title: 'Step 1 of 5 — Neutral Center',
     instruction:
-      'Hold your hand (or finger) comfortably in front of the camera, wherever feels natural. This is where "fly straight" will be.',
+      'Hold your hand comfortably in front of the camera, wherever feels natural. This is where "fly straight" will be.',
     buttonLabel: 'Set Center',
   },
   {
@@ -143,7 +176,6 @@ function drawHandPreview(
   width: number,
   height: number,
   calibration?: CalibrationPointsMap | null,
-  controlMode?: ControlMode,
 ) {
   ctx.save();
   ctx.clearRect(0, 0, width, height);
@@ -165,16 +197,6 @@ function drawHandPreview(
     for (const point of landmarks) {
       ctx.beginPath();
       ctx.arc(point.x * width, point.y * height, 2.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    if (controlMode === 'finger') {
-      // Highlight the index fingertip distinctly — it's the actual tracked point in Single
-      // Finger Steering mode, not the palm center.
-      const tip = landmarks[8];
-      ctx.fillStyle = '#5eead4';
-      ctx.beginPath();
-      ctx.arc(tip.x * width, tip.y * height, 6, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -270,6 +292,12 @@ function App() {
   const draggingCornerRef = useRef<CalibrationCorner | null>(null);
   const barrelRollingRef = useRef(false);
   const backflippingRef = useRef(false);
+  // Incremented by every start attempt and by every teardown. An async startup step that
+  // finishes after its session was superseded (e.g. the player pressed Back while the camera
+  // permission prompt was still open) sees a stale id and cleans up after itself.
+  const sessionIdRef = useRef(0);
+  // True while "Start Flying" is building the engine, so a double click can't build two.
+  const startingFlightRef = useRef(false);
 
   const [flightState, setFlightState] = useState<FlightState>('menu');
   const [handDetected, setHandDetected] = useState(false);
@@ -279,12 +307,12 @@ function App() {
   const [underwater, setUnderwater] = useState(false);
   const [surfaceSplash, setSurfaceSplash] = useState(false);
   const [statusText, setStatusText] = useState('Status: No Hand Detected');
+  const [startupError, setStartupError] = useState<StartupError | null>(null);
 
   const [selectedBird, setSelectedBird] = useState<BirdType>('pigeon');
   const [selectedMap, setSelectedMap] = useState<MapType>('mountain');
   const [selectedWeather, setSelectedWeather] = useState<WeatherPreset>('sunny');
   const [ringChallengeEnabled, setRingChallengeEnabled] = useState(false);
-  const [controlMode, setControlMode] = useState<ControlMode>('hand');
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
 
@@ -306,6 +334,7 @@ function App() {
   }, [backflipping]);
 
   const stopEverything = useCallback(() => {
+    sessionIdRef.current += 1;
     trackerRef.current?.stop();
     trackerRef.current = null;
     engineRef.current?.dispose();
@@ -325,61 +354,100 @@ function App() {
   // is what carries the calibration (center + box + sensitivity), so the engine doesn't need
   // it directly.
   const handleContinueToCalibration = useCallback(async () => {
+    const showError = (error: StartupError) => {
+      setStartupError(error);
+      setFlightState('error');
+    };
+
+    if (!window.isSecureContext) {
+      showError({ kind: 'insecure-context' });
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
-      setFlightState('unsupported');
+      showError({ kind: 'unsupported' });
       return;
     }
 
+    const sessionId = ++sessionIdRef.current;
+    const isCurrent = () => sessionId === sessionIdRef.current;
+
+    setStartupError(null);
     setFlightState('requesting');
     setScore(0);
     setCalibrationStep(0);
     calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
 
+    let stream: MediaStream | null = null;
+    let tracker: HandTracker | null = null;
+    // Releases everything this attempt acquired. Safe to call after stopEverything() has already
+    // stopped some of it (stopping a track or tracker twice is a no-op).
+    const releaseLocal = () => {
+      if (tracker) {
+        tracker.stop();
+        if (trackerRef.current === tracker) trackerRef.current = null;
+      }
+      stream?.getTracks().forEach((track) => track.stop());
+      const video = videoRef.current;
+      if (video && stream && video.srcObject === stream) video.srcObject = null;
+    };
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 480, height: 360, facingMode: 'user' },
         audio: false,
       });
+      if (!isCurrent()) {
+        releaseLocal();
+        return;
+      }
 
       const video = videoRef.current;
-      if (!video) throw new Error('Missing video target');
+      if (!video) throw new Error('Missing video element');
       video.srcObject = stream;
       await video.play();
+      if (!isCurrent()) {
+        releaseLocal();
+        return;
+      }
 
       // Defined once and never recreated: it always forwards to whichever engine is
       // currently active (a no-op during calibration, since engineRef.current is still
       // null), and keeps the live preview/status state fresh on both the calibration and
       // flying screens.
-      const tracker = new HandTracker(
-        video,
-        (state: HandControlState) => {
-          engineRef.current?.applyControls(state);
-          latestLandmarksRef.current = state.landmarks;
-          setHandDetected(state.handDetected);
-          setBoosting(state.boost);
-          setStatusText(
-            describeStatus({
-              handDetected: state.handDetected,
-              roll: state.roll,
-              pitch: state.pitch,
-              boost: state.boost,
-              barrelRolling: barrelRollingRef.current,
-              backflipping: backflippingRef.current,
-            }),
-          );
-        },
-        () => setFlightState('denied'),
-      );
-      tracker.setControlMode(controlMode);
+      tracker = new HandTracker(video, (state: HandControlState) => {
+        engineRef.current?.applyControls(state);
+        latestLandmarksRef.current = state.landmarks;
+        setHandDetected(state.handDetected);
+        setBoosting(state.boost);
+        setStatusText(
+          describeStatus({
+            handDetected: state.handDetected,
+            roll: state.roll,
+            pitch: state.pitch,
+            boost: state.boost,
+            barrelRolling: barrelRollingRef.current,
+            backflipping: backflippingRef.current,
+          }),
+        );
+      });
+      // Registered before the (possibly slow) model load, so pressing Back mid-load stops it
+      // right away via stopEverything().
       trackerRef.current = tracker;
       await tracker.start();
+      if (!isCurrent()) {
+        releaseLocal();
+        return;
+      }
 
       setFlightState('calibrating');
     } catch (error) {
+      releaseLocal();
+      // A superseded attempt (the player already went back) must not pop an error screen.
+      if (!isCurrent()) return;
       console.error('Failed to start hand tracking', error);
-      setFlightState('denied');
+      showError(classifyStartupError(error));
     }
-  }, [controlMode]);
+  }, []);
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
   // (the larger calibration one, or the compact in-flight HUD one), including the in-progress
@@ -405,7 +473,6 @@ function App() {
           width,
           height,
           showCalibration ? calibrationPointsRef.current : null,
-          controlMode,
         );
       }
       rafId = requestAnimationFrame(drawPreview);
@@ -414,7 +481,7 @@ function App() {
     previewRafRef.current = rafId;
 
     return () => cancelAnimationFrame(rafId);
-  }, [flightState, controlMode]);
+  }, [flightState]);
 
   // Captures whichever calibration point the current step needs (neutral center, or one of
   // the 4 box corners), stores it for the overlay, and advances to the next step.
@@ -435,21 +502,6 @@ function App() {
     calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
     setCalibrationStep(0);
   }, []);
-
-  // Switching control mode mid-calibration (or after finishing it) invalidates any points
-  // already captured, since they were captured for a different tracked point (palm vs
-  // fingertip) — so changing modes always resets calibration back to step 1.
-  const handleSelectControlMode = useCallback(
-    (mode: ControlMode) => {
-      if (mode === controlMode) return;
-      setControlMode(mode);
-      trackerRef.current?.setControlMode(mode);
-      trackerRef.current?.resetCalibration();
-      calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
-      setCalibrationStep(0);
-    },
-    [controlMode],
-  );
 
   // Drag-to-fine-tune: once a corner has been captured, the player can grab its handle
   // directly on the webcam preview and drag it to a new spot. Because the canvas is displayed
@@ -524,7 +576,8 @@ function App() {
   }, []);
 
   const handleStartFlying = useCallback(async () => {
-    if (!canvasContainerRef.current) return;
+    if (!canvasContainerRef.current || engineRef.current || startingFlightRef.current) return;
+    startingFlightRef.current = true;
 
     const engine = new GameEngine(canvasContainerRef.current, {
       birdType: selectedBird,
@@ -543,7 +596,14 @@ function App() {
       },
     });
     engineRef.current = engine;
-    await engine.start();
+    try {
+      await engine.start();
+    } finally {
+      startingFlightRef.current = false;
+    }
+    // The player may have pressed Back while the engine was starting; stopEverything() has
+    // already disposed it in that case.
+    if (engineRef.current !== engine) return;
     setFlightState('flying');
   }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled]);
 
@@ -573,6 +633,8 @@ function App() {
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
+    setSurfaceSplash(false);
+    setStartupError(null);
     setCalibrationStep(0);
     setStatusText('Status: No Hand Detected');
   }, [stopEverything]);
@@ -581,7 +643,6 @@ function App() {
 
   const flying = flightState === 'flying';
   const calibrating = flightState === 'calibrating';
-  const gestureGuide = controlMode === 'finger' ? GESTURE_GUIDE_FINGER : GESTURE_GUIDE_HAND;
   const currentCalibrationStep = CALIBRATION_STEPS[calibrationStep] ?? null;
 
   return (
@@ -624,11 +685,7 @@ function App() {
 
           <div className="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 text-center">
             <p className="rounded-full bg-card/70 px-5 py-2 text-sm font-medium tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm">
-              {handDetected
-                ? controlMode === 'finger'
-                  ? 'Point your finger to glide'
-                  : 'Tilt your palm to glide'
-                : 'Show your hand to the camera to steer'}
+              {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
             </p>
           </div>
 
@@ -715,7 +772,7 @@ function App() {
             </p>
 
             <ul className="mb-8 flex flex-col gap-3 text-left">
-              {gestureGuide.map(({ icon: Icon, title, description }) => (
+              {GESTURE_GUIDE.map(({ icon: Icon, title, description }) => (
                 <li
                   key={title}
                   className="flex items-center gap-3 rounded-2xl bg-muted/60 px-4 py-3"
@@ -840,22 +897,31 @@ function App() {
         </div>
       )}
 
-      {(flightState === 'requesting' || flightState === 'denied' || flightState === 'unsupported') && (
+      {(flightState === 'requesting' || flightState === 'error') && (
         <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
           <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
             <h1 className="mb-3 text-2xl font-semibold text-foreground">Bird Flight</h1>
             {flightState === 'requesting' && (
-              <p className="mb-6 text-sm leading-relaxed text-muted-foreground">Waking up the sky…</p>
-            )}
-            {flightState === 'denied' && (
-              <p className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
-                Camera access was blocked. Allow camera permissions in your browser and try again.
+              <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
+                Waking up the sky… (allow camera access, then hand tracking loads)
               </p>
             )}
-            {flightState === 'unsupported' && (
-              <p className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
-                This browser does not support webcam access, so hand tracking cannot run here.
-              </p>
+            {flightState === 'error' && startupError && (
+              <div className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
+                <p>{STARTUP_ERROR_MESSAGES[startupError.kind]}</p>
+                {startupError.detail && (
+                  <p className="mt-1 break-words text-xs opacity-70">{startupError.detail}</p>
+                )}
+              </div>
+            )}
+            {flightState === 'error' && (
+              <button
+                type="button"
+                onClick={handleContinueToCalibration}
+                className="mb-2 w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90"
+              >
+                Try Again
+              </button>
             )}
             <button
               type="button"
@@ -881,38 +947,6 @@ function App() {
             </button>
 
             <h1 className="mb-4 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
-
-            <div className="mb-5 text-left">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                Control Mode
-              </p>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleSelectControlMode('hand')}
-                  className={`rounded-2xl border px-3 py-2.5 text-center transition ${
-                    controlMode === 'hand'
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                  }`}
-                >
-                  <span className="block text-sm font-semibold text-foreground">Full Hand Steering</span>
-                  <span className="block text-xs text-muted-foreground">Track your whole palm</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleSelectControlMode('finger')}
-                  className={`rounded-2xl border px-3 py-2.5 text-center transition ${
-                    controlMode === 'finger'
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                  }`}
-                >
-                  <span className="block text-sm font-semibold text-foreground">Index Finger Steering</span>
-                  <span className="block text-xs text-muted-foreground">Track just your fingertip</span>
-                </button>
-              </div>
-            </div>
 
             <div className="mb-4 flex items-center justify-center gap-1.5">
               {CALIBRATION_STEPS.map((step, i) => (
@@ -951,9 +985,7 @@ function App() {
               />
             </div>
             <p className="mb-1 text-xs font-medium tracking-wide text-muted-foreground">
-              {handDetected
-                ? `${controlMode === 'finger' ? 'Finger' : 'Hand'} detected — hold it at the target position.`
-                : `Show your ${controlMode === 'finger' ? 'finger' : 'hand'} to the camera.`}
+              {handDetected ? 'Hand detected — hold it at the target position.' : 'Show your hand to the camera.'}
             </p>
             <p className="mb-5 text-xs text-muted-foreground">
               You can also drag any orange corner dot directly on the preview to fine-tune it.

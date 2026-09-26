@@ -180,6 +180,8 @@ export class GameEngine {
   private wind = new WindAudio();
   private sfx = new SoundEffects();
 
+  private sky!: THREE.Mesh;
+  private skyClouds!: THREE.Group;
   private sun!: THREE.DirectionalLight;
   private hemi!: THREE.HemisphereLight;
   private ambient!: THREE.AmbientLight;
@@ -300,13 +302,18 @@ export class GameEngine {
     });
     const sky = new THREE.Mesh(skyGeometry, skyMaterial);
     this.scene.add(sky);
+    this.sky = sky;
 
     if (look.stars) {
       this.buildStarfield();
     }
 
     // A handful of soft, distant background cloud puffs for horizon-level atmosphere —
-    // separate from CloudManager's nearer, flyable clusters.
+    // separate from CloudManager's nearer, flyable clusters. Grouped so the whole backdrop can
+    // follow the bird on XZ (see `update`), like the sky dome and starfield.
+    const skyClouds = new THREE.Group();
+    this.scene.add(skyClouds);
+    this.skyClouds = skyClouds;
     const cloudMaterial = new THREE.MeshStandardMaterial({
       color: '#ffffff',
       transparent: true,
@@ -332,7 +339,7 @@ export class GameEngine {
         40 + Math.random() * 60,
         Math.sin(angle) * radius,
       );
-      this.scene.add(cluster);
+      skyClouds.add(cluster);
     }
   }
 
@@ -451,7 +458,14 @@ export class GameEngine {
       this.options.onBackflip?.();
     }
 
-    if (!state.handDetected) return;
+    // Hand lost: ease back to level flight at cruise speed instead of latching the last steering
+    // and boost input (the pitch/roll ease comes from the ORIENTATION_LERP chase in `update`).
+    if (!state.handDetected) {
+      this.targetPitch = 0;
+      this.targetRoll = 0;
+      this.boosting = false;
+      return;
+    }
 
     this.targetPitch = state.pitch;
     this.targetRoll = state.roll;
@@ -533,7 +547,26 @@ export class GameEngine {
     ).normalize();
 
     const bird = this.bird.group;
+    const prevX = bird.position.x;
+    const prevZ = bird.position.z;
     bird.position.addScaledVector(forward, this.speed * dt);
+
+    // Islands are solid below the waterline: a submerged bird that swims into an island's
+    // footprint slides along its edge instead of being snapped up through the surface by the
+    // solid-ground altitude floor below. Try keeping each horizontal axis of the move on its
+    // own before falling back to blocking the horizontal move entirely.
+    if (this.underwater && this.ocean && !this.ocean.isOverWater(bird.position.x, bird.position.z)) {
+      const newX = bird.position.x;
+      const newZ = bird.position.z;
+      if (this.ocean.isOverWater(newX, prevZ)) {
+        bird.position.z = prevZ;
+      } else if (this.ocean.isOverWater(prevX, newZ)) {
+        bird.position.x = prevX;
+      } else {
+        bird.position.x = prevX;
+        bird.position.z = prevZ;
+      }
+    }
 
     // Altitude clamp: over open water there is no floor except the seabed itself, letting
     // the bird dive to (and below) true sea level. Over solid ground — the mountain map, or
@@ -635,6 +668,10 @@ export class GameEngine {
     this.sun.target.position.copy(bird.position);
     this.sun.target.updateMatrixWorld();
 
+    // The sky backdrop (gradient dome, distant clouds, starfield) follows the bird on XZ so the
+    // endless world never flies out of it.
+    this.sky.position.set(bird.position.x, 0, bird.position.z);
+    this.skyClouds.position.set(bird.position.x, 0, bird.position.z);
     if (this.starfield) {
       this.starfield.position.set(bird.position.x, 0, bird.position.z);
     }

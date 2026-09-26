@@ -2,6 +2,7 @@ import path from 'path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
+import { mediapipeAssets } from './vite-plugin-mediapipe-assets';
 
 // PORT and BASE_PATH are injected by Replit (see .replit-artifact/artifact.toml); everywhere
 // else (local dev, Vercel) they fall back to Vite's usual ports and a root base path.
@@ -41,7 +42,7 @@ const replitPlugins = isReplit
 
 export default defineConfig({
   base: basePath,
-  plugins: [react(), tailwindcss(), ...replitPlugins],
+  plugins: [react(), tailwindcss(), mediapipeAssets(), ...replitPlugins],
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, 'src'),

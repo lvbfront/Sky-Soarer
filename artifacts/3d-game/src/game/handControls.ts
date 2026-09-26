@@ -1,4 +1,3 @@
-import { Camera } from '@mediapipe/camera_utils';
 import { Hands, type NormalizedLandmark, type Results } from '@mediapipe/hands';
 
 export interface HandControlState {
@@ -7,15 +6,12 @@ export interface HandControlState {
   pitch: number;
   /** -1 (bank left) .. 1 (bank right), smoothed */
   roll: number;
-  /** True while the hand is held in a closed fist / fingers folded into the palm (triggers boost + the barrel roll), in either control mode. */
+  /** True while the hand is held in a closed fist / fingers folded into the palm (triggers boost + the barrel roll). */
   boost: boolean;
   /** One-shot pulse: true for exactly the frame a fast upward flick is detected. */
   backflip: boolean;
   landmarks: NormalizedLandmark[] | null;
 }
-
-/** Full Hand Steering tracks the palm center; Single Finger Steering tracks the index fingertip. */
-export type ControlMode = 'hand' | 'finger';
 
 export type CalibrationCorner = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
 
@@ -26,7 +22,6 @@ export interface CalibrationPoint {
 
 const FINGER_TIPS = [4, 8, 12, 16, 20];
 const PALM_POINTS = [0, 5, 9, 13, 17];
-const INDEX_TIP = 8;
 
 const FIST_CLOSE_RATIO = 0.62;
 const FIST_OPEN_RATIO = 0.8;
@@ -55,6 +50,45 @@ const BACKFLIP_COOLDOWN_MS = 1200;
 // If the hand disappears shortly after a fast upward flick (common when the flick carries
 // the hand out of frame), still fire the backflip once rather than losing the gesture.
 const HAND_LOST_GRACE_MS = 300;
+
+// The MediaPipe wasm/model/graph files are self-hosted: vite-plugin-mediapipe-assets.ts copies
+// them out of the installed @mediapipe/hands package (so the version lives only in package.json)
+// and serves them under this path, in dev and in the production build alike.
+const MEDIAPIPE_ASSET_DIR = `${import.meta.env.BASE_URL}mediapipe/hands/`;
+
+// Upper bound on loading the wasm + model and running the first frame through the graph. The
+// assets are ~15 MB, so this is generous for slow connections while still turning a stuck load
+// into a clear on-screen error instead of an endless "Show your hand" wait.
+const TRACKING_START_TIMEOUT_MS = 30_000;
+
+export type TrackingStartErrorKind = 'load-failed' | 'timeout';
+
+/** Thrown by `HandTracker.start()` when MediaPipe can't load or doesn't finish loading in time. */
+export class TrackingStartError extends Error {
+  constructor(
+    readonly kind: TrackingStartErrorKind,
+    readonly cause?: unknown,
+  ) {
+    super(kind === 'timeout' ? 'Hand tracking timed out while loading' : 'Hand tracking failed to load');
+    this.name = 'TrackingStartError';
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new TrackingStartError('timeout')), ms);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 // Default calibration box (mirrored-frame coordinates) used until the player completes the
 // 4-corner calibration flow, so the tracker still produces sane output before that.
@@ -95,15 +129,14 @@ function applyDeadzone(value: number, deadzone: number) {
 
 export class HandTracker {
   private hands: Hands;
-  private camera: Camera | null = null;
   private videoEl: HTMLVideoElement;
   private onUpdate: (state: HandControlState) => void;
-  private onError: (error: unknown) => void;
 
-  private controlMode: ControlMode = 'hand';
+  // Frame loop state: a new frame is sent to MediaPipe only when the video has actually advanced.
+  private rafId: number | null = null;
+  private lastVideoTime = -1;
 
-  // Smoothed position of whichever point is currently tracked (palm center in Hand mode,
-  // index fingertip in Finger mode), in mirrored-frame coordinates.
+  // Smoothed palm-center position, in mirrored-frame coordinates.
   private smoothedX = 0.5;
   private smoothedY = 0.5;
   private hasSmoothed = false;
@@ -137,17 +170,13 @@ export class HandTracker {
   private lastBackflipTimeMs = -Infinity;
   private lastFastUpwardFlickTimeMs = -Infinity;
 
-  constructor(
-    videoEl: HTMLVideoElement,
-    onUpdate: (state: HandControlState) => void,
-    onError: (error: unknown) => void,
-  ) {
+  /** `videoEl` must already be playing the webcam stream; the tracker never opens the camera itself. */
+  constructor(videoEl: HTMLVideoElement, onUpdate: (state: HandControlState) => void) {
     this.videoEl = videoEl;
     this.onUpdate = onUpdate;
-    this.onError = onError;
 
     this.hands = new Hands({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`,
+      locateFile: (file) => `${MEDIAPIPE_ASSET_DIR}${file}`,
     });
     this.hands.setOptions({
       // We mirror the tracked point's X coordinate ourselves below (in lockstep with the
@@ -162,56 +191,67 @@ export class HandTracker {
     this.hands.onResults((results) => this.handleResults(results));
   }
 
+  /**
+   * Loads MediaPipe (wasm + model), runs one warm-up frame through the full graph, then starts
+   * the per-frame loop. Rejects with a `TrackingStartError` if loading fails or takes longer than
+   * `TRACKING_START_TIMEOUT_MS`, so the UI can show a clear error instead of waiting forever.
+   */
   async start() {
     try {
-      this.camera = new Camera(this.videoEl, {
-        onFrame: async () => {
-          // Guard against frames still in flight from `requestAnimationFrame` right after
-          // `stop()` was called — sending into (or closing) a Hands instance mid-flight is
-          // what triggers MediaPipe's "Cannot pass deleted object as a pointer" wasm error.
-          if (this.stopped) return;
-          try {
-            await this.hands.send({ image: this.videoEl });
-          } catch (error) {
-            // A single frame occasionally failing inside MediaPipe's internal WASM/WebGL
-            // pipeline (e.g. a transient GL context hiccup) shouldn't take down the whole
-            // tracking session with an uncaught rejection — log it and keep going, since the
-            // next frame usually recovers on its own. The narrower "deleted object" error from
-            // a stop()-during-flight race is already avoided by the `this.stopped` check above.
-            if (!this.stopped) {
-              console.warn('HandTracker: a frame failed to process, skipping it', error);
-            }
-          }
-        },
-        width: 480,
-        height: 360,
-      });
-      await this.camera.start();
+      await withTimeout(
+        (async () => {
+          await this.hands.initialize();
+          // The first send() is what actually fetches the model and builds the graph, so it's
+          // part of the load that the timeout covers.
+          if (!this.stopped) await this.hands.send({ image: this.videoEl });
+        })(),
+        TRACKING_START_TIMEOUT_MS,
+      );
     } catch (error) {
-      this.onError(error);
-      throw error;
+      if (error instanceof TrackingStartError) throw error;
+      throw new TrackingStartError('load-failed', error);
     }
+    if (this.stopped) return;
+    this.scheduleFrame();
   }
 
+  private scheduleFrame() {
+    if (this.stopped) return;
+    this.rafId = requestAnimationFrame(this.processFrame);
+  }
+
+  private processFrame = async () => {
+    this.rafId = null;
+    // Guard against a frame still in flight right after `stop()` — sending into (or closing) a
+    // Hands instance mid-flight is what triggers MediaPipe's "Cannot pass deleted object as a
+    // pointer" wasm error.
+    if (this.stopped) return;
+    const video = this.videoEl;
+    if (video.readyState >= 2 && video.currentTime !== this.lastVideoTime) {
+      this.lastVideoTime = video.currentTime;
+      try {
+        await this.hands.send({ image: video });
+      } catch (error) {
+        // A single frame occasionally failing inside MediaPipe's internal WASM/WebGL pipeline
+        // (e.g. a transient GL context hiccup) shouldn't take down the whole tracking session
+        // with an uncaught rejection — log it and keep going, since the next frame usually
+        // recovers on its own (see project memory on MediaPipe per-frame error handling).
+        if (!this.stopped) {
+          console.warn('HandTracker: a frame failed to process, skipping it', error);
+        }
+      }
+    }
+    this.scheduleFrame();
+  };
+
+  /** Stops the frame loop and releases MediaPipe. Does not touch the video's MediaStream — the caller owns it. */
   stop() {
     this.stopped = true;
-    this.camera?.stop();
+    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    this.rafId = null;
     this.hands.close().catch(() => {
       // Benign during teardown if a send() was already in flight when stop() was called.
     });
-  }
-
-  /** Full Hand Steering tracks the palm center; Single Finger Steering tracks the index fingertip. */
-  setControlMode(mode: ControlMode) {
-    this.controlMode = mode;
-    // Switching which point is tracked (palm vs fingertip) can jump the raw Y position
-    // discontinuously — clear the flick-detection history so that jump can't be misread as a
-    // real upward flick.
-    this.trackedYHistory = [];
-  }
-
-  getControlMode() {
-    return this.controlMode;
   }
 
   /** Sets the (mirrored-frame) point that counts as "fly straight" for steering offsets. */
@@ -231,7 +271,7 @@ export class HandTracker {
 
   /**
    * Captures the current smoothed tracked position as the new neutral center, so the player
-   * can hold their hand/finger wherever is comfortable and declare that "straight ahead".
+   * can hold their hand wherever is comfortable and declare that "straight ahead".
    * Returns the captured point for the calibration UI to draw a crosshair over, or null if no
    * hand is currently visible to capture from.
    */
@@ -288,7 +328,10 @@ export class HandTracker {
     const now = performance.now();
 
     if (!hand) {
+      // Release the fist state along with the hand, so boost can't resume latched when the hand
+      // reappears (the engine also drops boost on hand loss).
       this.fistFrameCounter = 0;
+      this.fistActive = false;
       // If the hand vanished shortly after a fast upward flick (the flick often carries the
       // hand out of the webcam frame entirely), still honor the gesture once here.
       const lostBackflip =
@@ -309,8 +352,7 @@ export class HandTracker {
       return;
     }
 
-    // Palm center is always computed (used for fist detection + hand-scale reference)
-    // regardless of control mode, since "folded hand" boost relies on it even in Finger mode.
+    // Palm center: the steering point, and the reference for fist detection.
     let palmX = 0;
     let palmY = 0;
     for (const idx of PALM_POINTS) {
@@ -320,13 +362,12 @@ export class HandTracker {
     palmX /= PALM_POINTS.length;
     palmY /= PALM_POINTS.length;
 
-    // The point actually used for steering: the palm center in Hand mode, or the index
-    // fingertip in Finger mode (raw camera-frame coordinates, not yet mirrored).
-    const trackedRawX = this.controlMode === 'finger' ? hand[INDEX_TIP].x : palmX;
-    const trackedRawY = this.controlMode === 'finger' ? hand[INDEX_TIP].y : palmY;
+    // Raw camera-frame coordinates of the steering point, not yet mirrored.
+    const trackedRawX = palmX;
+    const trackedRawY = palmY;
 
     // Mirror horizontally (scaleX = -1), matching the mirrored webcam preview: this makes
-    // moving your hand/finger to your own left steer left and to your own right steer right,
+    // moving your hand to your own left steer left and to your own right steer right,
     // the way a mirror (or any selfie camera app) naturally behaves.
     const mirroredTrackedX = 1 - trackedRawX;
 
@@ -407,8 +448,6 @@ export class HandTracker {
       this.fistFrameCounter = 0;
     }
 
-    // Boost is a closed fist / folded hand in both control modes — Finger mode only changes
-    // which point steers, not the boost gesture.
     const boost = this.fistActive;
 
     this.onUpdate({

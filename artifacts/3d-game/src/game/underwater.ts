@@ -13,6 +13,9 @@ const REEF_SPAWN_DISTANCE_MAX = 46;
 const REEF_LATERAL_OFFSET = 32;
 const REEF_MAX_ACTIVE = 32;
 const REEF_DESPAWN_BEHIND_DISTANCE = 42;
+// Also recycle any reef item this far from the bird horizontally (items spawn at most ~57 units
+// away), so turning away never leaves the pool full of unreachable items and stalls spawning.
+const REEF_DESPAWN_MAX_DISTANCE = 80;
 // Used only once, the instant the bird dives (or re-dives): scatters a full population of
 // reef items in a ring all around the bird's current position instead of relying purely on
 // the ahead-only spawn stream above, which alone would leave the reef empty for the many
@@ -522,7 +525,8 @@ export class UnderwaterEnvironment {
       }
       const delta = birdPosition.clone().sub(item.position);
       const axialDist = delta.dot(item.forwardAtSpawn);
-      if (axialDist > REEF_DESPAWN_BEHIND_DISTANCE) {
+      const horizontalDistSq = delta.x * delta.x + delta.z * delta.z;
+      if (axialDist > REEF_DESPAWN_BEHIND_DISTANCE || horizontalDistSq > REEF_DESPAWN_MAX_DISTANCE * REEF_DESPAWN_MAX_DISTANCE) {
         this.activeReef.splice(i, 1);
         item.group.visible = false;
         this.reefPool.push(item);
