@@ -263,6 +263,7 @@ export class LandingScene {
   private time = 0;
   private lastFrame = 0;
   private rafId: number | null = null;
+  private paused = false;
   private disposed = false;
   private altitudeFloor = 0;
   private prevMeters = 0;
@@ -417,10 +418,12 @@ export class LandingScene {
     this.camera.aspect = clientWidth / clientHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(clientWidth, clientHeight);
+    // setSize clears the canvas; while paused, redraw the held frame at the new size.
+    if (this.paused && !this.disposed) this.renderer.render(this.scene, this.camera);
   };
 
   start() {
-    if (this.rafId !== null || this.disposed) return;
+    if (this.rafId !== null || this.disposed || this.paused) return;
     this.lastFrame = performance.now();
     const loop = (now: number) => {
       if (this.disposed) return;
@@ -431,6 +434,22 @@ export class LandingScene {
       this.rafId = requestAnimationFrame(loop);
     };
     this.rafId = requestAnimationFrame(loop);
+  }
+
+  /**
+   * Pausing stops the frame loop entirely (no update, no render), so the backdrop costs nothing
+   * while MediaPipe is tracking on the same main thread during calibration. The canvas keeps
+   * showing the last rendered frame. Resuming restarts the loop without a time jump.
+   */
+  setPaused(paused: boolean) {
+    if (paused === this.paused || this.disposed) return;
+    this.paused = paused;
+    if (paused) {
+      if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    } else {
+      this.start();
+    }
   }
 
   /** Cinematic dolly-in from high and far back; skipped under prefers-reduced-motion. */
