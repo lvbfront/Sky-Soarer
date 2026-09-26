@@ -379,18 +379,16 @@ function App() {
   useEffect(() => landingScene?.setMap(selectedMap), [landingScene, selectedMap]);
   useEffect(() => landingScene?.setWeather(selectedWeather), [landingScene, selectedWeather]);
 
-  // During calibration MediaPipe is tracking on the main thread, so the backdrop freezes on its
-  // last frame instead of competing with it. It resumes on Back or the error screen, and is
-  // disposed outright (not just paused) once Start Flying builds the engine.
+  // Behind the pre-flight cards the backdrop holds the "above the clouds" shot. While hand tracking
+  // loads ('requesting') and runs ('calibrating') on the main thread, it's paused on that frame
+  // instead of competing with MediaPipe; setPaused cuts to the shot before it freezes. It resumes
+  // on Back or the error screen, and is disposed outright (not just paused) once Start Flying
+  // builds the engine.
   useEffect(() => {
-    landingScene?.setPaused(flightState === 'calibrating');
-  }, [flightState, landingScene]);
-
-  // Behind the pre-flight cards, the backdrop holds the "above the clouds" shot.
-  useEffect(() => {
-    if (flightState === 'requesting' || flightState === 'calibrating' || flightState === 'error') {
-      landingScene?.setProgress(1);
-    }
+    if (!landingScene) return;
+    const preflight = flightState === 'requesting' || flightState === 'calibrating' || flightState === 'error';
+    if (preflight) landingScene.setProgress(1);
+    landingScene.setPaused(flightState === 'requesting' || flightState === 'calibrating');
   }, [flightState, landingScene]);
 
   const disposeLandingScene = useCallback(() => {

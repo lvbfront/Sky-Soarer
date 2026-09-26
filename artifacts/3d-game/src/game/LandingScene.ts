@@ -438,8 +438,10 @@ export class LandingScene {
 
   /**
    * Pausing stops the frame loop entirely (no update, no render), so the backdrop costs nothing
-   * while MediaPipe is tracking on the same main thread during calibration. The canvas keeps
-   * showing the last rendered frame. Resuming restarts the loop without a time jump.
+   * while MediaPipe loads and tracks on the same main thread during pre-flight. Before stopping,
+   * it cuts straight to the target shot (finishing any intro dolly or pending progress chase) and
+   * renders that one frame, which the canvas then holds. Resuming restarts the loop without a
+   * time jump.
    */
   setPaused(paused: boolean) {
     if (paused === this.paused || this.disposed) return;
@@ -447,6 +449,12 @@ export class LandingScene {
     if (paused) {
       if (this.rafId !== null) cancelAnimationFrame(this.rafId);
       this.rafId = null;
+      gsap.killTweensOf(this.intro);
+      this.intro.t = 0;
+      this.progress = this.targetProgress;
+      this.resetVerticalSpeed = true;
+      this.update(0);
+      this.renderer.render(this.scene, this.camera);
     } else {
       this.start();
     }
@@ -588,11 +596,6 @@ export class LandingScene {
     // --- World streaming ------------------------------------------------------------------
     this.environment.update(holder.position);
     if (this.map === 'ocean') this.ocean?.animateWater(dt);
-    this.cloudRoot.visible = this.camera.position.y > CLOUDS_VISIBLE_FROM_CAMERA_Y;
-    if (this.cloudRoot.visible) {
-      this.clouds.update(dt, holder.position, this.forward);
-      this.updateCloudDeck();
-    }
 
     // --- Camera ---------------------------------------------------------------------------
     lerpTuple(this.camOffset, a.cam, b.cam, t);
@@ -626,6 +629,14 @@ export class LandingScene {
     if (Math.abs(this.camera.fov - targetFov) > 0.01) {
       this.camera.fov = targetFov;
       this.camera.updateProjectionMatrix();
+    }
+
+    // Cloud deck + flyable clouds, decided from this frame's camera height (so a single snapped
+    // frame, like the one setPaused holds, already shows them).
+    this.cloudRoot.visible = this.camPos.y > CLOUDS_VISIBLE_FROM_CAMERA_Y;
+    if (this.cloudRoot.visible) {
+      this.clouds.update(dt, holder.position, this.forward);
+      this.updateCloudDeck();
     }
 
     // --- Sky, fog, light ------------------------------------------------------------------
