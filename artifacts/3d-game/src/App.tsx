@@ -1,20 +1,58 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { HAND_CONNECTIONS, type NormalizedLandmark } from '@mediapipe/hands';
-import { Hand, MoveHorizontal, MoveVertical, Zap, ArrowUp, X, Crosshair, ChevronLeft, RotateCcw } from 'lucide-react';
-import { GameEngine, MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from '@/game/GameEngine';
-import { BIRD_OPTIONS, type BirdType } from '@/game/bird';
-import {
-  HandTracker,
-  TrackingStartError,
-  MIN_SENSITIVITY,
-  MAX_SENSITIVITY,
-  type HandControlState,
-  type CalibrationPoint,
-  type CalibrationCorner,
-} from '@/game/handControls';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import type { NormalizedLandmark } from '@mediapipe/hands';
+import { X, Crosshair, ChevronLeft, RotateCcw, ArrowRight } from 'lucide-react';
+import type { GameEngine } from '@/game/GameEngine';
+import { LandingScene, type LandingTelemetry } from '@/game/LandingScene';
+import { TrackingStartError, MIN_SENSITIVITY, MAX_SENSITIVITY } from '@/game/trackingShared';
+import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
+import { hasSavedSettings, loadSettings, saveSettings, type FlightSettings } from '@/game/settings';
+import { Landing } from '@/landing/Landing';
 
-type FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'error';
+// Hand tracking (handControls + the @mediapipe/hands runtime) and the full game engine are split
+// out of the first-load bundle: the landing page only needs the bird/terrain/ocean/sky modules.
+// Tracking is imported when the player clicks "Begin pre-flight" (or Quick start), and the engine
+// chunk is prefetched at the same moment so it's ready by "Start Flying". A failed import clears
+// its cache so "Try Again" retries it.
+let handTrackingModule: Promise<typeof import('@/game/handControls')> | null = null;
+let handConnections: readonly (readonly [number, number])[] = [];
+function loadHandTracking() {
+  handTrackingModule ??= import('@/game/handControls').then(
+    (module) => {
+      handConnections = module.HAND_CONNECTIONS;
+      return module;
+    },
+    (error: unknown) => {
+      handTrackingModule = null;
+      throw new TrackingStartError('load-failed', error);
+    },
+  );
+  return handTrackingModule;
+}
+
+let gameEngineModule: Promise<typeof import('@/game/GameEngine')> | null = null;
+function loadGameEngine() {
+  gameEngineModule ??= import('@/game/GameEngine').catch((error: unknown) => {
+    gameEngineModule = null;
+    throw error;
+  });
+  return gameEngineModule;
+}
+
+function usePrefersReducedMotion() {
+  const query = '(prefers-reduced-motion: reduce)';
+  const [reduced, setReduced] = useState(() => window.matchMedia?.(query).matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.(query);
+    if (!media) return;
+    const onChange = () => setReduced(media.matches);
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+  return reduced;
+}
+
+type FlightState = 'landing' | 'requesting' | 'calibrating' | 'flying' | 'error';
 
 type StartupErrorKind =
   | 'insecure-context'
@@ -83,34 +121,6 @@ const HUD_PREVIEW_WIDTH = 176;
 const HUD_PREVIEW_HEIGHT = 132;
 const CALIBRATION_PREVIEW_WIDTH = 360;
 const CALIBRATION_PREVIEW_HEIGHT = 270;
-
-const GESTURE_GUIDE = [
-  {
-    icon: Hand,
-    title: 'Open hand, at your neutral center',
-    description: 'Glide straight and steady.',
-  },
-  {
-    icon: MoveHorizontal,
-    title: 'Move hand left / right',
-    description: 'Turn and roll that way.',
-  },
-  {
-    icon: MoveVertical,
-    title: 'Move hand up / down',
-    description: 'Pitch up to climb, down to dive.',
-  },
-  {
-    icon: Zap,
-    title: 'Close into a fist',
-    description: 'Speed boost — and an automatic barrel roll the instant your fist closes.',
-  },
-  {
-    icon: ArrowUp,
-    title: 'Flick your hand up, fast',
-    description: 'Triggers an automatic backflip along your flight path.',
-  },
-] as const;
 
 interface CalibrationPointsMap {
   center: CalibrationPoint | null;
@@ -185,7 +195,7 @@ function drawHandPreview(
     ctx.strokeStyle = 'rgba(255, 214, 165, 0.9)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    for (const [start, end] of HAND_CONNECTIONS) {
+    for (const [start, end] of handConnections) {
       const a = landmarks[start];
       const b = landmarks[end];
       ctx.moveTo(a.x * width, a.y * height);
@@ -281,6 +291,9 @@ function sensitivityLabel(value: number) {
 
 function App() {
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
+  const landingContainerRef = useRef<HTMLDivElement | null>(null);
+  const landingSceneRef = useRef<LandingScene | null>(null);
+  const telemetryListenerRef = useRef<((telemetry: LandingTelemetry) => void) | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hudPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const calibrationPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -299,7 +312,7 @@ function App() {
   // True while "Start Flying" is building the engine, so a double click can't build two.
   const startingFlightRef = useRef(false);
 
-  const [flightState, setFlightState] = useState<FlightState>('menu');
+  const [flightState, setFlightState] = useState<FlightState>('landing');
   const [handDetected, setHandDetected] = useState(false);
   const [boosting, setBoosting] = useState(false);
   const [barrelRolling, setBarrelRolling] = useState(false);
@@ -309,10 +322,11 @@ function App() {
   const [statusText, setStatusText] = useState('Status: No Hand Detected');
   const [startupError, setStartupError] = useState<StartupError | null>(null);
 
-  const [selectedBird, setSelectedBird] = useState<BirdType>('pigeon');
-  const [selectedMap, setSelectedMap] = useState<MapType>('mountain');
-  const [selectedWeather, setSelectedWeather] = useState<WeatherPreset>('sunny');
-  const [ringChallengeEnabled, setRingChallengeEnabled] = useState(false);
+  // The landing page starts from the last choices saved in this browser (or the defaults).
+  const [settings, setSettings] = useState<FlightSettings>(() => loadSettings());
+  const [quickStartSettings, setQuickStartSettings] = useState<FlightSettings>(() => loadSettings());
+  const [hasSaved, setHasSaved] = useState(() => hasSavedSettings());
+  const { bird: selectedBird, map: selectedMap, weather: selectedWeather, ringChallenge: ringChallengeEnabled } = settings;
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
 
@@ -320,6 +334,72 @@ function App() {
   const [calibrationStep, setCalibrationStep] = useState(0);
 
   const calibrationComplete = calibrationStep >= CALIBRATION_STEPS.length;
+
+  const reducedMotion = usePrefersReducedMotion();
+  // The landing intro timeline plays once per page load, not on every return from pre-flight.
+  const [introPending, setIntroPending] = useState(true);
+  // The landing's WebGL backdrop stays up through the landing and pre-flight screens, and is
+  // disposed right before the game engine is built (see disposeLandingScene).
+  const [landingBackdropOn, setLandingBackdropOn] = useState(true);
+  const [landingScene, setLandingScene] = useState<LandingScene | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  useEffect(() => {
+    if (!landingBackdropOn) return;
+    const container = landingContainerRef.current;
+    if (!container) return;
+    const current = settingsRef.current;
+    let scene: LandingScene;
+    try {
+      scene = new LandingScene(container, {
+        bird: current.bird,
+        map: current.map,
+        weather: current.weather,
+        reducedMotion,
+        onTelemetry: (telemetry) => telemetryListenerRef.current?.(telemetry),
+      });
+    } catch (error) {
+      // No WebGL: the page still works over the CSS sky gradient on <html>.
+      console.warn('Landing backdrop unavailable (WebGL could not start)', error);
+      return;
+    }
+    scene.start();
+    landingSceneRef.current = scene;
+    setLandingScene(scene);
+    return () => {
+      scene.dispose();
+      if (landingSceneRef.current === scene) landingSceneRef.current = null;
+      setLandingScene(null);
+    };
+  }, [landingBackdropOn, reducedMotion]);
+
+  // Keep the backdrop's bird/world/sky in sync with the choices (including a Quick start swap).
+  useEffect(() => landingScene?.setBird(selectedBird), [landingScene, selectedBird]);
+  useEffect(() => landingScene?.setMap(selectedMap), [landingScene, selectedMap]);
+  useEffect(() => landingScene?.setWeather(selectedWeather), [landingScene, selectedWeather]);
+
+  // Behind the pre-flight cards, the backdrop holds the "above the clouds" shot.
+  useEffect(() => {
+    if (flightState === 'requesting' || flightState === 'calibrating' || flightState === 'error') {
+      landingScene?.setProgress(1);
+    }
+  }, [flightState, landingScene]);
+
+  const disposeLandingScene = useCallback(() => {
+    landingSceneRef.current?.dispose();
+    landingSceneRef.current = null;
+    setLandingScene(null);
+    setLandingBackdropOn(false);
+  }, []);
+
+  const subscribeTelemetry = useCallback((listener: ((telemetry: LandingTelemetry) => void) | null) => {
+    telemetryListenerRef.current = listener;
+  }, []);
+
+  const handleSettingsChange = useCallback((patch: Partial<FlightSettings>) => {
+    setSettings((current) => ({ ...current, ...patch }));
+  }, []);
 
   useEffect(() => {
     setBestScore(getBestScore());
@@ -371,6 +451,13 @@ function App() {
     const sessionId = ++sessionIdRef.current;
     const isCurrent = () => sessionId === sessionIdRef.current;
 
+    // Start downloading hand tracking while the camera permission prompt is open, and prefetch
+    // the engine chunk for "Start Flying". The no-op catch only silences an unhandled rejection
+    // if this attempt is abandoned early; the awaited copy below still sees the error.
+    const trackingModule = loadHandTracking();
+    trackingModule.catch(() => undefined);
+    loadGameEngine().catch(() => undefined);
+
     setStartupError(null);
     setFlightState('requesting');
     setScore(0);
@@ -405,6 +492,13 @@ function App() {
       if (!video) throw new Error('Missing video element');
       video.srcObject = stream;
       await video.play();
+      if (!isCurrent()) {
+        releaseLocal();
+        return;
+      }
+
+      // MediaPipe's JS is loaded here, on the first pre-flight, not with the landing page.
+      const { HandTracker } = await trackingModule;
       if (!isCurrent()) {
         releaseLocal();
         return;
@@ -448,6 +542,22 @@ function App() {
       showError(classifyStartupError(error));
     }
   }, []);
+
+  // "Begin pre-flight" (and Quick start): remember these choices, then start camera + tracking.
+  const beginPreflight = useCallback(
+    (chosen: FlightSettings) => {
+      saveSettings(chosen);
+      setQuickStartSettings(chosen);
+      setHasSaved(true);
+      setSettings(chosen);
+      setIntroPending(false);
+      void handleContinueToCalibration();
+    },
+    [handleContinueToCalibration],
+  );
+
+  const handleBeginPreflight = useCallback(() => beginPreflight(settingsRef.current), [beginPreflight]);
+  const handleQuickStart = useCallback(() => beginPreflight(loadSettings()), [beginPreflight]);
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
   // (the larger calibration one, or the compact in-flight HUD one), including the in-progress
@@ -578,8 +688,30 @@ function App() {
   const handleStartFlying = useCallback(async () => {
     if (!canvasContainerRef.current || engineRef.current || startingFlightRef.current) return;
     startingFlightRef.current = true;
+    const sessionId = sessionIdRef.current;
 
-    const engine = new GameEngine(canvasContainerRef.current, {
+    let GameEngineClass: typeof GameEngine;
+    try {
+      ({ GameEngine: GameEngineClass } = await loadGameEngine());
+    } catch (error) {
+      startingFlightRef.current = false;
+      if (sessionId !== sessionIdRef.current) return;
+      console.error('Failed to load the game engine', error);
+      stopEverything();
+      setStartupError(classifyStartupError(error));
+      setFlightState('error');
+      return;
+    }
+    // The player may have pressed Back while the engine chunk was loading.
+    if (sessionId !== sessionIdRef.current || !canvasContainerRef.current) {
+      startingFlightRef.current = false;
+      return;
+    }
+
+    // Free the landing backdrop's GPU memory and WebGL context before the engine creates its own.
+    disposeLandingScene();
+
+    const engine = new GameEngineClass(canvasContainerRef.current, {
       birdType: selectedBird,
       mapType: selectedMap,
       weather: selectedWeather,
@@ -605,7 +737,7 @@ function App() {
     // already disposed it in that case.
     if (engineRef.current !== engine) return;
     setFlightState('flying');
-  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled]);
+  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled, stopEverything, disposeLandingScene]);
 
   useEffect(() => {
     if (!barrelRolling) return;
@@ -627,7 +759,8 @@ function App() {
 
   const handleBackToMenu = useCallback(() => {
     stopEverything();
-    setFlightState('menu');
+    setLandingBackdropOn(true);
+    setFlightState('landing');
     setHandDetected(false);
     setBoosting(false);
     setBarrelRolling(false);
@@ -646,11 +779,14 @@ function App() {
   const currentCalibrationStep = CALIBRATION_STEPS[calibrationStep] ?? null;
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-background">
-      <div ref={canvasContainerRef} className="absolute inset-0" />
+    <div className="relative min-h-svh">
+      {/* Landing/pre-flight WebGL backdrop, and the game engine's canvas. Only one of the two
+          ever holds a live renderer. */}
+      <div ref={landingContainerRef} className="fixed inset-0" aria-hidden="true" />
+      <div ref={canvasContainerRef} className="fixed inset-0" />
 
       {flying && (
-        <>
+        <div className="fixed inset-0 z-10 overflow-hidden">
           {/* CSS-only speed-blur / motion-streak vignette around the screen edges during
               Boost — a lightweight stand-in for a full post-processing motion-blur pass,
               since the renderer here doesn't run an EffectComposer pipeline. */}
@@ -754,305 +890,220 @@ function App() {
               {statusText}
             </p>
           </div>
-        </>
+        </div>
       )}
 
       <video ref={videoRef} className="hidden" muted playsInline />
 
-      {flightState === 'menu' && (
-        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
-          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
-            <p className="mb-1 text-xs font-semibold uppercase tracking-[0.2em] text-primary">
-              A quiet little sky
-            </p>
-            <h1 className="mb-3 text-3xl font-semibold text-foreground">Bird Flight</h1>
-            <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-              Glide over endless landscapes — and dive beneath the waves — using nothing but
-              your hand. Here's how the controls work:
-            </p>
-
-            <ul className="mb-8 flex flex-col gap-3 text-left">
-              {GESTURE_GUIDE.map(({ icon: Icon, title, description }) => (
-                <li
-                  key={title}
-                  className="flex items-center gap-3 rounded-2xl bg-muted/60 px-4 py-3"
-                >
-                  <span className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-primary/15 text-primary">
-                    <Icon className="h-5 w-5" />
-                  </span>
-                  <span>
-                    <span className="block text-sm font-semibold text-foreground">{title}</span>
-                    <span className="block text-xs text-muted-foreground">{description}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
-
-            <div className="mb-6 text-left">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                Choose your bird
-              </p>
-              <div className="flex flex-col gap-2">
-                {BIRD_OPTIONS.map((bird) => (
-                  <button
-                    key={bird.id}
-                    type="button"
-                    onClick={() => setSelectedBird(bird.id)}
-                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
-                      selectedBird === bird.id
-                        ? 'border-primary bg-primary/10'
-                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                    }`}
-                  >
-                    <span className="block text-sm font-semibold text-foreground">{bird.name}</span>
-                    <span className="block text-xs text-muted-foreground">{bird.tagline}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-6 text-left">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                Choose your map
-              </p>
-              <div className="flex flex-col gap-2">
-                {MAP_OPTIONS.map((map) => (
-                  <button
-                    key={map.id}
-                    type="button"
-                    onClick={() => setSelectedMap(map.id)}
-                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
-                      selectedMap === map.id
-                        ? 'border-primary bg-primary/10'
-                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                    }`}
-                  >
-                    <span className="block text-sm font-semibold text-foreground">{map.name}</span>
-                    <span className="block text-xs text-muted-foreground">{map.tagline}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-6 text-left">
-              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                Day, night &amp; weather
-              </p>
-              <div className="flex flex-col gap-2">
-                {WEATHER_OPTIONS.map((weather) => (
-                  <button
-                    key={weather.id}
-                    type="button"
-                    onClick={() => setSelectedWeather(weather.id)}
-                    className={`w-full rounded-2xl border px-4 py-2.5 text-left transition ${
-                      selectedWeather === weather.id
-                        ? 'border-primary bg-primary/10'
-                        : 'border-border/60 bg-muted/40 hover:bg-muted/70'
-                    }`}
-                  >
-                    <span className="block text-sm font-semibold text-foreground">{weather.name}</span>
-                    <span className="block text-xs text-muted-foreground">{weather.tagline}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="mb-6 flex items-center justify-between rounded-2xl bg-muted/60 px-4 py-3 text-left">
-              <span>
-                <span className="block text-sm font-semibold text-foreground">Ring Challenge</span>
-                <span className="block text-xs text-muted-foreground">
-                  Fly through glowing rings to score points.
-                  {bestScore > 0 && <span className="block font-semibold text-foreground/80">Best Score: {bestScore}</span>}
-                </span>
-              </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={ringChallengeEnabled}
-                onClick={() => setRingChallengeEnabled((v) => !v)}
-                className={`relative h-6 w-11 flex-none rounded-full transition-colors ${
-                  ringChallengeEnabled ? 'bg-primary' : 'bg-border'
-                }`}
-              >
-                <span
-                  className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                    ringChallengeEnabled ? 'translate-x-5' : ''
-                  }`}
-                />
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleContinueToCalibration}
-              className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90 disabled:opacity-60"
-            >
-              Continue to Calibration
-            </button>
-
-            <p className="mt-4 text-xs text-muted-foreground">
-              Your camera feed stays on this page and is only used to read hand position.
-            </p>
-          </div>
-        </div>
+      {flightState === 'landing' && (
+        <Landing
+          scene={landingScene}
+          settings={settings}
+          bestScore={bestScore}
+          quickStartSettings={quickStartSettings}
+          hasSavedSettings={hasSaved}
+          reducedMotion={reducedMotion}
+          playIntro={introPending}
+          onChange={handleSettingsChange}
+          onBegin={handleBeginPreflight}
+          onQuickStart={handleQuickStart}
+          subscribeTelemetry={subscribeTelemetry}
+        />
       )}
 
       {(flightState === 'requesting' || flightState === 'error') && (
-        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
-          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
-            <h1 className="mb-3 text-2xl font-semibold text-foreground">Bird Flight</h1>
+        <PreflightLayer>
+          <div className="ascent-glass-strong w-full max-w-md rounded-[28px] p-8 text-white shadow-2xl">
+            <p className="ascent-hud mb-4 text-[color:var(--ascent-cyan)]">
+              Pre-flight <span className="mx-1.5 text-white/40">·</span> 01 / 02
+            </p>
             {flightState === 'requesting' && (
-              <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
-                Waking up the sky… (allow camera access, then hand tracking loads)
-              </p>
-            )}
-            {flightState === 'error' && startupError && (
-              <div className="mb-6 rounded-xl bg-destructive/10 px-4 py-2 text-sm text-destructive">
-                <p>{STARTUP_ERROR_MESSAGES[startupError.kind]}</p>
-                {startupError.detail && (
-                  <p className="mt-1 break-words text-xs opacity-70">{startupError.detail}</p>
-                )}
-              </div>
+              <>
+                <h1 className="font-display text-5xl leading-none">Waking up the sky…</h1>
+                <p className="mt-4 text-sm leading-relaxed text-white/80">
+                  Allow camera access, then hand tracking loads (about 13 MB the first time).
+                </p>
+                <div className="relative mt-6 h-px overflow-hidden bg-white/20" aria-hidden="true">
+                  <span className="ascent-loading-bar absolute inset-y-0 w-1/3 bg-white" />
+                </div>
+              </>
             )}
             {flightState === 'error' && (
-              <button
-                type="button"
-                onClick={handleContinueToCalibration}
-                className="mb-2 w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90"
-              >
-                Try Again
-              </button>
+              <>
+                <h1 className="font-display text-5xl leading-none">Pre-flight halted</h1>
+                {startupError && (
+                  <div className="mt-5 rounded-2xl border border-[#ffb4a2]/40 bg-[#ff6b4a]/15 px-4 py-3 text-sm text-white">
+                    <p>{STARTUP_ERROR_MESSAGES[startupError.kind]}</p>
+                    {startupError.detail && (
+                      <p className="mt-1.5 break-words font-mono text-[11px] text-white/60">{startupError.detail}</p>
+                    )}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={handleContinueToCalibration}
+                  className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-semibold text-[color:var(--ascent-ink)] transition hover:bg-[color:var(--ascent-warm)]"
+                >
+                  Try Again
+                </button>
+              </>
             )}
             <button
               type="button"
               onClick={handleBackToMenu}
-              className="w-full rounded-full bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20"
+              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-full border border-white/25 px-6 py-3 text-sm font-semibold text-white/90 transition hover:bg-white/10"
             >
-              Back to Menu
+              <ChevronLeft className="h-4 w-4" />
+              Back
             </button>
           </div>
-        </div>
+        </PreflightLayer>
       )}
 
       {calibrating && (
-        <div className="absolute inset-0 flex items-center justify-center overflow-y-auto bg-gradient-to-b from-[#cfe8f0] via-[#e9ecd6] to-[#fbe3c9] px-6 py-10">
-          <div className="w-full max-w-md rounded-3xl border border-border/50 bg-card/90 p-8 text-center shadow-xl backdrop-blur-sm">
-            <button
-              type="button"
-              onClick={handleBackToMenu}
-              className="mb-4 flex items-center gap-1 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-              Back
-            </button>
-
-            <h1 className="mb-4 text-2xl font-semibold text-foreground">Calibrate Your Controls</h1>
-
-            <div className="mb-4 flex items-center justify-center gap-1.5">
-              {CALIBRATION_STEPS.map((step, i) => (
-                <span
-                  key={step.key}
-                  className={`h-1.5 flex-1 rounded-full transition-colors ${
-                    i < calibrationStep ? 'bg-primary' : i === calibrationStep ? 'bg-primary/50' : 'bg-border'
-                  }`}
+        <PreflightLayer>
+          <div className="ascent-glass-strong grid w-full max-w-5xl gap-8 rounded-[28px] p-6 text-white shadow-2xl sm:p-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)]">
+            <div className="min-w-0">
+              <button
+                type="button"
+                onClick={handleBackToMenu}
+                className="ascent-hud mb-4 flex items-center gap-1 text-white/70 transition hover:text-white"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />
+                Back
+              </button>
+              <div className="overflow-hidden rounded-2xl border border-white/20 bg-black/30 shadow-inner">
+                <canvas
+                  ref={calibrationPreviewCanvasRef}
+                  width={CALIBRATION_PREVIEW_WIDTH}
+                  height={CALIBRATION_PREVIEW_HEIGHT}
+                  className="block w-full cursor-crosshair scale-x-[-1] touch-none"
+                  onPointerDown={handleCornerPointerDown}
+                  onPointerMove={handleCornerPointerMove}
+                  onPointerUp={handleCornerPointerUp}
+                  onPointerCancel={handleCornerPointerUp}
                 />
-              ))}
-            </div>
-
-            {!calibrationComplete && currentCalibrationStep && (
-              <>
-                <p className="mb-1 text-sm font-semibold text-foreground">{currentCalibrationStep.title}</p>
-                <p className="mb-5 text-sm leading-relaxed text-muted-foreground">{currentCalibrationStep.instruction}</p>
-              </>
-            )}
-            {calibrationComplete && (
-              <p className="mb-5 text-sm leading-relaxed text-muted-foreground">
-                Your control range is calibrated — flight pitch and roll are now mapped to fit exactly
-                within the box you just drew.
+              </div>
+              <p className="ascent-hud mt-3 flex items-center gap-2 text-white/85">
+                <span
+                  className={`h-2 w-2 rounded-full ${handDetected ? 'bg-[color:var(--ascent-cyan)]' : 'bg-white/30'}`}
+                  aria-hidden="true"
+                />
+                {handDetected ? 'Hand detected — hold it at the target position.' : 'Show your hand to the camera.'}
               </p>
-            )}
-
-            <div className="mb-2 overflow-hidden rounded-2xl border border-border/60 bg-muted/40 shadow-inner">
-              <canvas
-                ref={calibrationPreviewCanvasRef}
-                width={CALIBRATION_PREVIEW_WIDTH}
-                height={CALIBRATION_PREVIEW_HEIGHT}
-                className="block w-full cursor-crosshair scale-x-[-1] touch-none"
-                onPointerDown={handleCornerPointerDown}
-                onPointerMove={handleCornerPointerMove}
-                onPointerUp={handleCornerPointerUp}
-                onPointerCancel={handleCornerPointerUp}
-              />
-            </div>
-            <p className="mb-1 text-xs font-medium tracking-wide text-muted-foreground">
-              {handDetected ? 'Hand detected — hold it at the target position.' : 'Show your hand to the camera.'}
-            </p>
-            <p className="mb-5 text-xs text-muted-foreground">
-              You can also drag any orange corner dot directly on the preview to fine-tune it.
-            </p>
-
-            {!calibrationComplete && (
-              <button
-                type="button"
-                onClick={handleCaptureCalibrationStep}
-                disabled={!handDetected}
-                className="mb-2 flex w-full items-center justify-center gap-2 rounded-full border border-primary/40 bg-primary/10 px-6 py-3 text-sm font-semibold text-primary transition hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Crosshair className="h-4 w-4" />
-                {currentCalibrationStep?.buttonLabel}
-              </button>
-            )}
-            {calibrationComplete && (
-              <p className="mb-2 text-xs font-semibold text-primary">Calibrated! Your control range is set.</p>
-            )}
-
-            {calibrationStep > 0 && (
-              <button
-                type="button"
-                onClick={handleResetCalibration}
-                className="mb-5 flex w-full items-center justify-center gap-1.5 text-xs font-semibold text-muted-foreground transition hover:text-foreground"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                Start Over
-              </button>
-            )}
-            {calibrationStep === 0 && <div className="mb-5" />}
-
-            <div className="mb-6 text-left">
-              <div className="mb-2 flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-[0.15em] text-muted-foreground">
-                  Steering Sensitivity
-                </p>
-                <p className="text-xs font-semibold text-foreground">
-                  {sensitivityLabel(sensitivity)} ({sensitivity.toFixed(1)}x)
-                </p>
-              </div>
-              <input
-                type="range"
-                min={MIN_SENSITIVITY}
-                max={MAX_SENSITIVITY}
-                step={0.1}
-                value={sensitivity}
-                onChange={(event) => handleSensitivityChange(Number(event.target.value))}
-                className="w-full accent-primary"
-              />
-              <div className="mt-1 flex justify-between text-[10px] uppercase tracking-wide text-muted-foreground">
-                <span>Calm</span>
-                <span>Twitchy</span>
-              </div>
+              <p className="mt-1.5 text-xs text-white/65">
+                You can also drag any orange corner dot directly on the preview to fine-tune it.
+              </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleStartFlying}
-              disabled={!calibrationComplete}
-              className="w-full rounded-full bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground shadow-md transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              Start Flying
-            </button>
+            <div className="flex min-w-0 flex-col">
+              <p className="ascent-hud mb-3 text-[color:var(--ascent-cyan)]">
+                Pre-flight <span className="mx-1.5 text-white/40">·</span> 02 / 02
+              </p>
+              <h1 className="font-display text-[clamp(2.4rem,4vw,3.4rem)] leading-none">Calibrate your controls</h1>
+
+              <div className="mb-4 mt-5 flex items-center gap-1.5">
+                {CALIBRATION_STEPS.map((step, i) => (
+                  <span
+                    key={step.key}
+                    className={`h-1 flex-1 rounded-full transition-colors ${
+                      i < calibrationStep ? 'bg-white' : i === calibrationStep ? 'bg-white/50' : 'bg-white/15'
+                    }`}
+                  />
+                ))}
+              </div>
+
+              {!calibrationComplete && currentCalibrationStep && (
+                <>
+                  <p className="text-sm font-semibold">{currentCalibrationStep.title}</p>
+                  <p className="mb-5 mt-1 text-sm leading-relaxed text-white/75">{currentCalibrationStep.instruction}</p>
+                </>
+              )}
+              {calibrationComplete && (
+                <p className="mb-5 text-sm leading-relaxed text-white/75">
+                  Your control range is calibrated — flight pitch and roll are now mapped to fit exactly
+                  within the box you just drew.
+                </p>
+              )}
+
+              {!calibrationComplete && (
+                <button
+                  type="button"
+                  onClick={handleCaptureCalibrationStep}
+                  disabled={!handDetected}
+                  className="flex w-full items-center justify-center gap-2 rounded-full border border-white/40 bg-white/10 px-6 py-3 text-sm font-semibold transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Crosshair className="h-4 w-4" />
+                  {currentCalibrationStep?.buttonLabel}
+                </button>
+              )}
+              {calibrationComplete && (
+                <p className="ascent-hud text-[color:var(--ascent-cyan)]">Calibrated! Your control range is set.</p>
+              )}
+
+              {calibrationStep > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleResetCalibration}
+                  className="ascent-hud mt-3 flex items-center justify-center gap-1.5 self-center text-white/65 transition hover:text-white"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Start Over
+                </button>
+              ) : (
+                <div className="mt-3 h-4" />
+              )}
+
+              <div className="mb-6 mt-6">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="ascent-hud text-white/65">Steering Sensitivity</p>
+                  <p className="ascent-hud text-white">
+                    {sensitivityLabel(sensitivity)} ({sensitivity.toFixed(1)}x)
+                  </p>
+                </div>
+                <input
+                  type="range"
+                  min={MIN_SENSITIVITY}
+                  max={MAX_SENSITIVITY}
+                  step={0.1}
+                  value={sensitivity}
+                  onChange={(event) => handleSensitivityChange(Number(event.target.value))}
+                  className="w-full accent-[color:var(--ascent-warm)]"
+                />
+                <div className="ascent-hud mt-1 flex justify-between text-[10px] text-white/55">
+                  <span>Calm</span>
+                  <span>Twitchy</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleStartFlying}
+                disabled={!calibrationComplete}
+                className="group mt-auto flex w-full items-center justify-between rounded-full bg-white py-2 pl-6 pr-2 text-[color:var(--ascent-ink)] transition hover:bg-[color:var(--ascent-warm)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-white"
+              >
+                <span className="text-base font-semibold">Start Flying</span>
+                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[color:var(--ascent-ink)] text-white">
+                  <ArrowRight className="h-4 w-4" />
+                </span>
+              </button>
+            </div>
           </div>
-        </div>
+        </PreflightLayer>
       )}
+    </div>
+  );
+}
+
+/**
+ * Full-screen scrollable layer for the pre-flight cards. The card sits inside a `min-h-full`
+ * flex box rather than directly in an `items-center` scroller, so a card taller than the window
+ * starts at the top and scrolls instead of having its top cut off (CLAUDE.md §9 #7).
+ */
+function PreflightLayer({ children }: { children: ReactNode }) {
+  return (
+    <div className="fixed inset-0 z-30 overflow-y-auto bg-[#06101f]/25">
+      <div className="flex min-h-full items-center justify-center px-4 py-8 sm:px-6 sm:py-10">{children}</div>
     </div>
   );
 }

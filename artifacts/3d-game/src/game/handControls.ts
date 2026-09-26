@@ -1,4 +1,10 @@
 import { Hands, type NormalizedLandmark, type Results } from '@mediapipe/hands';
+import { MAX_SENSITIVITY, MIN_SENSITIVITY, TrackingStartError } from './trackingShared';
+
+// Re-exported so existing imports of these from handControls keep working. HAND_CONNECTIONS is
+// re-exported for the webcam preview, which gets it from this lazily loaded module.
+export { HAND_CONNECTIONS } from '@mediapipe/hands';
+export { MAX_SENSITIVITY, MIN_SENSITIVITY, TrackingStartError, type TrackingStartErrorKind } from './trackingShared';
 
 export interface HandControlState {
   handDetected: boolean;
@@ -33,9 +39,6 @@ const SMOOTHING_ALPHA = 0.35;
 // tracking jitter near the calibrated center doesn't cause constant steering drift.
 const NORMALIZED_DEADZONE = 0.06;
 
-// Sensitivity slider bounds exposed to the calibration UI.
-export const MIN_SENSITIVITY = 0.5;
-export const MAX_SENSITIVITY = 2.0;
 
 // A rapid upward flick of the raw (un-smoothed) tracked point triggers the backflip gesture.
 // Detected over a short rolling time window (see `trackedYHistory`) rather than a single
@@ -60,19 +63,6 @@ const MEDIAPIPE_ASSET_DIR = `${import.meta.env.BASE_URL}mediapipe/hands/`;
 // assets are ~15 MB, so this is generous for slow connections while still turning a stuck load
 // into a clear on-screen error instead of an endless "Show your hand" wait.
 const TRACKING_START_TIMEOUT_MS = 30_000;
-
-export type TrackingStartErrorKind = 'load-failed' | 'timeout';
-
-/** Thrown by `HandTracker.start()` when MediaPipe can't load or doesn't finish loading in time. */
-export class TrackingStartError extends Error {
-  constructor(
-    readonly kind: TrackingStartErrorKind,
-    readonly cause?: unknown,
-  ) {
-    super(kind === 'timeout' ? 'Hand tracking timed out while loading' : 'Hand tracking failed to load');
-    this.name = 'TrackingStartError';
-  }
-}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {

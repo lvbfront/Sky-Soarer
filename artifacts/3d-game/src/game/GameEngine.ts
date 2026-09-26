@@ -12,84 +12,10 @@ import { RingGuideArrow } from './ringGuide';
 import { WindAudio, SoundEffects } from './audio';
 import type { HandControlState } from './handControls';
 
-export type MapType = 'mountain' | 'ocean';
+import { WEATHER_LOOKS, type MapType, type WeatherLook, type WeatherPreset } from './presets';
+import { createSkyClouds, createSkyDome, createStarfield } from './sky';
 
-export const MAP_OPTIONS: { id: MapType; name: string; tagline: string }[] = [
-  { id: 'mountain', name: 'Mountain Valley', tagline: 'Rolling procedural hills.' },
-  { id: 'ocean', name: 'Tropical Ocean & Islands', tagline: 'Skim the waves, or dive beneath them, between palm-dotted islands.' },
-];
-
-export type WeatherPreset = 'sunny' | 'sunset' | 'night';
-
-export const WEATHER_OPTIONS: { id: WeatherPreset; name: string; tagline: string }[] = [
-  { id: 'sunny', name: 'Sunny Morning', tagline: 'Bright skies and warm light.' },
-  { id: 'sunset', name: 'Sunset Gold', tagline: 'Golden hour glow across the horizon.' },
-  { id: 'night', name: 'Starry Night', tagline: 'Cool moonlight under a field of stars.' },
-];
-
-interface WeatherLook {
-  skyTop: string;
-  skyBottom: string;
-  fogMountain: string;
-  fogOcean: string;
-  sunColor: string;
-  sunIntensity: number;
-  hemiSky: string;
-  hemiGround: string;
-  hemiIntensity: number;
-  fillColor: string;
-  ambientColor: string;
-  ambientIntensity: number;
-  stars: boolean;
-}
-
-const WEATHER_LOOKS: Record<WeatherPreset, WeatherLook> = {
-  sunny: {
-    skyTop: '#7ec3e0',
-    skyBottom: '#fdeecb',
-    fogMountain: '#dcefe6',
-    fogOcean: '#bfe6ef',
-    sunColor: '#ffdfb0',
-    sunIntensity: 1.15,
-    hemiSky: '#fff3df',
-    hemiGround: '#9fcf9a',
-    hemiIntensity: 0.9,
-    fillColor: '#bcd8ff',
-    ambientColor: '#ffffff',
-    ambientIntensity: 0.15,
-    stars: false,
-  },
-  sunset: {
-    skyTop: '#5b6ea8',
-    skyBottom: '#ff9f6b',
-    fogMountain: '#ffcf9e',
-    fogOcean: '#ffb98f',
-    sunColor: '#ff7f4d',
-    sunIntensity: 1.0,
-    hemiSky: '#ffd9a0',
-    hemiGround: '#7a5a4a',
-    hemiIntensity: 0.7,
-    fillColor: '#8a6bb0',
-    ambientColor: '#ff9d6e',
-    ambientIntensity: 0.18,
-    stars: false,
-  },
-  night: {
-    skyTop: '#050c24',
-    skyBottom: '#182848',
-    fogMountain: '#101a33',
-    fogOcean: '#0b1830',
-    sunColor: '#9fb4ff',
-    sunIntensity: 0.55,
-    hemiSky: '#4a5a8f',
-    hemiGround: '#141d33',
-    hemiIntensity: 0.35,
-    fillColor: '#5c73b0',
-    ambientColor: '#8fa5ff',
-    ambientIntensity: 0.12,
-    stars: true,
-  },
-};
+export { MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from './presets';
 
 // Underwater look — a fixed cyan/blue palette independent of the surface weather preset,
 // since sunlight/moonlight above doesn't meaningfully change how it looks a few meters down.
@@ -281,94 +207,19 @@ export class GameEngine {
   }
 
   private buildSky(look: WeatherLook) {
-    // Soft gradient sky using a large inverted sphere with a vertex-colored gradient,
-    // tinted per the selected day/night/weather preset.
-    const skyGeometry = new THREE.SphereGeometry(900, 24, 16);
-    const colorTop = new THREE.Color(look.skyTop);
-    const colorBottom = new THREE.Color(look.skyBottom);
-    const position = skyGeometry.attributes.position;
-    const colors: number[] = [];
-    for (let i = 0; i < position.count; i += 1) {
-      const y = position.getY(i);
-      const t = THREE.MathUtils.clamp((y + 900) / 1800, 0, 1);
-      const c = colorBottom.clone().lerp(colorTop, t);
-      colors.push(c.r, c.g, c.b);
-    }
-    skyGeometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-    const skyMaterial = new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.BackSide,
-      fog: false,
-    });
-    const sky = new THREE.Mesh(skyGeometry, skyMaterial);
-    this.scene.add(sky);
-    this.sky = sky;
+    // Soft gradient sky dome, tinted per the selected day/night/weather preset (see sky.ts).
+    this.sky = createSkyDome(look.skyTop, look.skyBottom);
+    this.scene.add(this.sky);
 
     if (look.stars) {
-      this.buildStarfield();
+      this.starfield = createStarfield();
+      this.scene.add(this.starfield);
     }
 
-    // A handful of soft, distant background cloud puffs for horizon-level atmosphere —
-    // separate from CloudManager's nearer, flyable clusters. Grouped so the whole backdrop can
-    // follow the bird on XZ (see `update`), like the sky dome and starfield.
-    const skyClouds = new THREE.Group();
-    this.scene.add(skyClouds);
-    this.skyClouds = skyClouds;
-    const cloudMaterial = new THREE.MeshStandardMaterial({
-      color: '#ffffff',
-      transparent: true,
-      opacity: look.stars ? 0.18 : 0.85,
-      flatShading: true,
-      fog: true,
-    });
-    for (let i = 0; i < 24; i += 1) {
-      const cluster = new THREE.Group();
-      const puffCount = 3 + Math.floor(Math.random() * 3);
-      for (let p = 0; p < puffCount; p += 1) {
-        const puff = new THREE.Mesh(
-          new THREE.IcosahedronGeometry(3 + Math.random() * 2.5, 0),
-          cloudMaterial,
-        );
-        puff.position.set((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 8);
-        cluster.add(puff);
-      }
-      const angle = Math.random() * Math.PI * 2;
-      const radius = 120 + Math.random() * 500;
-      cluster.position.set(
-        Math.cos(angle) * radius,
-        40 + Math.random() * 60,
-        Math.sin(angle) * radius,
-      );
-      skyClouds.add(cluster);
-    }
-  }
-
-  private buildStarfield() {
-    const starCount = 900;
-    const positions = new Float32Array(starCount * 3);
-    for (let i = 0; i < starCount; i += 1) {
-      const radius = 850;
-      const theta = Math.random() * Math.PI * 2;
-      // Bias toward the upper hemisphere so stars sit mostly overhead/ahead, not underfoot.
-      const phi = Math.acos(Math.random() * 2 - 1) * 0.55;
-      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
-      positions[i * 3 + 1] = Math.abs(radius * Math.cos(phi)) * 0.6 + 80;
-      positions[i * 3 + 2] = radius * Math.sin(phi) * Math.sin(theta);
-    }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const material = new THREE.PointsMaterial({
-      color: '#ffffff',
-      size: 2.2,
-      sizeAttenuation: false,
-      fog: false,
-      transparent: true,
-      opacity: 0.9,
-    });
-    const stars = new THREE.Points(geometry, material);
-    stars.frustumCulled = false;
-    this.scene.add(stars);
-    this.starfield = stars;
+    // Distant horizon cloud puffs, grouped so the whole backdrop can follow the bird on XZ (see
+    // `update`), like the sky dome and starfield.
+    this.skyClouds = createSkyClouds(look.stars ? 0.18 : 0.85).group;
+    this.scene.add(this.skyClouds);
   }
 
   private buildLighting(look: WeatherLook) {
