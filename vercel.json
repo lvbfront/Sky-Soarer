@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "npx --yes pnpm@10.33.0 install --frozen-lockfile",
+  "buildCommand": "npx --yes pnpm@10.33.0 run build",
+  "outputDirectory": "artifacts/3d-game/dist/public",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
