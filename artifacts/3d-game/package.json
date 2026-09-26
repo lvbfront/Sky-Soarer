@@ -10,8 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@mediapipe/camera_utils": "^0.3.1675466862",
-    "@mediapipe/hands": "^0.4.1675469240",
+    "@mediapipe/hands": "0.4.1675469240",
     "lucide-react": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",

@@ -17,6 +17,10 @@ const RING_RADIUS = 3.4;
 const RING_TUBE = 0.32;
 const MAX_ACTIVE_RINGS = 6;
 const DESPAWN_BEHIND_DISTANCE = 40; // recycle once this far behind the bird along its forward axis
+// Also recycle any ring this far from the bird in any direction. Rings spawn at most ~85 units
+// away, so this only catches rings the bird has turned away from — which the axial check above
+// never recycles, and which would otherwise fill MAX_ACTIVE_RINGS and stop spawning for good.
+const DESPAWN_MAX_DISTANCE = 120;
 
 // How precisely the bird has to thread the ring to count as "collected".
 const AXIAL_HIT_THRESHOLD = 2.2;
@@ -168,8 +172,10 @@ export class RingManager {
           continue;
         }
 
-        // Recycle rings the bird has flown well past without collecting.
-        if (axialDist < -DESPAWN_BEHIND_DISTANCE) {
+        // Recycle rings the bird has flown well past, or turned away from, without collecting.
+        // `delta` points from the ring to the bird, so a ring the bird has already flown past has a
+        // *positive* axial distance (a ring still ahead is negative).
+        if (axialDist > DESPAWN_BEHIND_DISTANCE || delta.lengthSq() > DESPAWN_MAX_DISTANCE * DESPAWN_MAX_DISTANCE) {
           this.active.splice(i, 1);
           this.recycle(ring);
         }

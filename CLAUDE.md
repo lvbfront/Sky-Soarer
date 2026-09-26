@@ -21,13 +21,13 @@ How a session plays:
 
    Then click **Continue to Calibration**, which asks for camera access.
 2. **Calibration (Screen 2).**
-   - Pick a control mode: **Full Hand**, which tracks the palm center, or **Index Finger**, which tracks the fingertip.
+   - Steering always tracks the **palm center**. An Index Finger mode existed earlier and was removed.
    - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range.
    - Once a corner is captured you can drag it on the preview to fine-tune it.
    - Set steering sensitivity from 0.5x to 2.0x.
    - **Start Flying** stays disabled until all 5 points are captured.
 3. **Flight.**
-   - Move the tracked point inside the calibrated box to pitch and roll. Roll banks the bird, and banking turns it.
+   - Move your palm inside the calibrated box to pitch and roll. Roll banks the bird, and banking turns it.
    - **Close a fist** to boost. Boosting also fires an automatic 0.8 s barrel roll.
    - **Flick your hand up fast** for a 0.9 s backflip.
    - Both tricks are cosmetic only. They never change heading or momentum.
@@ -51,7 +51,7 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 | Styling | Tailwind CSS v4 (`@tailwindcss/vite`) with `tw-animate-css` and `@tailwindcss/typography` imported in `index.css` | ^4.1.14 (4.3.3 resolved) |
 | Icons | lucide-react | ^0.545.0 |
 | 3D | three (vanilla, **no** React Three Fiber) | ^0.185.1 (`@types/three` ^0.185.3) |
-| Hand tracking | `@mediapipe/hands` + `@mediapipe/camera_utils` (legacy "Solutions" API) | 0.4.1675469240 / 0.3.1675466862 |
+| Hand tracking | `@mediapipe/hands` (legacy "Solutions" API), assets self-hosted | **0.4.1675469240**, pinned exactly; this `package.json` entry is the only place the version lives |
 | Noise | simplex-noise (v4 `createNoise2D`) | ^4.0.3 |
 | Audio | Web Audio API, fully synthesized (no audio files) | — |
 | Replit-only dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | loaded only when `REPL_ID` is set |
@@ -80,10 +80,10 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
 
 - `pnpm install --frozen-lockfile` succeeds.
 - `pnpm run typecheck` passes.
-- `pnpm run build` succeeds from the root. It emits a 1.7 kB `index.html`, 31 kB of CSS and one 844 kB JS chunk (234 kB gzip), plus Vite's "chunk larger than 500 kB" warning.
+- `pnpm run build` succeeds from the root. It emits a 1.7 kB `index.html`, 31 kB of CSS, one 837 kB JS chunk (232 kB gzip), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
 - The Vercel commands (`npx --yes pnpm@10.33.0 install --frozen-lockfile` and `… run build`) also succeed in a shell with **no global pnpm**. The nested `pnpm` calls in the root scripts resolve to the npx-provided pnpm.
 - The dev server starts on 5173 with defaults. It also starts with Replit's env (`PORT=24982 BASE_PATH=/ REPL_ID=…`), and then the Replit plugins load.
-- Headless Chromium with a fake camera reached the calibration screen on the production preview. Deep links such as `/some/route` return `index.html`.
+- Headless Chromium with a fake camera, and **every non-localhost request blocked**, reached the calibration screen on the production preview. Deep links such as `/some/route` return `index.html`. The startup error paths were also exercised in headless runs; see the P0 PR's test notes.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -101,7 +101,11 @@ The game needs **no secrets, no backend and no database**.
 - A **secure context** (`https://` or `http://localhost`), because `getUserMedia` refuses plain-HTTP LAN IPs. Vercel deployments are HTTPS.
 - A webcam. The app requests 480×360 with `facingMode: 'user'`.
 - **WebGL.** WebGL2 is preferred, since three r185 targets it.
-- **Network access to `cdn.jsdelivr.net`.** The MediaPipe wasm, model and `.data` files are loaded at runtime from `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/…`, set by `locateFile` in `handControls.ts`. If the CDN is blocked, **the UI shows no error**. The calibration screen just says "Show your hand to the camera", and the console logs `HandTracker: a frame failed to process` on every frame. This was reproduced in the sandbox.
+- **No third-party network access is needed at runtime.**
+  - The MediaPipe wasm, packed graph `.data` and `.tflite` files are **self-hosted**. `vite-plugin-mediapipe-assets.ts` serves them from `node_modules/@mediapipe/hands` in dev and emits them into `dist/public/mediapipe/hands/` at build time. `locateFile` in `handControls.ts` points at `${BASE_URL}mediapipe/hands/`.
+  - This adds about 24 MB to the deploy. A session downloads about 13 MB: `hands_solution_simd_wasm_bin.wasm` (6 MB), `hands_solution_packed_assets.data` (4.3 MB) and `hand_landmark_lite.tflite` (2 MB). The non-SIMD wasm and the `full` model are shipped as fallbacks and are only fetched if needed.
+  - Google Fonts (Inter) is the only external request, and the UI falls back to system fonts without it.
+  - If the files can't load, or the load (including the first frame through the graph) takes more than **30 s**, the startup screen shows a specific error with **Try Again**.
 - A desktop Chromium, Edge or Firefox with a decent GPU is the target. Mobile isn't designed for: there's no touch fallback, and the layout assumes a large screen.
 - In headless screenshot tools, WebGL often fails with no GPU. Launch Chromium with `--use-angle=swiftshader --enable-unsafe-swiftshader` to render, and expect very low FPS.
 
@@ -128,6 +132,7 @@ The game needs **no secrets, no backend and no database**.
 │       ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
 │       ├── index.html         # <title>Bird Flight</title>, meta/OG description, Google Fonts Inter, favicon
 │       ├── vite.config.ts     # PORT/BASE_PATH defaults; Replit plugins only when REPL_ID is set; @ -> src
+│       ├── vite-plugin-mediapipe-assets.ts # serves/emits the MediaPipe runtime files under mediapipe/hands/
 │       ├── public/            # favicon.svg, robots.txt (copied as-is into dist/public)
 │       └── src/
 │           ├── main.tsx       # createRoot(<App/>)
@@ -135,7 +140,7 @@ The game needs **no secrets, no backend and no database**.
 │           ├── index.css      # Tailwind v4 + theme tokens (warm pastel palette)
 │           └── game/          # ★ framework-free Three.js game code
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
-│               ├── handControls.ts # MediaPipe wrapper: tracking, calibration box, fist/flick gesture detection
+│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures, TrackingStartError
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
 │               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
@@ -166,7 +171,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ## 5. Architecture and data flow
 
 ```
- webcam ──► <video hidden> ──► camera_utils.Camera (rAF) ──► Hands.send()  (MediaPipe wasm, model from CDN)
+ getUserMedia (App) ──► <video hidden> ──► HandTracker rAF loop ──► Hands.send()  (self-hosted wasm + model)
                                                                  │ onResults
                                                                  ▼
                                    HandTracker.handleResults()  → HandControlState
@@ -184,10 +189,31 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ```
 
 - **React owns only the UI chrome.** `GameEngine` is a plain class that is mounted into a `div` ref, and it owns the `WebGLRenderer` and its own `requestAnimationFrame` loop. This is deliberate, so React re-renders never affect frame timing.
-- **Top-level state** is a string union in `App.tsx`: `FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'denied' | 'unsupported'`. Everything else is local `useState` plus refs. There is no store, context or router.
-- **One `HandTracker` per session.** It is created in `handleContinueToCalibration`, which runs on the user click, and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
+- **Top-level state** is a string union in `App.tsx`: `FlightState = 'menu' | 'requesting' | 'calibrating' | 'flying' | 'error'`. When the state is `'error'`, `startupError: { kind, detail }` picks the message. Everything else is local `useState` plus refs. There is no store, context or router.
+- **Startup sequence** (`handleContinueToCalibration`):
+  1. Check `isSecureContext` and that `getUserMedia` exists.
+  2. Call `getUserMedia` (the **only** camera stream; `@mediapipe/camera_utils` was removed because it opened a second stream).
+  3. Call `video.play()`.
+  4. Construct `new HandTracker(video, onUpdate)` and register it in `trackerRef`.
+  5. `await tracker.start()` loads the files, runs a warm-up frame, and starts the loop.
+  6. Switch to `'calibrating'`.
+
+  Any failure goes through `classifyStartupError()`:
+
+  | Cause | Error kind |
+  |---|---|
+  | `NotAllowedError` / `SecurityError` | `permission-denied` |
+  | `NotFoundError` / `OverconstrainedError` | `no-camera` |
+  | `NotReadableError` / `AbortError` | `camera-in-use` |
+  | `NotSupportedError` | `unsupported` |
+  | `TrackingStartError` | `tracking-load-failed` / `tracking-timeout` |
+  | anything else | `unknown` |
+
+  Each kind has its own text in `STARTUP_ERROR_MESSAGES`.
+- **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
+- **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
-- **Teardown.** `stopEverything()` stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it.
+- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it. `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It also bails out if Back disposed the engine while `engine.start()` was awaiting.
 
 ---
 
@@ -196,7 +222,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ### 6.1 Rendering (`GameEngine.ts`)
 - `WebGLRenderer({antialias, powerPreference:'high-performance'})`, with pixel ratio capped at 2, sRGB output, and shadow maps on.
 - `PerspectiveCamera` with FOV 58, rising to 72 on boost (50 and 60 underwater), near 0.1, far 1200.
-- **Sky.** An inverted sphere of radius 900 with vertex-color gradient from the `WEATHER_LOOKS` preset, plus 24 decorative cloud clusters. On Starry Night there's also a 900-point starfield that follows the bird on XZ. The sky sphere and decorative clouds **don't** follow the bird (see §9).
+- **Sky.** An inverted sphere of radius 900 with vertex-color gradient from the `WEATHER_LOOKS` preset, plus 24 decorative cloud clusters. On Starry Night there's also a 900-point starfield that follows the bird on XZ. The sky sphere, the decorative cloud group (`skyClouds`) and the starfield all **follow the bird on XZ** every frame, so the world never flies out of the backdrop.
 - **Fog.** `FogExp2`, density 0.0068 above water and 0.022 underwater.
 - **Lights.** Hemisphere + ambient + a shadow-casting sun (1024² map, 180×180 frustum) that is **re-centered on the bird every frame**, plus an unshadowed fill light.
 - **Weather.** `WEATHER_LOOKS` is one table holding sky colors, fog colors, and light colors and intensities. `enterUnderwaterLook()` and `exitUnderwaterLook()` swap between it and the fixed cyan underwater palette.
@@ -212,10 +238,12 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Collecting a ring adds a +7 pulse that decays at 9/s.
 - **Altitude.**
   - Over solid ground (mountains or islands) the floor is `height + 3.5`.
+  - **Islands are solid underwater.** While submerged, a move that would enter an island's footprint (`!isOverWater`) slides along the edge: it keeps only the X or only the Z part of the move, or blocks the horizontal move entirely. Before this, the solid-ground floor snapped the bird up through the surface.
   - Over open water the only floor is `SEABED_FLOOR_Y = -15`.
   - The ceiling is y = 140.
   - The bird starts at (0, 26, 0) heading +Z.
 - **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, with a per-frame lerp of 0.05 (0.03 underwater).
+- **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` to false, so the bird eases back to level cruise instead of latching the last input.
 - **Timing.** `dt` is clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
 - **Wing flaps.** Flap rate is mapped from speed onto 7–17, times 0.55 when gliding in a dive (pitch below -0.15 and not boosting), and uses a gentle paddle stroke underwater.
 
@@ -226,10 +254,14 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - `selfieMode: false`, so mirroring is done manually
   - detection confidence 0.6, tracking confidence 0.5
 
-  `camera_utils.Camera` drives `hands.send()` from rAF at 480×360.
+- **Loading and frame loop.**
+  - `locateFile` resolves to `${import.meta.env.BASE_URL}mediapipe/hands/<file>`. That path must match `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts`.
+  - `start()` runs `hands.initialize()` plus one warm-up `send()` (which fetches the model) under a 30 s `withTimeout`. A failure throws `TrackingStartError('load-failed' | 'timeout')`.
+  - The tracker then runs its **own rAF loop** on the video the app already started. It sends a frame only when `video.currentTime` has advanced, and `stop()` cancels the rAF.
+  - The tracker never opens or stops the camera: `App` owns the `MediaStream`.
 - **Frame pipeline** in `handleResults`:
   1. Compute the palm center, the mean of landmarks 0, 5, 9, 13 and 17.
-  2. Take the tracked point: the palm center in `hand` mode, or landmark 8 (index tip) in `finger` mode.
+  2. The palm center is the only tracked point. Finger mode was removed.
   3. Mirror X as `1 - x`, so the steering matches the mirrored "selfie" preview.
   4. Smooth with an EMA, α = 0.35 per frame.
   5. Map onto -1..1 **within the calibrated box** with `axisValue()`. Each side of the center uses its own asymmetric extent.
@@ -243,7 +275,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Boost (fist).**
   - `fistRatio` is the mean fingertip-to-palm distance divided by the wrist-to-middle-MCP distance.
   - The fist closes below 0.62 and opens above 0.8, with 3 frames of hysteresis in each direction.
-  - The same gesture works in both control modes.
+  - Hand loss resets `fistActive`, so boost can't come back latched when the hand reappears.
 - **Backflip (upward flick).**
   - Keeps a 220 ms rolling history of the **raw**, unsmoothed Y.
   - It fires when the point moves up more than 0.1 at more than 1.1 frame-heights/s, with a 1200 ms cooldown.
@@ -258,7 +290,6 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - Stored calibration points are in mirrored space, so they are **un-mirrored when drawn** (`1 - p.x`).
 - Pointer drag positions map 1:1 to stored points with **no** flip. The two mirrors cancel. See `.agents/memory/canvas-mirror-coordinate-overlay.md` and `mirrored-canvas-pointer-drag.md`.
 - One preview rAF draws on whichever canvas is mounted: the 360×270 calibration canvas or the 176×132 HUD canvas. It runs in a `useEffect` keyed on `flightState`, because refs are null until the conditional render commits.
-- Changing control mode resets calibration to step 1.
 
 ### 6.5 Tricks
 - **Barrel roll:**
@@ -300,7 +331,9 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Rings are offset laterally and vertically on a sine curve (phase +0.85 per ring).
   - Rings are clamped to at least 8 above the ground, with at most 6 active.
 - **Hit test.** In the ring's own frame: axial distance under 2.2 and radial distance under 3.4.
-- **Despawn.** A missed ring is recycled once it is 40 units behind the bird along its own normal.
+- **Despawn.** A missed ring is recycled once it is 40 units *past* along its own normal (`axialDist > 40`; `delta` points from the ring to the bird), **or** once it is more than 120 units from the bird in any direction. The distance check covers turns and U-turns.
+  - Before this fix the sign was inverted (`< -40`), so every ring spawned 42+ units ahead was recycled in the frame it spawned. Ring Challenge never showed a ring.
+  - Clouds use the same two-part rule: past 60 axially, or more than 240 away. Reef items do too: past 42 axially, or more than 80 away horizontally.
 - **On collect:**
   - score +1
   - a speed pulse
@@ -329,7 +362,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 
 - **Keep game code framework-free.** Anything in `src/game/` is plain TypeScript and three.js with no React imports. React talks to it through constructor options, a few `get*/is*` getters, `applyControls()`, and callbacks.
 - **Use one manager class per system**, with the same lifecycle: `constructor(scene)`, then `update(dt, birdPosition, forward, …)` every frame, then `dispose()`. `GameEngine.update` calls them in order. New systems should follow this shape.
-- **Pool and stream around the bird.** Objects spawn ahead of the bird along `forward`, are recycled once they're some distance *behind* along their spawn-time forward, and are reused through `visible = false` and a pool array. Terrain and ocean tiles are keyed by `"x,z"` strings.
+- **Pool and stream around the bird.** Objects spawn ahead of the bird along `forward` and are reused through `visible = false` and a pool array. They're recycled once they're some distance *behind* along their spawn-time forward, **or** beyond a max distance from the bird. Always include the distance cap, or a U-turn can fill the pool with unreachable objects and stop spawning. Terrain and ocean tiles are keyed by `"x,z"` strings.
 - **Tune with constants at the top of each file**, in `UPPER_SNAKE_CASE` with a comment explaining the *why*. Change these rather than inlining magic numbers.
 - **Generate assets procedurally.** Meshes are built from three primitives with `flatShading: true`, textures from `<canvas>`, and sound from Web Audio. There are no binary assets, and it's worth keeping it that way.
 - **Comments are dense and explain intent**, often pointing to `.agents/memory/*`. Match that density in `src/game/`.
@@ -370,90 +403,99 @@ There is no Replit DB, Replit Auth or Replit secrets usage anywhere. The game is
 
 ## 9. Known issues, bugs, fragile areas and tech debt
 
-These come from code reading plus a headless run. The game logic hasn't been changed yet, so all of them are still open. The build and portability problems (env vars required, linux-x64-only installs, template scaffolding, placeholder meta description) were fixed by the standalone cleanup and have been removed from this list.
+These come from code reading plus headless runs.
+
+**Fixed so far, and removed from this list:**
+- **Standalone cleanup (earlier PR):** env vars were required, installs only worked on linux-x64, template scaffolding, and a placeholder meta description.
+- **P0 correctness pass:**
+  - steering and boost latched on hand loss
+  - rings, clouds and reef stalled after U-turns
+  - the Ring Challenge's inverted despawn sign
+  - the sky dome and horizon clouds were left behind
+  - the island-edge teleport underwater
+  - a silent MediaPipe CDN failure
+  - the generic "Camera access was blocked" error
+  - the Back-during-requesting race
+  - a double-click could build two engines
+  - `surfaceSplash` wasn't reset
+  - the second camera stream opened by `camera_utils`
+  - the Index Finger mode
 
 ### Gameplay and control bugs
-1. **Steering and boost latch when the hand is lost.** `applyControls` returns early on `handDetected: false` before it updates `targetPitch`, `targetRoll` or `boosting`. If the hand leaves the frame mid-turn or mid-boost, the bird **keeps turning or boosting forever** until the hand comes back. `HandTracker` also never clears `fistActive` on hand loss, so boost can resume latched.
-2. **The Ring Challenge can stall permanently.** A missed ring despawns only once it's 40 units behind *along its own normal*. If the player turns away (90° or a U-turn), missed rings never despawn. Once 6 are active, **no new rings spawn**. Clouds in `clouds.ts` and reef items in `underwater.ts` use the same axial-only despawn, so after a U-turn clouds can stop appearing.
-3. **The world edge (sky dome).** The sky sphere (r = 900) and the 24 decorative clouds sit fixed at the world origin, and the camera's far plane is 1200. Once the bird has flown more than about 900 units (roughly 100 s at cruise speed), the gradient sky is left behind. You see the flat `scene.background` color instead, and the horizon clouds vanish.
-4. **Island-edge teleport when diving.** When the bird swims underwater into an island's radius, `isOverWater` flips to false and the solid-ground floor (`height + 3.5`) **snaps the bird up through the surface instantly**.
-5. **Frame-rate-dependent feel.** Every lerp (orientation 0.06, speed 0.04, camera 0.05, FOV 0.06, the tracker EMA 0.35, fish-school lerp 0.02) is per frame, not scaled by `dt`. The game behaves differently at 30, 60 and 144 Hz. Separately, `dt` is clamped to 0.05, so below 20 FPS everything runs in slow motion.
-6. **Gestures that interfere with steering:**
-   - Closing a fist moves the palm-center and fingertip landmarks, so boosting nudges steering. This is worst in Finger mode, where the tracked fingertip folds into the palm.
+1. **Frame-rate-dependent feel.** Every lerp (orientation 0.06, speed 0.04, camera 0.05, FOV 0.06, the tracker EMA 0.35, fish-school lerp 0.02) is per frame, not scaled by `dt`. The game behaves differently at 30, 60 and 144 Hz. Separately, `dt` is clamped to 0.05, so below 20 FPS everything runs in slow motion.
+2. **Gestures that interfere with steering:**
+   - Closing a fist shifts the palm-center landmarks slightly, so boosting nudges steering.
    - An upward flick is also a large pitch-up input.
    - A center captured outside the corner box makes `axisValue()` return 0 on that side, silently disabling steering in that direction.
    - Sensitivity is applied after the box mapping. At 0.5x the bird can never reach full pitch or roll, and at 2x it saturates at the middle of the box.
-7. **Reef items float mid-water.** Reef items spawn at a random depth between -13 and -4, not on the seabed, and there is no visible seabed mesh, only caustic rings at y = -14. Coral heights use `geometry.boundingSphere`, which is always null because it's never computed, so the offset is always 0.8. Pooled reef items keep their original `kind`.
-8. The skimming splash particles don't fade (the `PointsMaterial` issue in §6.9).
+3. **Reef items float mid-water.** Reef items spawn at a random depth between -13 and -4, not on the seabed, and there is no visible seabed mesh, only caustic rings at y = -14. Coral heights use `geometry.boundingSphere`, which is always null because it's never computed, so the offset is always 0.8. Pooled reef items keep their original `kind`.
+4. The skimming splash particles don't fade (the `PointsMaterial` issue in §6.9).
+5. **Surface-level island pop.** A bird skimming *above* the water that flies into an island is still lifted to `height + 3.5` in one frame. Near the shore that's about 3.5 units. Only the underwater case was fixed.
 
 ### Robustness and UX
-9. **CDN failure is silent.** If `cdn.jsdelivr.net` is unreachable (offline, corporate proxy, China), calibration waits forever with no error and a console warning on every frame. The MediaPipe version is hard-coded in two places: `package.json` and the `locateFile` URL.
-10. **Every startup error reads as "Camera access was blocked".** This includes a missing video element and MediaPipe init errors.
-11. **Race on Back during "requesting".** If `getUserMedia` resolves after the user has gone back to the menu, a tracker and stream are still created and never stopped.
-12. **Double-clicking Start Flying** can build two `GameEngine`s. There's no guard, and the first is orphaned with its rAF still running.
-13. **No keyboard, mouse or touch fallback**, and no pause. You can't play or debug without a webcam, and mobile is effectively unsupported.
-14. `surfaceSplash` isn't reset by `handleBackToMenu`.
+6. **No keyboard, mouse or touch fallback**, and no pause. You can't play or debug without a webcam, and mobile is effectively unsupported.
+7. **Tall cards get clipped.** The menu, calibration and startup cards use `flex items-center justify-center overflow-y-auto`. When a card is taller than the window (the menu at a 720 px height), its top is cut off and **can't be scrolled to**, which can hide the calibration **Back** button. The usual fix is `my-auto` on the card, or `justify-start` combined with `min-h-full`.
+8. **Cryptic load-error detail.** When a MediaPipe file 404s, the detail under the friendly message is minified MediaPipe internals such as `TypeError: jt is not a function`. The friendly message is correct, but the detail line doesn't help users.
+9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
 
 ### Performance
-15. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole ~1000-line `App` during flight.
-16. **Per-frame allocations.** `GameEngine.update`, rings, clouds, underwater, splash and the ring guide create `new THREE.Vector3()` and `.clone()` in hot loops, which causes GC churn. `ocean.animateWater` also does a `key.split(',')` for every tile on every frame.
-17. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
-18. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
-19. **Main-thread stutter.** Tile generation is synchronous: crossing a tile boundary builds 7 tiles of noise on the main thread. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
-20. **One large JS chunk.** It's 844 kB (234 kB gzip), mostly three.js and MediaPipe, with no code splitting. CSS is now 31 kB.
+10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole ~1000-line `App` during flight.
+11. **Per-frame allocations.** `GameEngine.update`, rings, clouds, underwater, splash and the ring guide create `new THREE.Vector3()` and `.clone()` in hot loops, which causes GC churn. `ocean.animateWater` also does a `key.split(',')` for every tile on every frame.
+12. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
+13. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
+14. **Main-thread stutter.** Tile generation is synchronous: crossing a tile boundary builds 7 tiles of noise on the main thread. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
+15. **Large downloads.** The JS is one 837 kB chunk (232 kB gzip) with no code splitting. On top of that, each session downloads about 13 MB of MediaPipe files.
 
 ### three.js deprecations (seen in the console on r185)
-21. `THREE.Clock` is deprecated in favor of `THREE.Timer`.
-22. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
+16. `THREE.Clock` is deprecated in favor of `THREE.Timer`.
+17. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
 
 ### Tech debt
-23. **A god component and a god class.** `App.tsx` mixes UI, tracker lifecycle, canvas drawing and the calibration state machine. `GameEngine.update` is a roughly 170-line function.
-24. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
-25. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector and the ring hit test is easy to unit-test and currently isn't.
-26. **Inconsistent naming.** The repo and root package are "Sky Soarer" / `sky-soarer`, the UI is "Bird Flight", the game package is `@workspace/3d-game`, and the localStorage key is `bird-flight-best-score`.
-27. **Stale `replit.md`.** It is kept as is by request (see the top of this file).
-28. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
+18. **A god component and a god class.** `App.tsx` mixes UI, tracker lifecycle, canvas drawing and the calibration state machine. `GameEngine.update` is a roughly 190-line function.
+19. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
+20. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector, the ring hit test and despawn, and `classifyStartupError` is easy to unit-test and currently isn't. The ring despawn sign bug shipped unnoticed for exactly this reason.
+21. **Inconsistent naming.** The repo and root package are "Sky Soarer" / `sky-soarer`, the UI is "Bird Flight", the game package is `@workspace/3d-game`, and the localStorage key is `bird-flight-best-score`.
+22. **Stale `replit.md`.** It is kept as is by request (see the top of this file). It still describes Finger mode and the CDN.
+23. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
+24. **The MediaPipe asset path lives in two places.** `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts` and `MEDIAPIPE_ASSET_DIR` in `handControls.ts` must stay in sync.
 
 ---
 
 ## 10. Prioritized improvement ideas
 
-**P0: correctness and playability**
-1. On `handDetected: false`, ease `targetPitch` and `targetRoll` to 0 and clear `boosting`, while keeping the backflip check first. Also reset `fistActive` on hand loss.
-2. Despawn rings, clouds and reef items by distance from the bird, or by an angle-aware test, rather than only by axial distance along the spawn-time forward.
-3. Make the sky dome and decorative clouds follow the bird on XZ, the way the starfield already does.
-4. Surface MediaPipe load failures in the UI with a timeout and a clear message. Consider self-hosting the MediaPipe assets under `public/` so there's no runtime CDN dependency. Vercel would then serve them from the same origin.
-5. Add a **keyboard and mouse fallback** (WASD or arrows, Space for boost, a key for backflip) behind the same `HandControlState` interface. This helps accessibility, users without a webcam, and debugging.
+**P0: playability**
+1. Add a **keyboard and mouse fallback** (WASD or arrows, Space for boost, a key for backflip) behind the same `HandControlState` interface. This helps accessibility, users without a webcam, and debugging.
+2. Fix the clipped tall cards (§9 #7), so Back and Start Flying are always reachable on small windows.
 
 **P1: controls feel**
 
-6. Make all lerps frame-rate independent with `1 - Math.exp(-k * dt)`, and use `THREE.Timer`.
-7. While the fist is closing, freeze or hold the steering sample so boosting doesn't nudge steering. In Finger mode, consider a pinch or a thumb gesture for boost.
-8. Validate calibration: the center must lie inside the box, and the box must have a minimum size. Offer a "use default box" quick start, and persist calibration in `localStorage` so returning players can skip it.
-9. Make flick detection relative to the calibration box size, and suppress the pitch spike it causes.
-10. Migrate from the legacy `@mediapipe/hands` to `@mediapipe/tasks-vision` `HandLandmarker`, which is maintained, supports a GPU delegate, and can run in a worker.
+3. Make all lerps frame-rate independent with `1 - Math.exp(-k * dt)`, and use `THREE.Timer`.
+4. While the fist is closing, freeze or hold the steering sample so boosting doesn't nudge steering.
+5. Validate calibration: the center must lie inside the box, and the box must have a minimum size. Offer a "use default box" quick start, and persist calibration in `localStorage` so returning players can skip it.
+6. Make flick detection relative to the calibration box size, and suppress the pitch spike it causes.
+7. Migrate from the legacy `@mediapipe/hands` to `@mediapipe/tasks-vision` `HandLandmarker`, which is maintained, supports a GPU delegate, and can run in a worker.
 
 **P2: performance**
 
-11. Throttle React updates from the tracker, sending only changed values, or move HUD status into a ref plus a small subscribed component.
-12. Remove per-frame `Vector3` allocations by using scratch vectors.
-13. Dispose geometries, materials and textures properly, and call `forceContextLoss()` on engine teardown.
-14. Generate tiles incrementally (one per frame) or in a worker. Bound `islandCache`.
-15. Code-split: lazy-load MediaPipe and the engine after the menu, so the first paint doesn't wait for 844 kB of JS.
+8. Throttle React updates from the tracker, sending only changed values, or move HUD status into a ref plus a small subscribed component.
+9. Remove per-frame `Vector3` allocations by using scratch vectors.
+10. Dispose geometries, materials and textures properly, and call `forceContextLoss()` on engine teardown.
+11. Generate tiles incrementally (one per frame) or in a worker. Bound `islandCache`.
+12. Code-split: lazy-load MediaPipe and the engine after the menu. Consider dropping the unused `hand_landmark_full.tflite` from the build, since `modelComplexity` is 0.
 
 **P3: visuals and gameplay**
 
-16. Fix the splash fade by reusing the burst `ShaderMaterial`, and deduplicate the burst classes into one configurable `ParticleBurst`.
-17. Add a real seabed mesh, anchor reef items to it, and add a double-sided or underside water surface with a Snell's-window look from below.
-18. Use real soft shadows (VSM, or PCF with a larger radius), and optionally postprocessing (bloom for rings and emissive reef, real motion blur).
-19. Gameplay: timed ring runs, a combo multiplier, trick scoring, collectibles underwater, day and night that changes over time, and live weather switching.
-20. Allow switching bird, map or weather without re-calibrating: keep the tracker and rebuild only the engine.
+13. Fix the splash fade by reusing the burst `ShaderMaterial`, and deduplicate the burst classes into one configurable `ParticleBurst`.
+14. Add a real seabed mesh, anchor reef items to it, and add a double-sided or underside water surface with a Snell's-window look from below.
+15. Use real soft shadows (VSM, or PCF with a larger radius), and optionally postprocessing (bloom for rings and emissive reef, real motion blur).
+16. Gameplay: timed ring runs, a combo multiplier, trick scoring, collectibles underwater, day and night that changes over time, and live weather switching.
+17. Allow switching bird, map or weather without re-calibrating: keep the tracker and rebuild only the engine.
 
 **P4: code quality**
 
-21. Add a `MapEnvironment` interface for Terrain and Ocean, split `App.tsx` into screens and hooks (`useHandTracker`, `useGameEngine`), and break `GameEngine.update` into named steps.
-22. Add Vitest unit tests for the tracker math and ring hit tests, plus ESLint and Prettier configs, and a GitHub Actions workflow that runs `pnpm install --frozen-lockfile && pnpm run build` on Linux, macOS and Windows.
-23. Unify the naming (Sky Soarer vs Bird Flight), keeping the localStorage key backward-compatible.
+18. Add a `MapEnvironment` interface for Terrain and Ocean, split `App.tsx` into screens and hooks (`useHandTracker`, `useGameEngine`), and break `GameEngine.update` into named steps.
+19. Add Vitest unit tests for the tracker math, ring hit and despawn tests, and `classifyStartupError`. Add ESLint and Prettier configs, and a GitHub Actions workflow that runs `pnpm install --frozen-lockfile && pnpm run build` on Linux, macOS and Windows.
+20. Unify the naming (Sky Soarer vs Bird Flight), keeping the localStorage key backward-compatible.
 
 ---
 
@@ -462,7 +504,10 @@ These come from code reading plus a headless run. The game logic hasn't been cha
 - Don't start the camera or audio before a user gesture. Camera and tracking start on **Continue to Calibration**, and wind audio starts on **Start Flying**.
 - Don't fold the trick sweep into the steering angles (see memory note).
 - Don't move the `state.backflip` check below the `handDetected` guard in `applyControls`.
-- Don't re-throw from the `hands.send()` catch.
+- Don't re-throw from the per-frame `hands.send()` catch. Startup failures are different: `start()` surfaces them as `TrackingStartError` so the UI can show them.
+- Don't reintroduce `@mediapipe/camera_utils` or a CDN `locateFile`. The app owns the single `MediaStream`, and MediaPipe files are self-hosted. When bumping `@mediapipe/hands`, change only `package.json`, then check that the file list the plugin emits still matches what the new version requests.
+- After every `await` in the startup flow, check the session id (`isCurrent()`) and release anything acquired if the attempt was superseded.
+- Every pooled spawner needs a max-distance despawn as well as the "behind" check (see §7). Watch the sign of axial distances: `delta = bird - item`, so an item the bird has passed is **positive**.
 - Don't "fix" the mirrored overlay or drag math without reading the two canvas-mirror memory notes. The un-mirror at draw time and the *absence* of a flip in pointer handling are both intentional.
 - To flip a bird's facing direction, change the yaw offset on the outer group, never the mesh (see `three-js-mesh-orientation-fix.md`).
 - When adding a map, implement `update(position)` and `heightAtWorld(x, z)`. Add `isOverWater` if it has water, and wire it in the `GameEngine` constructor.

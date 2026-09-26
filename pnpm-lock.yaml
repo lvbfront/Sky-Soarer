@@ -63,11 +63,8 @@ importers:
 
   artifacts/3d-game:
     dependencies:
-      '@mediapipe/camera_utils':
-        specifier: ^0.3.1675466862
-        version: 0.3.1675466862
       '@mediapipe/hands':
-        specifier: ^0.4.1675469240
+        specifier: 0.4.1675469240
         version: 0.4.1675469240
       lucide-react:
         specifier: 'catalog:'
@@ -384,9 +381,6 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
-
-  '@mediapipe/camera_utils@0.3.1675466862':
-    resolution: {integrity: sha512-siuXBoUxWo9WL0MeAxIxvxY04bvbtdNl7uCxoJxiAiRtNnCYrurr7Vl5VYQ94P7Sq0gVq6PxIDhWWeZ/pLnSzw==}
 
   '@mediapipe/hands@0.4.1675469240':
     resolution: {integrity: sha512-GxoZvL1mmhJxFxjuyj7vnC++JIuInGznHBin5c7ZSq/RbcnGyfEcJrkM/bMu5K1Mz/2Ko+vEX6/+wewmEHPrHg==}
@@ -1222,8 +1216,6 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
-
-  '@mediapipe/camera_utils@0.3.1675466862': {}
 
   '@mediapipe/hands@0.4.1675469240': {}
 

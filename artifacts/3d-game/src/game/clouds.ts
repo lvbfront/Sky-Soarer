@@ -8,6 +8,10 @@ const VERTICAL_OFFSET_MIN = -10;
 const VERTICAL_OFFSET_MAX = 24;
 const MAX_ACTIVE = 10;
 const DESPAWN_BEHIND_DISTANCE = 60;
+// Also recycle any cloud this far from the bird in any direction (clouds spawn at most ~175 units
+// away). Catches clouds left behind by a turn or U-turn, which the axial check above misses and
+// which would otherwise fill MAX_ACTIVE and stop new clouds from spawning.
+const DESPAWN_MAX_DISTANCE = 240;
 
 interface ActiveCloud {
   group: THREE.Group;
@@ -95,7 +99,7 @@ export class CloudManager {
 
       const delta = birdPosition.clone().sub(cloud.position);
       const axialDist = delta.dot(cloud.forwardAtSpawn);
-      if (axialDist > DESPAWN_BEHIND_DISTANCE) {
+      if (axialDist > DESPAWN_BEHIND_DISTANCE || delta.lengthSq() > DESPAWN_MAX_DISTANCE * DESPAWN_MAX_DISTANCE) {
         this.active.splice(i, 1);
         cloud.group.visible = false;
         this.pool.push(cloud.group);
