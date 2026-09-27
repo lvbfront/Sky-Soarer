@@ -21,20 +21,27 @@ How a session plays:
    - **4 · Above the clouds (5,000 m):** the Ring Challenge switch (with best score), a summary of the choices, and **Begin pre-flight**, which saves the settings and asks for camera access.
 
    Fixed instrument chrome: an altimeter rail (clickable chapter ticks), telemetry (speed, heading, V/S, lat/lon), a big altitude counter, and a **Sound** toggle for ambient wind (off by default).
-2. **Pre-flight: calibration (Screen 2).**
+2. **Pre-flight 01: boot sequence.** A full-screen HUD over the frozen backdrop types three monospace status lines that follow the **real** startup events (see §6.11):
+   - `CAMERA [REQUESTING → ONLINE · 480×360]`
+   - `HAND TRACKING MODEL [STANDBY → LOADING xx% → WARMING UP → READY]`, where the percentage is measured from the actual MediaPipe downloads
+   - `CALIBRATION [PENDING]`
+
+   A failure shows inline under the failing line (`DENIED`, `NOT FOUND`, `BUSY`, `FAILED`, `TIMEOUT`, …) with the message, the raw detail, and **Try Again**. **Back** is always available.
+3. **Pre-flight 02: calibration, as an instrument panel.**
    - Steering always tracks the **palm center**. An Index Finger mode existed earlier and was removed.
-   - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range.
-   - Once a corner is captured you can drag it on the preview to fine-tune it.
-   - Set steering sensitivity from 0.5x to 2.0x.
-   - **Start Flying** stays disabled until all 5 points are captured.
-3. **Flight.**
+   - The camera preview is framed as a sensor feed (LIVE marker, resolution, scanlines, corner brackets, HAND LOCK / NO SIGNAL).
+   - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range. Each is drawn as a target reticle. The step being captured also shows a pulsing ghost reticle at a suggested spot, and a checklist shows each step as LOCKED / ACQUIRE / STANDBY.
+   - Once a corner is captured you can drag its reticle on the feed to fine-tune it.
+   - Set steering sensitivity from 0.5x to 2.0x on a styled slider.
+   - **Start Flying** stays disabled until all 5 points are captured. It plays a short GSAP **takeoff transition** into flight.
+4. **Flight.**
    - Move your palm inside the calibrated box to pitch and roll. Roll banks the bird, and banking turns it.
    - **Close a fist** to boost. Boosting also fires an automatic 0.8 s barrel roll.
    - **Flick your hand up fast** for a 0.9 s backflip.
    - Both tricks are cosmetic only. They never change heading or momentum.
    - On the ocean map you can dive under open water into a reef world with fish, a shark, caustics and bubbles. Surfacing sprays a water burst.
    - In Ring Challenge, fly through glowing rings to score. A floating arrow points to the nearest ring, and the best score is saved in `localStorage`.
-   - The HUD shows score, Boost/Barrel Roll/Backflip/Diving badges, a mirrored webcam preview with the hand skeleton, a status line, and **Stop Game**.
+   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score and best, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton, a status line, and **Stop Game**.
 
 There is no win or lose state, no timer, and no collision damage. Terrain acts only as an altitude floor.
 
@@ -82,10 +89,14 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
 
 - `pnpm install --frozen-lockfile` succeeds.
 - `pnpm run typecheck` passes.
-- `pnpm run build` succeeds from the root. It emits a 1.9 kB `index.html`, 45 kB of CSS, a 908 kB entry chunk (264 kB gzip: React, three, GSAP, the landing), two lazy chunks (`handControls` 50 kB with the MediaPipe JS, `GameEngine` 33 kB), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
+- `pnpm run build` succeeds from the root. It emits a 1.9 kB `index.html`, 49 kB of CSS, a 930 kB entry chunk (269 kB gzip: React, three, GSAP, the landing and the pre-flight/HUD UI), two lazy chunks (`handControls` 52 kB with the MediaPipe JS and the download meter, `GameEngine` 33 kB), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
 - The Vercel commands (`npx --yes pnpm@10.33.0 install --frozen-lockfile` and `… run build`) also succeed in a shell with **no global pnpm**. The nested `pnpm` calls in the root scripts resolve to the npx-provided pnpm.
 - The dev server starts on 5173 with defaults. It also starts with Replit's env (`PORT=24982 BASE_PATH=/ REPL_ID=…`), and then the Replit plugins load.
 - Headless Chromium with a fake camera, and **every non-localhost request blocked**, reached the calibration screen on the production preview. The landing redesign PR re-ran this with SwiftShader WebGL: every chapter, live bird/world/sky switching, snapping, reduced motion, Quick start, Back, and the error screen. It also confirmed that no `handControls`/MediaPipe/`GameEngine` request happens before **Begin pre-flight**. Deep links such as `/some/route` return `index.html`. The startup error paths were also exercised in headless runs; see the P0 PR's test notes.
+- The pre-flight/HUD restyle PR re-ran this headlessly (SwiftShader, fake camera; see §11 for the harness):
+  - The production build, with the network throttled to 2 MB/s and the **real** MediaPipe files, showed `LOADING` climbing 00% → 99% in small steps, then READY, then calibration. `WebAssembly.instantiateStreaming` still worked through the fetch wrapper, and `fetch`/`XMLHttpRequest.prototype.open` were native again afterwards.
+  - A denied camera and an aborted `.tflite` download each produced the inline error. Try Again recovered from the denied camera.
+  - With a stubbed detector, it covered all 5 captures, a corner drag, the takeoff veil, the HUD (cruise, boost, hand lost, a collected ring), and Stop Game. Back during the READY hold never opened calibration, and Stop Game during the takeoff reveal left no veil behind. A second session ran with only one WebGL context. Reduced motion was checked too, all with no console errors.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -134,12 +145,21 @@ The game needs **no secrets, no backend and no database**.
 │       ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
 │       ├── index.html         # <title>Bird Flight</title>, meta/OG description, Google Fonts Inter, favicon
 │       ├── vite.config.ts     # PORT/BASE_PATH defaults; Replit plugins only when REPL_ID is set; @ -> src
-│       ├── vite-plugin-mediapipe-assets.ts # serves/emits the MediaPipe runtime files under mediapipe/hands/
+│       ├── vite-plugin-mediapipe-assets.ts # serves/emits the MediaPipe runtime files under mediapipe/hands/, plus the
+│       │                                   #   `virtual:mediapipe-hands-assets` file-size manifest (typed in src/mediapipe-assets.d.ts)
 │       ├── public/            # favicon.svg, robots.txt (copied as-is into dist/public)
 │       └── src/
 │           ├── main.tsx       # createRoot(<App/>)
-│           ├── App.tsx        # ★ state machine, startup/teardown, lazy loaders, pre-flight + calibration screens, flight HUD
-│           ├── index.css      # Tailwind v4 + theme tokens; `ascent-*` landing utilities (glass, HUD type, grain)
+│           ├── App.tsx        # ★ state machine, startup/teardown, lazy loaders, boot status, takeoff transition, preview rAF
+│           ├── index.css      # Tailwind v4 + theme tokens; `ascent-*` utilities (glass, HUD type, grain, blip, range, boost streaks)
+│           ├── preflight/     # pre-flight screens (presentational; App owns the state)
+│           │   ├── BootSequence.tsx     # 01: typed boot-status HUD, inline errors + Try Again, T+ clock
+│           │   ├── CalibrationPanel.tsx # 02: sensor feed frame, step checklist, capture/reset, sensitivity slider, Start Flying
+│           │   └── handPreview.ts       # CALIBRATION_STEPS, calibration types, drawHandPreview (reticles, box, ghost target)
+│           ├── flight/
+│           │   └── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed, Stop
+│           ├── ui/
+│           │   └── hud.tsx        # CornerBrackets, Wordmark (shared instrument-frame pieces)
 │           ├── landing/       # ★ the scroll-driven landing page ("The Ascent")
 │           │   ├── Landing.tsx     # chapters, GSAP ScrollTrigger (scrub + snap), intro timeline, HUD, keys, sound toggle
 │           │   └── content.ts      # chapter list, copy (bird personalities, world/sky details), formatters
@@ -151,6 +171,7 @@ The game needs **no secrets, no backend and no database**.
 │               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings"), validated on read
 │               ├── trackingShared.ts # TrackingStartError + sensitivity bounds, importable without loading MediaPipe
 │               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures (lazy-loaded)
+│               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
 │               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
@@ -207,8 +228,10 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   3. Call `getUserMedia` (the **only** camera stream; `@mediapipe/camera_utils` was removed because it opened a second stream).
   4. Call `video.play()`, then await the tracking module.
   5. Construct `new HandTracker(video, onUpdate)` and register it in `trackerRef`.
-  6. `await tracker.start()` loads the files, runs a warm-up frame, and starts the loop.
-  7. Switch to `'calibrating'`.
+  6. `await tracker.start(onProgress)` loads the files, runs a warm-up frame, and starts the loop. `onProgress` reports the real download fraction.
+  7. Hold for `max(BOOT_READY_HOLD_MS 550, BOOT_MIN_DURATION_MS 1100 − elapsed)`, then switch to `'calibrating'`. The minimum is 0 under reduced motion. This hold is the only added time in the whole boot: it lets the typed lines finish and READY register, and adds at most ~1.1 s.
+
+  Each step also updates `boot: BootStatus` (camera, resolution, model state and percent, calibration, `startedAt`). `buildBootLines()` turns that plus any error into the boot HUD's lines. A local `phase` (`camera` until the video plays, then `model`) is recorded on the error as `StartupError.phase`, and picks the line the error is reported under. The engine-chunk failure in `handleStartFlying` uses phase `engine`, which adds a `FLIGHT ENGINE [FAILED]` line.
 
   Any failure goes through `classifyStartupError()`:
 
@@ -220,12 +243,13 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   | `NotSupportedError` | `unsupported` |
   | `TrackingStartError` | `tracking-load-failed` / `tracking-timeout` |
   | anything else | `unknown` |
+  | (engine chunk import failed, set directly in `handleStartFlying`) | `engine-load-failed` |
 
   Each kind has its own text in `STARTUP_ERROR_MESSAGES`.
 - **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
 - **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
-- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It checks the session id after awaiting the engine chunk, and bails out if Back disposed the engine while `engine.start()` was awaiting.
+- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also calls `resetTakeoff()` and turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It awaits the engine chunk **and** the takeoff launch animation together, checks the session id afterwards, and bails out if Back disposed the engine while `engine.start()` was awaiting. `resetTakeoff()` kills the takeoff timeline, hides the veil, and resolves the pending launch promise, so an interrupted launch never leaves `handleStartFlying` awaiting forever.
 - **The landing backdrop (`LandingScene`)** is created by an effect in `App` while `landingBackdropOn` is true, and it stays alive behind the landing *and* the pre-flight screens (holding the "above the clouds" shot). While `flightState` is `'requesting'` (tracking loading) or `'calibrating'` it is **paused** (`setPaused(true)`): no update and no render, so it doesn't compete with MediaPipe on the main thread. Before freezing it cuts to the pre-flight shot and renders that one frame, which the canvas then holds. That matters for Quick start, which is pressed from the hero. It resumes on Back or on the error screen. `handleStartFlying` calls `disposeLandingScene()` **before** constructing `GameEngine`, so only one WebGL context is ever live. Returning from flight rebuilds it. If WebGL can't start, the constructor throws, the error is logged, and the page runs over the CSS sky gradient on `<html>`. App also keeps the backdrop's bird/world/sky in sync with `settings`, so a Quick start swap shows behind pre-flight.
 
 ---
@@ -269,7 +293,12 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 
 - **Loading and frame loop.**
   - `locateFile` resolves to `${import.meta.env.BASE_URL}mediapipe/hands/<file>`. That path must match `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts`.
-  - `start()` runs `hands.initialize()` plus one warm-up `send()` (which fetches the model) under a 30 s `withTimeout`. A failure throws `TrackingStartError('load-failed' | 'timeout')`.
+  - `start(onProgress?)` runs `hands.initialize()` plus one warm-up `send()` (which fetches the model) under a 30 s `withTimeout`. A failure throws `TrackingStartError('load-failed' | 'timeout')`.
+  - **Real load progress.** MediaPipe has no progress callback. It loads the wasm and the `.tflite` with `fetch()`, the packed `.data` with an XHR, and the loader scripts with `<script>` tags. While `start()` runs, `meterDownloads()` (`downloadMeter.ts`) wraps `window.fetch` and `XMLHttpRequest.prototype.open`, but only observes requests under `mediapipe/hands/`:
+    - fetch: it reads a `clone()` of the response and hands the caller the original, untouched response (so `instantiateStreaming` keeps working)
+    - XHR: it adds `progress`/`load` listeners with `addEventListener`, which leaves the loader's own `onprogress` alone
+
+    The three big files are weighted by their byte sizes from the plugin's `virtual:mediapipe-hands-assets` manifest. The SIMD and plain wasm share one slot. An unfinished file never counts as more than 99%. The wrappers are removed in `start()`'s `finally` and in `stop()`.
   - The tracker then runs its **own rAF loop** on the video the app already started. It sends a frame only when `video.currentTime` has advanced, and `stop()` cancels the rAF.
   - The tracker never opens or stops the camera: `App` owns the `MediaStream`.
 - **Frame pipeline** in `handleResults`:
@@ -298,11 +327,20 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Per-frame `send()` errors are logged and swallowed, never re-thrown.
 - **Fallback inputs:** **none.** There is no keyboard, mouse, gamepad or touch steering. Pointer events are used only for dragging calibration corners.
 
-### 6.4 Calibration UI and webcam preview (`App.tsx`)
+### 6.4 Calibration UI and webcam preview (`preflight/handPreview.ts`, `preflight/CalibrationPanel.tsx`, the preview rAF in `App.tsx`)
 - `drawHandPreview()` draws the raw video frame and the raw landmarks, then CSS `scale-x-[-1]` mirrors the canvas.
 - Stored calibration points are in mirrored space, so they are **un-mirrored when drawn** (`1 - p.x`).
 - Pointer drag positions map 1:1 to stored points with **no** flip. The two mirrors cancel. See `.agents/memory/canvas-mirror-coordinate-overlay.md` and `mirrored-canvas-pointer-drag.md`.
-- One preview rAF draws on whichever canvas is mounted: the 360×270 calibration canvas or the 176×132 HUD canvas. It runs in a `useEffect` keyed on `flightState`, because refs are null until the conditional render commits.
+- **Canvas text** (reticle labels such as `TL`) is drawn pre-flipped around its anchor (`drawMirroredLabel`), so it reads correctly after the CSS mirror.
+- **The overlay** (calibration only), drawn in this order:
+  1. an ink wash
+  2. the box (dashed, faint fill)
+  3. the current step's ghost reticle at `CalibrationStep.hint` (the tracker's default box corners, a suggestion only)
+  4. captured corners as warm bracket reticles (the drag handles)
+  5. the captured center as a cyan crosshair
+  6. the live palm-center steering point, computed from the raw landmarks
+- Sizes scale with canvas width, since they were tuned at 360 px.
+- One preview rAF draws on whichever canvas is mounted: the 480×360 calibration sensor feed or the 176×132 HUD feed. It runs in a `useEffect` keyed on `flightState`, because refs are null until the conditional render commits. It reads the current step through `calibrationStepRef`.
 
 ### 6.5 Tricks
 - **Barrel roll:**
@@ -390,6 +428,21 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Reduced motion** (`prefers-reduced-motion: reduce`, read live by `usePrefersReducedMotion`): no scrub, no snapping, no intro choreography and no parallax. Chapters activate when centered, and the backdrop *cuts* to that chapter's shot (`setProgress(p, true)`) behind a quick fade. Reveals are opacity-only, bird/map/sky swaps are instant, and the bird's weave is reduced. Changing the setting rebuilds the scene.
 - **Settings.** `settings.ts` persists `{bird, map, weather, ringChallenge}` under `bird-flight-settings` when pre-flight begins, and validates every field on read. The landing starts from the saved choices, and **Quick start** uses them.
 
+### 6.11 Pre-flight boot HUD, flight HUD and takeoff (`preflight/BootSequence.tsx`, `flight/FlightHud.tsx`, `App.tsx`)
+- **Boot HUD.** `BootSequence` is presentational: App passes `lines` (from `buildBootLines`), the error line/message/detail, `startedAt` and `running`.
+  - One instance renders for both `'requesting'` and `'error'`, so a failure or Try Again updates the lines in place.
+  - On mount, a GSAP timeline types each label by writing `textContent` into a span React renders empty. Then it fades in that line's leader and `[ status ]`. Under reduced motion the labels appear at once.
+  - Status changes re-key the status span, which replays the CSS `ascent-blip` flicker. Active statuses breathe.
+  - The model line draws a hairline progress bar from the real percentage.
+  - The T+ clock is real elapsed time (a rAF writing `textContent`) and freezes on failure.
+  - A polite `aria-live` summary reads the statuses to screen readers.
+- **Flight HUD.** `FlightHud` receives `engineRef` (a type-only import, so the engine stays lazy). A rAF loop:
+  - moves the heading tape every frame (a strip of ticks from −120° to 480° slid under a center caret, so it never wraps)
+  - writes HDG/SPD/ALT text about every 100 ms through refs, never React state
+
+  These use the new `GameEngine` getters: `getHeadingDegrees()` (0° is the start direction and right turns increase it), `getAltitude()` (the bird's Y), and `getSpeed()` (×1.944 to show knots). The splash and underwater overlays are unchanged. The old warm boost vignette is replaced by a HUD effect: masked conic speed streaks (opacity plus a compositor-only transform animation), a faint warm rim, and frame brackets that tighten and turn warm. Badges snap on and off with no color transition.
+- **Takeoff.** `handleStartFlying` sets `launching` (which locks the calibration controls). It then awaits the engine chunk together with `playTakeoffLaunch()`: the panel lifts away, and the always-mounted pale veil (`takeoffVeilRef`, the landing intro's sky gradient, reading "Cleared for takeoff" and the bird, world and sky) fades to opaque. The landing scene is disposed and the engine built under the veil. Once `flightState` is `'flying'`, a layout effect fades the veil off the chase camera's swoop-in and staggers the `[data-flight-hud]` blocks in with `fromTo`. `clearProps` then removes GSAP's inline styles. Reduced motion uses plain crossfades.
+
 ---
 
 ## 7. Coding conventions and patterns
@@ -407,7 +460,16 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Imports.** Use the `@/` alias for `src`. Use `import * as THREE from 'three'`. Put `type` imports inline, as in `import { Bird, type BirdType }`.
 - **React style.** One big `App` function component. Every handler is wrapped in `useCallback`. Refs mirror state that the long-lived tracker closure needs to read, such as `barrelRollingRef`. Styling is Tailwind utility classes with inline styles for gradients. There's no component library: the shadcn scaffold was removed. Theme tokens such as `bg-card` and `text-primary` still come from `index.css`.
 - **Verification habit:** always run `pnpm run build` from the root, which also typechecks, and check visual changes in a real browser with a webcam.
-- **Landing styling.** The landing and pre-flight screens use their own dark-glass look (`ascent-glass`, `ascent-glass-strong`, `ascent-hud`, `ascent-shadow` in `index.css`), `font-display` (Instrument Serif) for headings and `font-mono` (JetBrains Mono) for readouts. The in-flight HUD still uses the original warm theme tokens.
+- **Styling.** The landing, the pre-flight screens and the in-flight HUD share one cinematic, instrument-panel look:
+  - dark glass (`ascent-glass`, `ascent-glass-strong`)
+  - `ascent-hud` monospace caps for labels and readouts
+  - `ascent-shadow` for text over the sky
+  - `CornerBrackets` for instrument frames
+  - `--ascent-cyan` for OK/readouts, `--ascent-warm` for actions and active states, `--ascent-fault` for failures
+  - `font-display` (Instrument Serif) for headings and `font-mono` (JetBrains Mono) for numbers
+
+  The old warm theme tokens (`bg-card`, `text-primary`, …) are no longer used by any screen.
+- **`ascent-*` classes are unlayered CSS**, so they outrank Tailwind utilities on the same element. `.ascent-hud` fixes `font-size: 11px`, so a `text-[10px]` next to it has no effect, and `.ascent-glass` fixes the border color. Use an inline style when you need to override them.
 - **Dependencies:** anything imported at runtime goes in the game's `dependencies`, and build tooling in `devDependencies`. Prefer `catalog:` versions for shared tooling. New packages must be at least 1 day old (`minimumReleaseAge`). Don't reintroduce platform-specific `overrides`.
 
 ---
@@ -474,7 +536,7 @@ These come from code reading plus headless runs.
 9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
 
 ### Performance
-10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole ~1000-line `App` during flight.
+10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole `App` during flight. React bails out of identical values, but any change re-renders App and the HUD. The flight telemetry avoids this (refs plus rAF), and boot progress re-renders at most once per whole percent.
 11. **Per-frame allocations.** `GameEngine.update`, rings, clouds, underwater, splash and the ring guide create `new THREE.Vector3()` and `.clone()` in hot loops, which causes GC churn. `ocean.animateWater` also does a `key.split(',')` for every tile on every frame.
 12. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
 13. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
@@ -486,13 +548,14 @@ These come from code reading plus headless runs.
 17. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
 
 ### Tech debt
-18. **A god component and a god class.** `App.tsx` mixes UI, tracker lifecycle, canvas drawing and the calibration state machine. `GameEngine.update` is a roughly 190-line function.
+18. **A god component and a god class.** The screens now live in `preflight/` and `flight/`, and canvas drawing in `handPreview.ts`. `App.tsx` still owns the tracker lifecycle, the calibration state machine, boot status and the takeoff timelines. `GameEngine.update` is a roughly 190-line function.
 19. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
 20. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector, the ring hit test and despawn, and `classifyStartupError` is easy to unit-test and currently isn't. The ring despawn sign bug shipped unnoticed for exactly this reason.
 21. **Inconsistent naming.** The repo and root package are "Sky Soarer" / `sky-soarer`, the UI is "Bird Flight", the game package is `@workspace/3d-game`, and the localStorage key is `bird-flight-best-score`.
 22. **Stale `replit.md`.** It is kept as is by request (see the top of this file). It still describes Finger mode and the CDN.
 23. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
-24. **The MediaPipe asset path lives in two places.** `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts` and `MEDIAPIPE_ASSET_DIR` in `handControls.ts` must stay in sync.
+24. **The MediaPipe asset path lives in two places.** `PUBLIC_DIR` in `vite-plugin-mediapipe-assets.ts` and `MEDIAPIPE_ASSET_DIR` in `handControls.ts` must stay in sync. The download meter also depends on MediaPipe's loading mechanism (fetch for the wasm and model, XHR for `.data`) and on the file names in `DOWNLOAD_WEIGHTS`. After a version bump, check that the percentage still reaches ~99% before READY.
+27. **Boot and HUD timing are only verified headlessly.** Under SwiftShader, CSS transitions trail state changes by about a second and the chase camera takes many seconds to swoop in, because of the low frame rate. The 550 ms READY hold is shorter than a SwiftShader screenshot, so READY can't be captured there. Check the feel on a real GPU.
 25. **Landing and game stay separate.** The landing flight path is scripted and never uses GameEngine physics. Tuning the in-game feel doesn't change the landing, and the reverse is also true.
 26. **Landing performance is only verified headlessly.** It was checked with SwiftShader (software WebGL), which renders correctly but can't measure real frame rates. The 60 FPS target needs checking on a real mid-range laptop (see the PR test checklist).
 
@@ -540,7 +603,11 @@ These come from code reading plus headless runs.
 
 - Don't start the camera or audio before a user gesture. Camera and tracking start on **Begin pre-flight** / **Quick start**. In-game wind audio starts on **Start Flying**, and the landing's ambient wind starts only from its **Sound** toggle click.
 - Keep MediaPipe and the engine lazy. Never add a runtime (non-`type`) import of `@/game/handControls`, `@mediapipe/hands` or `@/game/GameEngine` to `App.tsx`, `landing/*`, or anything they import statically. Put shared runtime values in `trackingShared.ts` / `presets.ts` instead. Check with `pnpm run build`: `handControls-*.js` and `GameEngine-*.js` must stay separate chunks.
-- Always dispose the `LandingScene` before constructing a `GameEngine` (`disposeLandingScene()` in `handleStartFlying`), so two WebGL contexts are never live at once.
+- Always dispose the `LandingScene` before constructing a `GameEngine` (`disposeLandingScene()` in `handleStartFlying`), so two WebGL contexts are never live at once. Do it under the opaque takeoff veil.
+- Boot status must stay real. Drive `boot` only from actual events, and keep the only added delay the capped `BOOT_MIN_DURATION_MS`/`BOOT_READY_HOLD_MS` hold. After that hold, check `isCurrent()` like after every other `await`.
+- The download meter wraps global `fetch`/`XMLHttpRequest.prototype.open` only while `HandTracker.start()` runs. Keep it scoped to the MediaPipe path, and always stop it (in `finally` and in `stop()`). Never consume the caller's response body: count bytes on a `clone()`.
+- Keep the takeoff veil mounted (hidden with `visibility`) so its ref exists before the first animation (see `react-ref-before-conditional-mount.md`). Any path that abandons a launch must call `resetTakeoff()`, which also resolves the pending launch promise.
+- `[data-flight-hud]` wrappers and the boot HUD's `[data-after-type]` parts are animated by GSAP, so don't put Tailwind `transition` utilities on those exact elements. Put transitions on children.
 - Don't put Tailwind's plain `transition` utility (it includes `opacity` and `transform`) on elements GSAP animates (`data-hud`, `data-intro`, `data-reveal`). The CSS transition fights the tween and left the Sound button stuck at opacity 0. Use `transition-colors`.
 - Don't wrap text that has `ascent-shadow` in `overflow-hidden` masks. The clip turns the soft shadow into visible rectangles, so reveal it with opacity and a transform instead.
 - Don't fold the trick sweep into the steering angles (see memory note).
@@ -553,3 +620,8 @@ These come from code reading plus headless runs.
 - To flip a bird's facing direction, change the yaw offset on the outer group, never the mesh (see `three-js-mesh-orientation-fix.md`).
 - When adding a map, implement `update(position)` and `heightAtWorld(x, z)`. Add `isOverWater` if it has water, and wire it in the `GameEngine` constructor.
 - The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3. In this repo's cloud sandbox, headless Chromium can't reach Google Fonts through the TLS proxy. For screenshots, route `fonts.googleapis.com`/`fonts.gstatic.com` through `curl` with Playwright's `page.route` rather than disabling certificate checks.
+- **Driving calibration and flight headlessly** (no real hand available):
+  - Override `navigator.mediaDevices.getUserMedia` with an init script that returns a `canvas.captureStream()`.
+  - On the **dev server**, `page.route` the pre-bundled `/node_modules/.vite/deps/@mediapipe_hands.js` to a stub module. It must export `Hands` and `HAND_CONNECTIONS` both as named and default exports, because Vite's CJS interop reads them off the default export. The stub's `send()` reports synthetic landmarks you control.
+  - Everything else (HandTracker math, App, engine) stays real.
+  - Use the production preview with the real files to check the loading percentage.

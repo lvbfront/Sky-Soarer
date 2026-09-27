@@ -502,17 +502,153 @@ html {
   }
 }
 
-@keyframes ascent-loading {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(300%); }
+/* ------------------------------------------------------------------------------------------ */
+/* Pre-flight boot HUD, calibration instrument panel, and in-flight HUD                        */
+/* ------------------------------------------------------------------------------------------ */
+
+:root {
+  /* Fault color for failed boot lines and error readouts. */
+  --ascent-fault: #ff9580;
 }
 
-.ascent-loading-bar {
-  animation: ascent-loading 1.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+/* A status readout that just changed flickers in, like an instrument settling on a new value. */
+@keyframes ascent-blip {
+  0% { opacity: 0; }
+  30% { opacity: 1; }
+  45% { opacity: 0.35; }
+  100% { opacity: 1; }
+}
+
+.ascent-blip {
+  animation: ascent-blip 0.32s steps(4, end) both;
+}
+
+@keyframes ascent-caret {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+.ascent-caret {
+  animation: ascent-caret 0.9s linear infinite;
+}
+
+/* An in-progress readout breathes so it reads as "working" even while its value holds still. */
+@keyframes ascent-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.ascent-breathe {
+  animation: ascent-breathe 1.4s ease-in-out infinite;
+}
+
+/* Faint horizontal scanlines over a sensor feed. Static, so it costs nothing per frame. */
+.ascent-scanlines {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.045) 0,
+    rgba(255, 255, 255, 0.045) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* Sensitivity slider: a hairline track with the filled part in the warm accent (--fill is set
+   inline, 0%..100%) and a ring thumb. */
+.ascent-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 22px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ascent-range:focus-visible {
+  outline: 2px solid white;
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.ascent-range::-webkit-slider-runnable-track {
+  height: 2px;
+  background: linear-gradient(
+    to right,
+    var(--ascent-warm) 0,
+    var(--ascent-warm) var(--fill, 50%),
+    rgba(255, 255, 255, 0.22) var(--fill, 50%)
+  );
+}
+
+.ascent-range::-moz-range-track {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.ascent-range::-moz-range-progress {
+  height: 2px;
+  background: var(--ascent-warm);
+}
+
+.ascent-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -7px;
+  border-radius: 9999px;
+  background: var(--ascent-ink);
+  border: 2px solid var(--ascent-warm);
+  box-shadow: 0 0 0 4px rgba(255, 179, 122, 0.18);
+}
+
+.ascent-range::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: var(--ascent-ink);
+  border: 2px solid var(--ascent-warm);
+  box-shadow: 0 0 0 4px rgba(255, 179, 122, 0.18);
+}
+
+/* Boost: thin radial speed streaks, masked to the screen edges so the bird stays clear. Only the
+   layer's opacity and transform change, so it stays on the compositor. */
+.ascent-boost-streaks {
+  background: repeating-conic-gradient(
+    from 0deg at 50% 50%,
+    rgba(255, 255, 255, 0.34) 0deg 0.35deg,
+    transparent 0.35deg 5.2deg
+  );
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 38%, black 88%);
+  mask-image: radial-gradient(ellipse at center, transparent 38%, black 88%);
+}
+
+@keyframes ascent-streak-rush {
+  0% { transform: scale(1) rotate(0deg); }
+  50% { transform: scale(1.06) rotate(1.2deg); }
+  100% { transform: scale(1) rotate(0deg); }
+}
+
+.ascent-boost-streaks-live {
+  animation: ascent-streak-rush 0.28s linear infinite;
+}
+
+/* A score that just changed pops once. */
+@keyframes ascent-score-pop {
+  0% { transform: scale(1.35); color: var(--ascent-warm); }
+  100% { transform: scale(1); }
+}
+
+.ascent-score-pop {
+  animation: ascent-score-pop 0.5s cubic-bezier(0.2, 0.9, 0.3, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ascent-loading-bar {
-    animation-duration: 4s;
+  .ascent-blip,
+  .ascent-caret,
+  .ascent-breathe,
+  .ascent-boost-streaks-live,
+  .ascent-score-pop {
+    animation: none;
   }
 }
