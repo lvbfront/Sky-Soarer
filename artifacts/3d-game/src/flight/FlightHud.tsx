@@ -2,6 +2,7 @@ import { useEffect, useRef, type RefObject } from 'react';
 import { Pause, X } from 'lucide-react';
 import type { GameEngine } from '@/game/GameEngine';
 import type { HandControlState } from '@/game/handControls';
+import type { RingHighlight } from '@/game/presets';
 import type { ControlMode } from '@/game/settings';
 import type { FlickNearMiss } from '@/game/trackingShared';
 import { CornerBrackets } from '@/ui/hud';
@@ -35,6 +36,8 @@ interface FlightHudProps {
   /** Show the Diving badge (ocean map only). */
   showDiving: boolean;
   ringChallenge: boolean;
+  /** The next ring's highlight color (Ring Challenge), for the NEXT RING readout's marker. */
+  ringHighlight: RingHighlight;
   score: number;
   bestScore: number;
   statusText: string;
@@ -108,6 +111,7 @@ export function FlightHud({
   surfaceSplash,
   showDiving,
   ringChallenge,
+  ringHighlight,
   score,
   bestScore,
   statusText,
@@ -123,6 +127,7 @@ export function FlightHud({
   const headingRef = useRef<HTMLSpanElement | null>(null);
   const speedRef = useRef<HTMLSpanElement | null>(null);
   const altitudeRef = useRef<HTMLSpanElement | null>(null);
+  const nextRingRef = useRef<HTMLSpanElement | null>(null);
 
   // Telemetry: direct DOM writes from a rAF loop, never React state, so the HUD costs no renders.
   useEffect(() => {
@@ -140,6 +145,10 @@ export function FlightHud({
             speedRef.current.textContent = String(Math.round(engine.getSpeed() * MS_TO_KNOTS)).padStart(3, '0');
           }
           if (altitudeRef.current) altitudeRef.current.textContent = formatAltitude(engine.getAltitude());
+          if (nextRingRef.current) {
+            const distance = engine.getNextRingDistance();
+            nextRingRef.current.textContent = distance === null ? '—' : String(Math.round(distance));
+          }
         }
       }
       const control = controlStateRef.current;
@@ -289,6 +298,18 @@ export function FlightHud({
             </span>
           </p>
           <p className="ascent-hud mt-1 text-[10px] text-white/70">Best {bestScore}</p>
+          {/* Distance to the next ring, marked in its highlight color (the arrow's color too). */}
+          <p className="ascent-hud mt-3 flex items-center gap-2 text-white/80" data-next-ring-readout>
+            <span
+              className="h-2 w-2 rotate-45 rounded-[1px]"
+              style={{ background: ringHighlight.color, boxShadow: `0 0 8px ${ringHighlight.color}` }}
+              aria-hidden="true"
+            />
+            Next ring
+            <span className="font-mono text-[13px] tabular-nums text-white">
+              <span ref={nextRingRef}>—</span> m
+            </span>
+          </p>
         </div>
       )}
 

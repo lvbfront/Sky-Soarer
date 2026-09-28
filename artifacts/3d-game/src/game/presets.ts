@@ -91,3 +91,34 @@ export const BOOST_SPEED = 20;
 /** Length of the barrel roll and backflip sweeps, in seconds. */
 export const BARREL_ROLL_DURATION = 0.8;
 export const BACKFLIP_DURATION = 0.9;
+
+/**
+ * Ring Challenge: the color of the *next* ring (the one the guide arrow points at), per map and
+ * sky. Ordinary rings are always gold, which already reads against every palette, so the target
+ * needs a hue that's clearly not gold and also stands out from that combination's sky, fog and
+ * ground: magenta against the green valley and turquoise sea at noon, cyan against the orange
+ * valley sunset, violet where a sunset meets the teal sea, and cool mint or hot pink against the
+ * navy night. All six combinations live in this one table, which the engine (ring + arrow
+ * materials) and the HUD (the NEXT RING readout's marker) both read.
+ */
+export interface RingHighlight {
+  /** Base color of the highlighted ring and the guide arrow. */
+  color: string;
+  /** Emissive color, pulsed by the ring manager. */
+  emissive: string;
+  /** Pale tint of the glow disc and the additive halo around the ring. */
+  glow: string;
+}
+
+export const NEXT_RING_HIGHLIGHTS: Record<MapType, Record<WeatherPreset, RingHighlight>> = {
+  mountain: {
+    sunny: { color: '#ff4fb8', emissive: '#ff1f8f', glow: '#ffc2e6' },
+    sunset: { color: '#43f3ff', emissive: '#00c8ff', glow: '#c8fbff' },
+    night: { color: '#6bffc1', emissive: '#1dffa0', glow: '#d0ffe9' },
+  },
+  ocean: {
+    sunny: { color: '#ff4fa0', emissive: '#ff1a7a', glow: '#ffc6e0' },
+    sunset: { color: '#c26bff', emissive: '#9b3dff', glow: '#ead6ff' },
+    night: { color: '#ff5cd6', emissive: '#ff2bc0', glow: '#ffd1f3' },
+  },
+};

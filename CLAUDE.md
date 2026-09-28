@@ -44,8 +44,8 @@ How a session plays:
    - Both tricks are cosmetic only. They never change heading or momentum.
    - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Back to landing**), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
    - On the ocean map you can dive under open water into a reef world with fish, a shark, caustics and bubbles. Surfacing sprays a water burst.
-   - In Ring Challenge, fly through glowing rings to score. A floating arrow points to the nearest ring, and the best score is saved in `localStorage`.
-   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score and best, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
+   - In Ring Challenge, fly through glowing rings to score. The **next ring** (the earliest-spawned ring still ahead that you haven't collected or missed) glows in a highlight color picked for the map + sky, a floating arrow in the same color points at it, and the HUD shows its distance (`NEXT RING 84 m`). The best score is saved in `localStorage`.
+   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score, best and next-ring distance, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
 
 There is no win or lose state, no timer, and no collision damage. Terrain acts only as an altitude floor.
 
@@ -183,7 +183,8 @@ The game needs **no secrets, no backend and no database**.
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
 │               ├── LandingScene.ts # landing backdrop: scroll-progress-driven bird/camera/altitude, cloud deck, live swaps, dispose
 │               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing); speeds and
-│               │                   #   trick durations (shared by engine + guide)
+│               │                   #   trick durations (shared by engine + guide); NEXT_RING_HIGHLIGHTS (engine + HUD)
+│               ├── damping.ts      # damp(rate, dt): frame-rate independent smoothing factor
 │               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing)
 │               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings", incl. control mode), validated
 │               │                   #   on read; guide "Don't show again" per mode ("bird-flight-guide-dismissed")
@@ -198,8 +199,8 @@ The game needs **no secrets, no backend and no database**.
 │               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
 │               ├── underwater.ts   # reef/fish/shark/caustics/bubbles (lazy-built)
 │               ├── clouds.ts       # flyable cloud clusters in the flight corridor
-│               ├── rings.ts        # Ring Challenge spawning + hit test
-│               ├── ringGuide.ts    # arrow pointing to nearest ring
+│               ├── rings.ts        # Ring Challenge spawning, hit test, next-ring selection + highlight
+│               ├── ringGuide.ts    # arrow pointing (smoothly) at the next ring
 │               ├── ringBurst.ts    # star-burst particles (custom ShaderMaterial)
 │               ├── waterBurst.ts   # surfacing droplet particles (copy of ringBurst, retuned)
 │               ├── splash.ts       # skimming spray particles (PointsMaterial – fade is broken)
@@ -417,9 +418,12 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Spawning.**
   - The first ring spawns immediately, 42 units dead ahead.
   - After that, one spawns every 2.1 s, 55–80 units ahead along the *current* forward vector.
+  - When no ring is ahead (the bird turned away from all of them), one spawns at once; if all 6 slots are taken, the oldest ring (none of them is ahead) is recycled to make room.
   - Rings are offset laterally and vertically on a sine curve (phase +0.85 per ring).
   - Rings are clamped to at least 8 above the ground, with at most 6 active.
-- **Hit test.** In the ring's own frame: axial distance under 2.2 and radial distance under 3.4.
+- **Hit test.** `ringFrame()` measures the bird in the ring's own frame (`axial` along the ring's normal, negative while short of the plane; `radial` from its axis). `isRingHit`: |axial| under 2.2 and radial under 3.4. `isRingPassed`: axial over 2.2, i.e. the bird crossed the plane outside the hoop; the ring is then flagged `missed` for good (it can still be collected by flying back through it, but is never targeted again).
+- **Next ring** (`selectNextRing`, pure and unit-tested): the earliest-spawned ring (`active` is kept in spawn order) that isn't `missed` and whose center is no more than 3 units behind the bird along its **horizontal heading**. So collecting or missing the target moves it to the following ring, and after a sharp turn rings that fell behind are skipped (turning back makes an earlier ring ahead, and the target, again). Recomputed every frame after the hit/miss/despawn pass.
+- **Highlight.** The target's torus and glow disc swap to their own materials in the `NEXT_RING_HIGHLIGHTS[map][weather]` color (one table in `presets.ts` for all 6 combinations: magenta, cyan, mint, violet or pink, chosen to contrast with that palette and with the gold of the other rings). Its emissive intensity breathes 1.0–1.7, its scale pulses ±7%, and a shared additive halo torus is re-parented onto it. Other rings keep the gold, dimmed (emissive 0.55, glow opacity 0.2).
 - **Despawn.** A missed ring is recycled once it is 40 units *past* along its own normal (`axialDist > 40`; `delta` points from the ring to the bird), **or** once it is more than 120 units from the bird in any direction. The distance check covers turns and U-turns.
   - Before this fix the sign was inverted (`< -40`), so every ring spawned 42+ units ahead was recycled in the frame it spawned. Ring Challenge never showed a ring.
   - Clouds use the same two-part rule: past 60 axially, or more than 240 away. Reef items do too: past 42 axially, or more than 80 away horizontally.
@@ -429,7 +433,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - the chime
   - a star burst
   - `onScoreChange`, which calls `saveBestScoreIfHigher` on **every** ring
-- `RingGuideArrow` floats above and ahead of the bird and uses `lookAt()` to point at the nearest active ring.
+- `RingGuideArrow` floats above and ahead of the bird, in the highlight color, and turns toward `getNextRingPosition()` by slerping its quaternion (`damp(7, dt)`), so a retarget swings smoothly. It is modelled along local **+Z**: `Object3D.lookAt` (and `Matrix4.lookAt(target, eye, up)`, which it mirrors) turns a non-camera object's +Z toward the target. Before this, it was modelled along −Z and pointed *away* from the ring.
+- **HUD readout.** `GameEngine.getNextRingDistance()` (straight-line, world units = meters) is written by the HUD's telemetry rAF under the ring score as `NEXT RING 84 m`, next to a marker in the highlight color; `—` when there's no target.
 
 ### 6.8 Audio (`audio.ts`)
 - `WindAudio` plays 2 s of looping white noise through a lowpass filter and a gain node. Filter cutoff and gain follow a speed ratio that its own rAF feeds in with `setTargetAtTime`. It is muted underwater.

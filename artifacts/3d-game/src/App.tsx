@@ -12,7 +12,7 @@ import type { NormalizedLandmark } from '@mediapipe/hands';
 import type { GameEngine } from '@/game/GameEngine';
 import { BIRD_OPTIONS } from '@/game/bird';
 import { LandingScene, type LandingTelemetry } from '@/game/LandingScene';
-import { MAP_OPTIONS, WEATHER_OPTIONS } from '@/game/presets';
+import { MAP_OPTIONS, NEXT_RING_HIGHLIGHTS, WEATHER_OPTIONS } from '@/game/presets';
 import { TrackingStartError } from '@/game/trackingShared';
 import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
@@ -1148,6 +1148,7 @@ function App() {
           surfaceSplash={surfaceSplash}
           showDiving={selectedMap === 'ocean'}
           ringChallenge={ringChallengeEnabled}
+          ringHighlight={NEXT_RING_HIGHLIGHTS[selectedMap][selectedWeather]}
           score={score}
           bestScore={bestScore}
           statusText={statusText}

@@ -17,6 +17,7 @@ import {
   BARREL_ROLL_DURATION,
   BASE_SPEED,
   BOOST_SPEED,
+  NEXT_RING_HIGHLIGHTS,
   WEATHER_LOOKS,
   type MapType,
   type WeatherLook,
@@ -204,9 +205,11 @@ export class GameEngine {
       this.waterBurst = null;
     }
     this.clouds = new CloudManager(this.scene);
-    this.rings = options.ringChallenge ? new RingManager(this.scene) : null;
+    // The next ring and the guide arrow share one highlight color, picked for this map + sky.
+    const highlight = NEXT_RING_HIGHLIGHTS[options.mapType][options.weather];
+    this.rings = options.ringChallenge ? new RingManager(this.scene, highlight) : null;
     this.ringBurst = options.ringChallenge ? new RingBurstEffect(this.scene) : null;
-    this.ringGuide = options.ringChallenge ? new RingGuideArrow(this.scene) : null;
+    this.ringGuide = options.ringChallenge ? new RingGuideArrow(this.scene, highlight) : null;
 
     this.bird = new Bird(options.birdType);
     this.bird.group.position.set(0, 26, 0);
@@ -532,7 +535,7 @@ export class GameEngine {
         this.ringBurst?.trigger(collectedAt);
         this.options.onScoreChange?.(this.score);
       }
-      this.ringGuide?.update(dt, bird.position, forward, this.rings.getNextRingPosition(bird.position));
+      this.ringGuide?.update(dt, bird.position, forward, this.rings.getNextRingPosition());
     }
     this.ringBurst?.update(dt);
     this.waterBurst?.update(dt);
@@ -599,6 +602,18 @@ export class GameEngine {
 
   getScore() {
     return this.score;
+  }
+
+  /** Ring Challenge: world position of the next ring (the one the guide arrow points at), or null. */
+  getNextRingPosition() {
+    return this.rings?.getNextRingPosition() ?? null;
+  }
+
+  /** Ring Challenge: straight-line distance from the bird to the next ring (world units, shown as
+   * meters by the HUD), or null when there's no next ring or rings are off. */
+  getNextRingDistance() {
+    const next = this.getNextRingPosition();
+    return next ? next.distanceTo(this.bird.group.position) : null;
   }
 
   isBoosting() {
