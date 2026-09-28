@@ -12,7 +12,16 @@ import { RingGuideArrow } from './ringGuide';
 import { WindAudio, SoundEffects } from './audio';
 import type { HandControlState } from './handControls';
 
-import { WEATHER_LOOKS, type MapType, type WeatherLook, type WeatherPreset } from './presets';
+import {
+  BACKFLIP_DURATION,
+  BARREL_ROLL_DURATION,
+  BASE_SPEED,
+  BOOST_SPEED,
+  WEATHER_LOOKS,
+  type MapType,
+  type WeatherLook,
+  type WeatherPreset,
+} from './presets';
 import { createSkyClouds, createSkyDome, createStarfield } from './sky';
 
 export { MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from './presets';
@@ -43,8 +52,7 @@ export interface GameEngineOptions {
   onWaterTransition?: (state: 'submerged' | 'surfaced') => void;
 }
 
-const BASE_SPEED = 9;
-const BOOST_SPEED = 20;
+// BASE_SPEED and BOOST_SPEED live in presets.ts (the guide quotes them).
 const SPEED_LERP = 0.04;
 const RING_SPEED_PULSE = 7;
 const SPEED_PULSE_DECAY_PER_SEC = 9;
@@ -74,8 +82,7 @@ const MAX_PITCH_ANGLE = THREE.MathUtils.degToRad(38);
 const MAX_ROLL_ANGLE = THREE.MathUtils.degToRad(48);
 const ORIENTATION_LERP = 0.06;
 
-const FLIP_DURATION = 0.8; // seconds, per spec
-const BACKFLIP_DURATION = 0.9;
+// Trick lengths (BARREL_ROLL_DURATION, BACKFLIP_DURATION) live in presets.ts (the guide quotes them).
 
 const MIN_FLAP_SPEED = 3;
 const MAX_FLAP_SPEED = 17;
@@ -149,6 +156,10 @@ export class GameEngine {
   private cameraLookAt = new THREE.Vector3();
 
   private disposed = false;
+  // While paused the loop stops entirely (no update, no render): the canvas holds the last frame.
+  private paused = false;
+  // Set once start() has finished; before that, setPaused only records the flag (start() reads it).
+  private started = false;
 
   constructor(private container: HTMLDivElement, options: GameEngineOptions) {
     this.options = options;
@@ -283,23 +294,59 @@ export class GameEngine {
     this.camera.aspect = clientWidth / clientHeight;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(clientWidth, clientHeight);
+    // setSize clears the canvas; a paused game has no loop to redraw it, so redraw the held frame.
+    if (this.paused && !this.disposed) this.renderer.render(this.scene, this.camera);
   };
 
   async start() {
     await this.wind.start();
+    if (this.disposed) return;
     this.clock.start();
-    const loop = () => {
-      if (this.disposed) return;
-      const dt = Math.min(this.clock.getDelta(), 0.05);
-      this.update(dt);
-      this.renderer.render(this.scene, this.camera);
-      this.animationHandle = requestAnimationFrame(loop);
-    };
-    this.animationHandle = requestAnimationFrame(loop);
+    this.started = true;
+    if (this.paused) {
+      this.wind.setSuspended(true);
+      return;
+    }
+    this.animationHandle = requestAnimationFrame(this.loop);
   }
 
-  /** Called from the hand tracker whenever a new gesture reading is available. */
+  private loop = () => {
+    if (this.disposed || this.paused) return;
+    const dt = Math.min(this.clock.getDelta(), 0.05);
+    this.update(dt);
+    this.renderer.render(this.scene, this.camera);
+    this.animationHandle = requestAnimationFrame(this.loop);
+  };
+
+  /**
+   * Freezes or resumes the game: while paused nothing moves (flight, tricks, rings, water, the
+   * chase camera), control input is ignored, and the wind is silenced. Resuming discards the time
+   * spent paused, so the first frame back doesn't jump.
+   */
+  setPaused(paused: boolean) {
+    if (this.disposed || paused === this.paused) return;
+    this.paused = paused;
+    if (!this.started) return;
+    this.wind.setSuspended(paused);
+    if (paused) {
+      if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
+      this.animationHandle = null;
+      return;
+    }
+    this.clock.getDelta();
+    this.animationHandle = requestAnimationFrame(this.loop);
+  }
+
+  isPaused() {
+    return this.paused;
+  }
+
+  /** Called by the active input (hand tracker or keyboard) whenever a new control reading is available. */
   applyControls(state: HandControlState) {
+    // Paused: input must not steer, boost or start a trick behind the pause menu. The next
+    // reading after resuming sets the targets again.
+    if (this.paused) return;
+
     // The backflip gesture's "hand left frame" fallback reports handDetected: false (the
     // flick often carries the hand out of the webcam view), so this check must run before
     // the guard below or that fallback path would silently do nothing.
@@ -355,7 +402,7 @@ export class GameEngine {
 
     // Barrel roll: sweep a full 360 degrees of roll on top of the steering roll over 0.8s.
     if (this.flipProgress !== null) {
-      this.flipProgress += dt / FLIP_DURATION;
+      this.flipProgress += dt / BARREL_ROLL_DURATION;
       if (this.flipProgress >= 1) {
         this.flipProgress = null;
       } else {

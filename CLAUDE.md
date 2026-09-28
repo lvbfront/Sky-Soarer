@@ -9,7 +9,7 @@ Guidance for Claude Code (and humans) working in this repository. The repo is na
 
 ## 1. Project overview
 
-Bird Flight is a relaxing, endless 3D flight game. You steer a low-poly bird **with your bare hand in front of a webcam**. MediaPipe Hands tracks the hand, and there is **no keyboard, mouse, or touch fallback**.
+Bird Flight is a relaxing, endless 3D flight game. You steer a low-poly bird **with your bare hand in front of a webcam** (MediaPipe Hands tracks it), or, in **Keyboard** mode, with WASD / the arrow keys. Both inputs produce the same `HandControlState`, so the engine never knows which one is driving. There is **no touch or gamepad input**; the mouse is only for menus and HUD buttons.
 
 How a session plays:
 
@@ -18,30 +18,34 @@ How a session plays:
    - **1 · Choose your bird (300 m):** Pigeon, Falcon, Greater Flamingo, or Duck/Seabird. Prev/next buttons, ←/→ keys, or the name chips.
    - **2 · Choose your world (1,200 m):** Mountain Valley, or Tropical Ocean & Islands. The 3D world switches live.
    - **3 · Choose the sky (3,000 m):** Sunny Morning, Sunset Gold, or Starry Night. Sky and lighting crossfade live.
-   - **4 · Above the clouds (5,000 m):** the Ring Challenge switch (with best score), a summary of the choices, and **Begin pre-flight**, which saves the settings and asks for camera access.
+   - **4 · Above the clouds (5,000 m):** a summary of the choices, the **Input** switch (**Hand (webcam)** or **Keyboard**), the Ring Challenge switch (with best score), a controls briefing for the chosen input, and **Begin pre-flight**, which saves the settings (input included) and starts the pre-flight for that input.
 
    Fixed instrument chrome: an altimeter rail (clickable chapter ticks), telemetry (speed, heading, V/S, lat/lon), a big altitude counter, and a **Sound** toggle for ambient wind (off by default).
-2. **Pre-flight 01: boot sequence.** A full-screen HUD over the frozen backdrop types three monospace status lines that follow the **real** startup events (see §6.11):
+2. **Pre-flight 01: boot sequence.** A full-screen HUD over the frozen backdrop types monospace status lines that follow the **real** startup events (see §6.11). In hand mode there are three:
    - `CAMERA [REQUESTING → ONLINE · 480×360]`
    - `HAND TRACKING MODEL [STANDBY → LOADING xx% → WARMING UP → READY]`, where the percentage is measured from the actual MediaPipe downloads
    - `CALIBRATION [PENDING]`
 
-   A failure shows inline under the failing line (`DENIED`, `NOT FOUND`, `BUSY`, `FAILED`, `TIMEOUT`, …) with the message, the raw detail, and **Try Again**. **Back** is always available.
-3. **Pre-flight 02: calibration, as an instrument panel.**
+   A failure shows inline under the failing line (`DENIED`, `NOT FOUND`, `BUSY`, `FAILED`, `TIMEOUT`, …) with the message, the raw detail, and **Try Again** (or **Reload page** when a code chunk failed to import, see §6.12). **Back** is always available.
+
+   **Keyboard mode** skips the camera, MediaPipe and calibration entirely. Its boot shows only `CONTROLS [KEYBOARD]` and `FLIGHT ENGINE [LOADING → READY]` (the real engine chunk import), then goes straight to the takeoff transition.
+3. **Pre-flight 02: calibration, as an instrument panel** (hand mode only).
    - Steering always tracks the **palm center**. An Index Finger mode existed earlier and was removed.
    - The camera preview is framed as a sensor feed (LIVE marker, resolution, scanlines, corner brackets, HAND LOCK / NO SIGNAL).
    - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range. Each is drawn as a target reticle. The step being captured also shows a pulsing ghost reticle at a suggested spot, and a checklist shows each step as LOCKED / ACQUIRE / STANDBY.
    - Once a corner is captured you can drag its reticle on the feed to fine-tune it.
    - Set steering sensitivity from 0.5x to 2.0x on a styled slider.
    - **Start Flying** stays disabled until all 5 points are captured. It plays a short GSAP **takeoff transition** into flight.
+   - **"How to fly" guide.** Before takeoff (after Start Flying, or after the keyboard boot), the guide opens by itself until the player ticks **Don't show again**, stored per input mode. It has one card per move, each with a looping procedural SVG/CSS illustration and one precise tip whose numbers come from the real thresholds (§6.12). **Take off** continues; **Back** returns to calibration (hand) or the landing (keyboard).
 4. **Flight.**
-   - Move your palm inside the calibrated box to pitch and roll. Roll banks the bird, and banking turns it.
-   - **Close a fist** to boost. Boosting also fires an automatic 0.8 s barrel roll.
-   - **Flick your hand up fast** for a 0.9 s backflip.
+   - Move your palm inside the calibrated box to pitch and roll (keyboard: W/↑ climb, S/↓ dive, A/← and D/→ bank, with a smooth ramp). Roll banks the bird, and banking turns it.
+   - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll.
+   - **Flick your hand up fast** (keyboard: **F**) for a 0.9 s backflip. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
    - Both tricks are cosmetic only. They never change heading or momentum.
+   - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Back to landing**), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
    - On the ocean map you can dive under open water into a reef world with fish, a shark, caustics and bubbles. Surfacing sprays a water burst.
    - In Ring Challenge, fly through glowing rings to score. A floating arrow points to the nearest ring, and the best score is saved in `localStorage`.
-   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score and best, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton, a status line, and **Stop Game**.
+   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score and best, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
 
 There is no win or lose state, no timer, and no collision damage. Terrain acts only as an altitude floor.
 
@@ -97,6 +101,14 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
   - The production build, with the network throttled to 2 MB/s and the **real** MediaPipe files, showed `LOADING` climbing 00% → 99% in small steps, then READY, then calibration. `WebAssembly.instantiateStreaming` still worked through the fetch wrapper, and `fetch`/`XMLHttpRequest.prototype.open` were native again afterwards.
   - A denied camera and an aborted `.tflite` download each produced the inline error. Try Again recovered from the denied camera.
   - With a stubbed detector, it covered all 5 captures, a corner drag, the takeoff veil, the HUD (cruise, boost, hand lost, a collected ring), and Stop Game. Back during the READY hold never opened calibration, and Stop Game during the takeoff reveal left no veil behind. A second session ran with only one WebGL context. Reduced motion was checked too, all with no console errors.
+- The keyboard/pause/guide PR re-ran this headlessly (SwiftShader, ~5 FPS; harness notes in §11), with 60+ scripted checks, all passing:
+  - Keyboard mode, dev server: every key flew as intended (turn, level-out, climb, boost, barrel roll, backflip with an unchanged heading), plus ring collection by an autopilot pressing real keys, and diving and surfacing on the ocean map.
+  - Pause: the loop is frozen, keys are ignored, and the guide is reachable from the pause menu and from `?`.
+  - Three sessions in one page with one WebGL context each; "Don't show again" and Quick start were checked too.
+  - The engine-chunk failure path, reduced motion, and Esc during the takeoff reveal.
+  - The production preview confirmed keyboard mode never requests `handControls` or MediaPipe.
+  - Hand mode with a stubbed detector: the auto guide over calibration, "Flick higher" / "Flick faster" hints, a real flick firing a backflip with no hint, and flicks ignored while paused.
+  - The near-miss detector was also checked deterministically: the real `HandTracker` bundled with esbuild and fed synthetic 15/30/60 fps palm tracks.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -157,7 +169,11 @@ The game needs **no secrets, no backend and no database**.
 │           │   ├── CalibrationPanel.tsx # 02: sensor feed frame, step checklist, capture/reset, sensitivity slider, Start Flying
 │           │   └── handPreview.ts       # CALIBRATION_STEPS, calibration types, drawHandPreview (reticles, box, ghost target)
 │           ├── flight/
-│           │   └── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed, Stop
+│           │   ├── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed or
+│           │   │                  #   keyboard input indicator, near-miss flick hint, ? / Pause / Stop buttons
+│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Back to landing
+│           │   ├── FlightGuide.tsx # "How to fly" guide: per-move cards for hand or keyboard, tips built from real constants
+│           │   └── guideArt.tsx   # procedural SVG hand illustrations + animated keycaps (CSS keyframes in index.css)
 │           ├── ui/
 │           │   └── hud.tsx        # CornerBrackets, Wordmark (shared instrument-frame pieces)
 │           ├── landing/       # ★ the scroll-driven landing page ("The Ascent")
@@ -166,11 +182,16 @@ The game needs **no secrets, no backend and no database**.
 │           └── game/          # ★ framework-free Three.js game code
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
 │               ├── LandingScene.ts # landing backdrop: scroll-progress-driven bird/camera/altitude, cloud deck, live swaps, dispose
-│               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing)
+│               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing); speeds and
+│               │                   #   trick durations (shared by engine + guide)
 │               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing)
-│               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings"), validated on read
-│               ├── trackingShared.ts # TrackingStartError + sensitivity bounds, importable without loading MediaPipe
-│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures (lazy-loaded)
+│               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings", incl. control mode), validated
+│               │                   #   on read; guide "Don't show again" per mode ("bird-flight-guide-dismissed")
+│               ├── trackingShared.ts # TrackingStartError, sensitivity bounds, flick/deadzone/fist thresholds (quoted by the
+│               │                     #   guide), importable without loading MediaPipe
+│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures, near-miss
+│               │                   #   flick coaching (lazy-loaded)
+│               ├── keyboardControls.ts # keyboard input → the same HandControlState (ramped axes, Space boost, F backflip)
 │               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
@@ -206,12 +227,14 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
                                                                  │ onResults
                                                                  ▼
                                    HandTracker.handleResults()  → HandControlState
-                                   {handDetected, pitch, roll, boost, backflip, landmarks}
-                                                                 │ onUpdate (one stable closure created in App)
+                                   {handDetected, pitch, roll, boost, backflip, flickNearMiss, landmarks}
+            (keyboard mode: KeyboardControls rAF → the same HandControlState; handDetected always true)
+                                                                 │ handleControlState (one stable callback in App)
             ┌────────────────────────────────────────────────────┼────────────────────────────┐
             ▼                                                    ▼                            ▼
- engineRef.current?.applyControls(state)          latestLandmarksRef = landmarks    setHandDetected / setBoosting /
- (no-op until "Start Flying")                    (read by the preview canvas rAF)   setStatusText  → React re-render
+ engineRef.current?.applyControls(state)     latestLandmarksRef / latestControlRef   setHandDetected / setBoosting /
+ (no-op until "Start Flying", ignored        (read by the preview canvas rAF and     setStatusText / setFlickHint
+  while paused)                               the HUD's keyboard input indicator)    → React re-render
             │
             ▼
  GameEngine (own rAF loop): update(dt) → renderer.render(scene, camera)
@@ -220,9 +243,11 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ```
 
 - **React owns only the UI chrome.** `GameEngine` is a plain class that is mounted into a `div` ref, and it owns the `WebGLRenderer` and its own `requestAnimationFrame` loop. This is deliberate, so React re-renders never affect frame timing.
-- **Top-level state** is a string union in `App.tsx`: `FlightState = 'landing' | 'requesting' | 'calibrating' | 'flying' | 'error'`. When the state is `'error'`, `startupError: { kind, detail }` picks the message. Everything else is local `useState` plus refs. There is no store, context or router.
+- **Top-level state** is a string union in `App.tsx`: `FlightState = 'landing' | 'requesting' | 'calibrating' | 'flying' | 'error'`. When the state is `'error'`, `startupError: { kind, detail, phase, needsReload }` picks the message. The control mode is `settings.controls` (`'hand' | 'keyboard'`). Overlays are `guide: GuideOrigin | null` (`'preflight' | 'pause' | 'hud'`) and `pauseOpen`; in flight, either one makes `paused` true. Everything else is local `useState` plus refs. There is no store, context or router.
 - **Code splitting.** `handControls` (and with it the `@mediapipe/hands` JS) and `GameEngine` are loaded with dynamic `import()` through `loadHandTracking()` / `loadGameEngine()` in `App.tsx`. Both start when pre-flight begins. App code only imports *types* from those modules; runtime values it needs early live in `trackingShared.ts` and `presets.ts`. A failed import clears its cached promise so **Try Again** retries it, and a failed tracking import surfaces as `TrackingStartError('load-failed')`.
-- **Startup sequence** (`handleContinueToCalibration`, reached through `beginPreflight()` from **Begin pre-flight** or **Quick start**, which first save the settings):
+- **Startup dispatch.** `beginPreflight()` (from **Begin pre-flight** or **Quick start**) saves the settings, writes them into `settingsRef` right away (the async flows read it before React re-renders), and calls `startPreflight()`. That runs `startKeyboardPreflight` or `handleContinueToCalibration` for the chosen mode, and is also the boot HUD's **Try Again**.
+- **Keyboard startup** (`startKeyboardPreflight`): take a session id, set `boot` to the keyboard lines, and await `loadGameEngine()` (FLIGHT ENGINE LOADING → READY, or `engine-load-failed` with `needsReload`). Then apply the same capped `BOOT_MIN_DURATION_MS`/`BOOT_READY_HOLD_MS` hold, set `boot.done` (freezing the T+ clock), and call `requestTakeoff()`. No camera, `isSecureContext` check or MediaPipe.
+- **Hand startup sequence** (`handleContinueToCalibration`):
   1. Check `isSecureContext` and that `getUserMedia` exists.
   2. Kick off `loadHandTracking()` and prefetch `loadGameEngine()`.
   3. Call `getUserMedia` (the **only** camera stream; `@mediapipe/camera_utils` was removed because it opened a second stream).
@@ -245,12 +270,14 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   | anything else | `unknown` |
   | (engine chunk import failed, set directly in `handleStartFlying`) | `engine-load-failed` |
 
-  Each kind has its own text in `STARTUP_ERROR_MESSAGES`.
+  Each kind has its own text in `STARTUP_ERROR_MESSAGES`. `needsReload` is set when a code chunk import failed (the engine, or the tracking module while `chunkImport` is true). Chromium caches a failed dynamic `import()` for the page's lifetime, so retrying in place can't work, and the boot HUD's button becomes **Reload page**.
+- **Takeoff request.** Start Flying and the end of the keyboard boot both call `requestTakeoff()`. It opens the guide (`guide = 'preflight'`) if `shouldAutoShowGuide(mode)`, otherwise calls `handleStartFlying()`. The guide's **Take off** stores "Don't show again" if ticked, then calls `handleStartFlying()`. `startKeyboardPreflight` reaches `requestTakeoff` through `requestTakeoffRef`, since it's created first. `handleStartFlying` reads the bird/map/weather/rings/controls from `settingsRef.current`, never from its closure (a Quick start may have changed them). In keyboard mode it creates and starts `KeyboardControls` once `engine.start()` resolves.
+- **Pause.** An effect keyed on `paused` calls `engine.setPaused()` and `keyboard.setPaused()`, and clears any flick hint. One window `keydown` handler takes Esc: it closes the guide (in pre-flight, as its Back), or toggles the pause menu in flight. The same handler opens the guide on `?`. A `visibilitychange` to hidden opens the pause menu. While paused the HUD is `inert`, and so is the pre-flight screen behind the pre-flight guide.
 - **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
 - **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
-- **Teardown.** `stopEverything()` bumps the session id, stops the tracker, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also calls `resetTakeoff()` and turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It awaits the engine chunk **and** the takeoff launch animation together, checks the session id afterwards, and bails out if Back disposed the engine while `engine.start()` was awaiting. `resetTakeoff()` kills the takeoff timeline, hides the veil, and resolves the pending launch promise, so an interrupted launch never leaves `handleStartFlying` awaiting forever.
-- **The landing backdrop (`LandingScene`)** is created by an effect in `App` while `landingBackdropOn` is true, and it stays alive behind the landing *and* the pre-flight screens (holding the "above the clouds" shot). While `flightState` is `'requesting'` (tracking loading) or `'calibrating'` it is **paused** (`setPaused(true)`): no update and no render, so it doesn't compete with MediaPipe on the main thread. Before freezing it cuts to the pre-flight shot and renders that one frame, which the canvas then holds. That matters for Quick start, which is pressed from the hero. It resumes on Back or on the error screen. `handleStartFlying` calls `disposeLandingScene()` **before** constructing `GameEngine`, so only one WebGL context is ever live. Returning from flight rebuilds it. If WebGL can't start, the constructor throws, the error is logged, and the page runs over the CSS sky gradient on `<html>`. App also keeps the backdrop's bird/world/sky in sync with `settings`, so a Quick start swap shows behind pre-flight.
+- **Teardown.** `stopEverything()` bumps the session id, stops the tracker and the keyboard controls, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also calls `resetTakeoff()` and turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It awaits the engine chunk **and** the takeoff launch animation together, checks the session id afterwards, and bails out if Back disposed the engine while `engine.start()` was awaiting. `resetTakeoff()` kills the takeoff timeline, hides the veil, and resolves the pending launch promise, so an interrupted launch never leaves `handleStartFlying` awaiting forever.
+- **The landing backdrop (`LandingScene`)** is created by an effect in `App` while `landingBackdropOn` is true, and it stays alive behind the landing *and* the pre-flight screens (holding the "above the clouds" shot). In hand mode, while `flightState` is `'requesting'` (tracking loading) or `'calibrating'` it is **paused** (`setPaused(true)`): no update and no render, so it doesn't compete with MediaPipe on the main thread. Keyboard mode has no MediaPipe, so its short boot keeps the backdrop moving. Before freezing it cuts to the pre-flight shot and renders that one frame, which the canvas then holds. That matters for Quick start, which is pressed from the hero. It resumes on Back or on the error screen. `handleStartFlying` calls `disposeLandingScene()` **before** constructing `GameEngine`, so only one WebGL context is ever live. Returning from flight rebuilds it. If WebGL can't start, the constructor throws, the error is logged, and the page runs over the CSS sky gradient on `<html>`. App also keeps the backdrop's bird/world/sky in sync with `settings`, so a Quick start swap shows behind pre-flight.
 
 ---
 
@@ -282,6 +309,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, with a per-frame lerp of 0.05 (0.03 underwater).
 - **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` to false, so the bird eases back to level cruise instead of latching the last input.
 - **Timing.** `dt` is clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
+- **Pause.** `setPaused(true)` cancels the rAF loop, so there's no update and no render and the canvas holds the last frame. It also suspends the wind `AudioContext`, and `applyControls` returns early (input can't steer, boost or start a trick behind the menu). `setPaused(false)` discards the paused time with `clock.getDelta()` and restarts the loop. A resize while paused re-renders the held frame once. Before `start()` has finished, `setPaused` only records the flag, and `start()` honors it (so two loops are never scheduled).
 - **Wing flaps.** Flap rate is mapped from speed onto 7–17, times 0.55 when gliding in a dive (pitch below -0.15 and not boosting), and uses a gentle paddle stroke underwater.
 
 ### 6.3 Hand tracking (`handControls.ts`)
@@ -319,13 +347,23 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - The fist closes below 0.62 and opens above 0.8, with 3 frames of hysteresis in each direction.
   - Hand loss resets `fistActive`, so boost can't come back latched when the hand reappears.
 - **Backflip (upward flick).**
+  - The thresholds (`FLICK_WINDOW_MS` 220, `FLICK_MIN_DISTANCE` 0.1, `FLICK_MIN_VELOCITY` 1.1, `BACKFLIP_COOLDOWN_MS` 1200) live in `trackingShared.ts` because the guide quotes them.
   - Keeps a 220 ms rolling history of the **raw**, unsmoothed Y.
-  - It fires when the point moves up more than 0.1 at more than 1.1 frame-heights/s, with a 1200 ms cooldown.
+  - It fires when the point has moved up more than 0.1 at more than 1.1 frame-heights/s, with a 1200 ms cooldown.
+  - **The speed is measured from the oldest sample in the window**, so once the hand has been in view for a moment it is `rise / ~0.22 s`, not rise / (time the snap took). From a still hand, a backflip therefore needs the palm to rise **~24% of the frame height within 0.22 s** (`FLICK_STILL_HAND_DISTANCE`). The 0.1 minimum only decides right after the hand reappears. The guide says "at least a quarter of the frame, within 0.2 s".
+  - It needs at least 2 samples inside 220 ms, so it can't fire if the tracker runs below ~4.5 FPS (a webcam runs at 30).
+- **Near-miss coaching** (`trackStroke` / `finishStroke`):
+  - Each upward stroke of the raw Y (from when it starts rising until it drops back 0.02 or makes no new high for 120 ms) is scored once, when it ends.
+  - A stroke that fired no backflip, rose ≥ 0.06, and peaked ≥ 64% of the flick speed reports `flickNearMiss`:
+    - `too-slow` ("Flick faster ↑") if it rose ≥ `FLICK_STILL_HAND_DISTANCE` in total
+    - otherwise `too-short` ("Flick higher ↑")
+  - Hints are rate-limited to one per 2.5 s and suppressed during the backflip cooldown. Steering (up to ~0.6 frame-heights/s) and jitter never trigger one.
+  - App shows the hint for 1.8 s, only while flying and not paused.
   - **Fallback:** if the hand vanishes within 300 ms of a fast flick, the tracker emits `backflip: true` with `handDetected: false`. `GameEngine.applyControls` checks `backflip` **before** its `if (!handDetected) return` guard, so don't reorder these. See `.agents/memory/gesture-fallback-before-detection-guard.md`.
 - **Robustness.**
   - A `stopped` flag guards `send()` after `stop()`, which avoids MediaPipe's "deleted object" wasm race.
   - Per-frame `send()` errors are logged and swallowed, never re-thrown.
-- **Fallback inputs:** **none.** There is no keyboard, mouse, gamepad or touch steering. Pointer events are used only for dragging calibration corners.
+- **Other inputs:** keyboard mode (§6.12) replaces the tracker entirely. There is no mouse, gamepad or touch steering. Pointer events are used only for dragging calibration corners and for buttons.
 
 ### 6.4 Calibration UI and webcam preview (`preflight/handPreview.ts`, `preflight/CalibrationPanel.tsx`, the preview rAF in `App.tsx`)
 - `drawHandPreview()` draws the raw video frame and the raw landmarks, then CSS `scale-x-[-1]` mirrors the canvas.
@@ -443,6 +481,30 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   These use the new `GameEngine` getters: `getHeadingDegrees()` (0° is the start direction and right turns increase it), `getAltitude()` (the bird's Y), and `getSpeed()` (×1.944 to show knots). The splash and underwater overlays are unchanged. The old warm boost vignette is replaced by a HUD effect: masked conic speed streaks (opacity plus a compositor-only transform animation), a faint warm rim, and frame brackets that tighten and turn warm. Badges snap on and off with no color transition.
 - **Takeoff.** `handleStartFlying` sets `launching` (which locks the calibration controls). It then awaits the engine chunk together with `playTakeoffLaunch()`: the panel lifts away, and the always-mounted pale veil (`takeoffVeilRef`, the landing intro's sky gradient, reading "Cleared for takeoff" and the bird, world and sky) fades to opaque. The landing scene is disposed and the engine built under the veil. Once `flightState` is `'flying'`, a layout effect fades the veil off the chase camera's swoop-in and staggers the `[data-flight-hud]` blocks in with `fromTo`. `clearProps` then removes GSAP's inline styles. Reduced motion uses plain crossfades.
 
+### 6.12 Keyboard controls, pause menu and "How to fly" guide (`game/keyboardControls.ts`, `flight/PauseMenu.tsx`, `flight/FlightGuide.tsx`, `flight/guideArt.tsx`)
+- **`KeyboardControls`** is framework-free and emits the same `HandControlState` through the same `handleControlState` callback as the tracker:
+  - `handDetected` is always true, so the engine's hand-lost easing never applies.
+  - `landmarks` and `flickNearMiss` are always null.
+  - It reads `event.code` (physical keys), so WASD is ZQSD on AZERTY.
+- **Keys:**
+  - W/↑ climb, S/↓ dive, A/← bank left, D/→ bank right.
+  - Axes ramp toward ±1 at 2.8/s (about 0.36 s to full), return at 4/s, and reverse at 6/s. The rates are frame-rate independent, and a rAF emits only when something changed.
+  - **Space** held = `boost`, so the engine's rising-edge barrel roll fires on each new press.
+  - **F** = a one-shot `backflip` (key repeat ignored).
+  - Handled keys `preventDefault` on keydown *and* keyup (Space activates a focused button on keyup), unless paused.
+  - Window `blur` releases every key, and `setPaused` releases them and rests the axes at 0.
+- **Pause menu** (`PauseMenu`): dark glass in the HUD style, with a flight summary (and ring score) and **Resume** (autofocused, shows `Esc`) / **How to fly** / **Back to landing**. GSAP fades it in unless reduced motion.
+- **Guide** (`FlightGuide`):
+  - Hand mode has 4 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick). Keyboard mode has 4: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Pause (Esc / ?).
+  - Each card has an illustration, the input, one precise tip, and a small mono line with the exact numbers.
+  - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick thresholds), `presets.ts` (speeds in knots, trick durations) and `keyboardControls.ts` (ramp). Change those constants, never the copy.
+  - **Buttons by origin:**
+    - `'preflight'`: **Take off** (primary), **Back** (to calibration / to landing) and **Don't show again**
+    - `'pause'`: **Back to pause menu**
+    - `'hud'`: **Resume flight**
+    - Esc acts as Back/close.
+- **Illustrations** (`guideArt.tsx`) are inline SVG (a procedural hand glyph: finger rects that fold with `scaleY`, a thumb that rotates, a cyan palm-center dot) and HTML keycaps. They're animated only by the `ascent-guide-*` / `ascent-key-press` keyframes in `index.css`, with `transform-box: fill-box`. Under reduced motion every animation is paused on its telling pose: a per-illustration `--pose` negative delay.
+
 ---
 
 ## 7. Coding conventions and patterns
@@ -530,10 +592,12 @@ These come from code reading plus headless runs.
 5. **Surface-level island pop.** A bird skimming *above* the water that flies into an island is still lifted to `height + 3.5` in one frame. Near the shore that's about 3.5 units. Only the underwater case was fixed.
 
 ### Robustness and UX
-6. **No keyboard, mouse or touch fallback**, and no pause. You can't play or debug without a webcam, and mobile is effectively unsupported.
+6. ~~**No keyboard fallback, and no pause.**~~ Keyboard mode and the pause menu now exist. There is still **no touch or gamepad input**, so mobile is effectively unsupported.
 7. ~~**Tall cards get clipped.**~~ Fixed in the landing redesign. The menu card is gone, and the pre-flight cards sit in `PreflightLayer` (a `fixed overflow-y-auto` scroller around a `min-h-full` flex box), so a tall card starts at the top and scrolls. At 1280×720 the two-column calibration card (522 px) fits without scrolling, and the landing chapters are `min-h-svh`, so they grow instead of clipping.
 8. **Cryptic load-error detail.** When a MediaPipe file 404s, the detail under the friendly message is minified MediaPipe internals such as `TypeError: jt is not a function`. The friendly message is correct, but the detail line doesn't help users.
 9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
+28. **A failed chunk import can't be retried in place.** Chromium caches a failed dynamic `import()` for the page's lifetime. So when the engine or tracking chunk fails to download, the boot HUD offers **Reload page** instead of Try Again. Other failures (camera, MediaPipe wasm/model loads) keep Try Again. Recovery after a denied camera is verified; recovery after a MediaPipe asset failure is not.
+29. **Flick detection is frame-rate sensitive.** Below ~4.5 tracker FPS, the 220 ms window holds a single sample and no flick can register (see §6.3). Headless SwiftShader sits right at that edge.
 
 ### Performance
 10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole `App` during flight. React bails out of identical values, but any change re-renders App and the HUD. The flight telemetry avoids this (refs plus rAF), and boot progress re-renders at most once per whole percent.
@@ -564,7 +628,7 @@ These come from code reading plus headless runs.
 ## 10. Prioritized improvement ideas
 
 **P0: playability**
-1. Add a **keyboard and mouse fallback** (WASD or arrows, Space for boost, a key for backflip) behind the same `HandControlState` interface. This helps accessibility, users without a webcam, and debugging.
+1. ~~Add a **keyboard fallback** behind the same `HandControlState` interface.~~ Done (keyboard mode, plus pause and the guide). Still open: touch and gamepad input.
 2. ~~Fix the clipped tall cards (§9 #7).~~ Done in the landing redesign.
 
 **P1: controls feel**
@@ -601,7 +665,11 @@ These come from code reading plus headless runs.
 
 ## 11. Gotchas for future changes
 
-- Don't start the camera or audio before a user gesture. Camera and tracking start on **Begin pre-flight** / **Quick start**. In-game wind audio starts on **Start Flying**, and the landing's ambient wind starts only from its **Sound** toggle click.
+- Don't start the camera or audio before a user gesture. Camera and tracking start on **Begin pre-flight** / **Quick start**. In-game wind audio starts on **Start Flying** (or **Take off**, or the keyboard boot's automatic takeoff, which relies on the page's sticky activation from the Quick start / Begin click), and the landing's ambient wind starts only from its **Sound** toggle click.
+- New inputs must emit `HandControlState` through App's `handleControlState`; don't give the engine input-specific code. Keyboard mode must never import `handControls` at runtime (type imports only). The production build check is that keyboard mode never requests `handControls-*.js` or `mediapipe/hands/`.
+- Anything that can run while a menu is open must respect the pause: the engine ignores `applyControls` while paused, `KeyboardControls.setPaused` stops listening, and flick hints are gated on `flickHintsOnRef`. A new overlay over the flight should set `paused` (through `guide`/`pauseOpen`) and leave the HUD `inert`.
+- The guide's numbers come from `trackingShared.ts`, `presets.ts` and `keyboardControls.ts`. When you change a threshold, change it there, and the guide follows. Don't hard-code numbers in `FlightGuide.tsx`.
+- `handleStartFlying` must read settings from `settingsRef.current`: the keyboard boot calls it asynchronously through `requestTakeoffRef`, after a Quick start may have replaced the settings.
 - Keep MediaPipe and the engine lazy. Never add a runtime (non-`type`) import of `@/game/handControls`, `@mediapipe/hands` or `@/game/GameEngine` to `App.tsx`, `landing/*`, or anything they import statically. Put shared runtime values in `trackingShared.ts` / `presets.ts` instead. Check with `pnpm run build`: `handControls-*.js` and `GameEngine-*.js` must stay separate chunks.
 - Always dispose the `LandingScene` before constructing a `GameEngine` (`disposeLandingScene()` in `handleStartFlying`), so two WebGL contexts are never live at once. Do it under the opaque takeoff veil.
 - Boot status must stay real. Drive `boot` only from actual events, and keep the only added delay the capped `BOOT_MIN_DURATION_MS`/`BOOT_READY_HOLD_MS` hold. After that hold, check `isCurrent()` like after every other `await`.
@@ -625,3 +693,10 @@ These come from code reading plus headless runs.
   - On the **dev server**, `page.route` the pre-bundled `/node_modules/.vite/deps/@mediapipe_hands.js` to a stub module. It must export `Hands` and `HAND_CONNECTIONS` both as named and default exports, because Vite's CJS interop reads them off the default export. The stub's `send()` reports synthetic landmarks you control.
   - Everything else (HandTracker math, App, engine) stays real.
   - Use the production preview with the real files to check the loading percentage.
+- **Flying headlessly in keyboard mode:**
+  - Press real keys with `page.keyboard.down/up`.
+  - To read the bird's state without adding debug code to the product, patch the engine from the page on the dev server. `import('/src/game/GameEngine.ts')` is the same module instance the app lazy-loads, so wrapping `GameEngine.prototype.update` to stash `this` on `window` exposes `bird.group.position`, `headingYaw`, `rings.getNextRingPosition()` and the `is*`/`get*` getters. A ring autopilot works from those.
+  - SwiftShader runs at ~5 FPS at 1280×720 (the sim then runs at ~¼ speed). Shrink the viewport (e.g. 800×450) for physics and flick checks, and restore it for screenshots.
+  - After a hint or overlay appears, wait ~0.7 s before a screenshot: its CSS fade-in hasn't produced a frame yet.
+  - Playwright's role queries don't honor `inert`, so scope locators to the open dialog.
+  - Near-miss and flick thresholds are best checked deterministically: bundle `handControls.ts` with esbuild (`--alias:@mediapipe/hands=<stub>`, `--alias:virtual:mediapipe-hands-assets=<stub>`, `--define:import.meta.env.BASE_URL='"/"'`), stub `performance.now`, and call `handleResults` with synthetic landmarks at a fixed frame rate.

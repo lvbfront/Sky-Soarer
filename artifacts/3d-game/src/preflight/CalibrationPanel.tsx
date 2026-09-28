@@ -62,6 +62,7 @@ export function CalibrationPanel({
   return (
     <div
       data-calibration-panel
+      data-takeoff-lift
       className="ascent-glass-strong relative grid w-full max-w-5xl gap-8 rounded-[28px] p-6 text-white shadow-2xl sm:p-8 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]"
     >
       {/* ---- Sensor feed ---- */}

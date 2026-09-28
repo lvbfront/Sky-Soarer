@@ -82,3 +82,12 @@ export const WEATHER_LOOKS: Record<WeatherPreset, WeatherLook> = {
     stars: true,
   },
 };
+
+// Flight numbers the UI quotes (the "How to fly" guide) as well as the engine using them, kept here
+// so the guide stays accurate without importing the lazily loaded engine.
+/** Cruise and boost airspeed, in world units (meters) per second. */
+export const BASE_SPEED = 9;
+export const BOOST_SPEED = 20;
+/** Length of the barrel roll and backflip sweeps, in seconds. */
+export const BARREL_ROLL_DURATION = 0.8;
+export const BACKFLIP_DURATION = 0.9;

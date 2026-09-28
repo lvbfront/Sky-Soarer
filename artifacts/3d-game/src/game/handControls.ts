@@ -1,12 +1,30 @@
 import { Hands, type NormalizedLandmark, type Results } from '@mediapipe/hands';
 import { MEDIAPIPE_FILE_SIZES } from 'virtual:mediapipe-hands-assets';
 import { meterDownloads } from './downloadMeter';
-import { MAX_SENSITIVITY, MIN_SENSITIVITY, TrackingStartError } from './trackingShared';
+import {
+  BACKFLIP_COOLDOWN_MS,
+  FIST_HOLD_FRAMES,
+  FLICK_MIN_DISTANCE,
+  FLICK_MIN_VELOCITY,
+  FLICK_STILL_HAND_DISTANCE,
+  FLICK_WINDOW_MS,
+  MAX_SENSITIVITY,
+  MIN_SENSITIVITY,
+  STEERING_DEADZONE,
+  TrackingStartError,
+  type FlickNearMiss,
+} from './trackingShared';
 
 // Re-exported so existing imports of these from handControls keep working. HAND_CONNECTIONS is
 // re-exported for the webcam preview, which gets it from this lazily loaded module.
 export { HAND_CONNECTIONS } from '@mediapipe/hands';
-export { MAX_SENSITIVITY, MIN_SENSITIVITY, TrackingStartError, type TrackingStartErrorKind } from './trackingShared';
+export {
+  MAX_SENSITIVITY,
+  MIN_SENSITIVITY,
+  TrackingStartError,
+  type FlickNearMiss,
+  type TrackingStartErrorKind,
+} from './trackingShared';
 
 export interface HandControlState {
   handDetected: boolean;
@@ -18,6 +36,11 @@ export interface HandControlState {
   boost: boolean;
   /** One-shot pulse: true for exactly the frame a fast upward flick is detected. */
   backflip: boolean;
+  /**
+   * One-shot: set on the frame an upward flick ends that came close to a backflip but missed
+   * (too slow, or too short), so the HUD can coach the player. Null on every other frame.
+   */
+  flickNearMiss: FlickNearMiss | null;
   landmarks: NormalizedLandmark[] | null;
 }
 
@@ -33,25 +56,32 @@ const PALM_POINTS = [0, 5, 9, 13, 17];
 
 const FIST_CLOSE_RATIO = 0.62;
 const FIST_OPEN_RATIO = 0.8;
-const FIST_HOLD_FRAMES = 3;
 
 const SMOOTHING_ALPHA = 0.35;
-
-// Small deadzone (in the already-box-normalized -1..1 output space) so tiny hand tremor /
-// tracking jitter near the calibrated center doesn't cause constant steering drift.
-const NORMALIZED_DEADZONE = 0.06;
 
 
 // A rapid upward flick of the raw (un-smoothed) tracked point triggers the backflip gesture.
 // Detected over a short rolling time window (see `trackedYHistory`) rather than a single
 // frame-to-frame delta, so one noisy MediaPipe frame can't mask (or falsely fabricate) the
-// gesture, and detection stays consistent across different camera frame rates.
-const FLICK_WINDOW_MS = 220;
-// The tracked point must travel at least this far (in normalized 0..1 frame units) within the
-// window for it to count as an intentional flick rather than ordinary steering motion/jitter.
-const FLICK_MIN_DISTANCE = 0.1;
-const UPWARD_FLICK_VELOCITY_THRESHOLD = 1.1;
-const BACKFLIP_COOLDOWN_MS = 1200;
+// gesture, and detection stays consistent across different camera frame rates. The thresholds
+// (FLICK_WINDOW_MS, FLICK_MIN_DISTANCE, FLICK_MIN_VELOCITY, BACKFLIP_COOLDOWN_MS) live in
+// trackingShared.ts because the "How to fly" guide quotes them.
+
+// Near-miss coaching. Each upward stroke of the raw palm point (from when it starts rising until
+// it drops back or stalls) is scored once when it ends. A stroke that never fired a backflip but
+// reached these fractions of the real thresholds counts as an attempted flick. Because the flick
+// speed is averaged over the whole window (see FLICK_STILL_HAND_DISTANCE), 64% of the speed means
+// rising ~15% of the frame within 220 ms: well above jitter and ordinary steering (easing the palm
+// up a fifth of the frame over a third of a second peaks around 0.6 frame-heights/s).
+const NEAR_MISS_MIN_DISTANCE = FLICK_MIN_DISTANCE * 0.6;
+const NEAR_MISS_MIN_VELOCITY = FLICK_MIN_VELOCITY * 0.64;
+// A stroke starts once the raw point rises by more than this between two frames, and ends when it
+// falls back this far below its highest point or makes no new high for STROKE_STALL_MS.
+const STROKE_START_EPSILON = 0.004;
+const STROKE_END_DROP = 0.02;
+const STROKE_STALL_MS = 120;
+// At most one hint this often, so a player practising doesn't get a hint on every attempt.
+const NEAR_MISS_INTERVAL_MS = 2500;
 // If the hand disappears shortly after a fast upward flick (common when the flick carries
 // the hand out of frame), still fire the backflip once rather than losing the gesture.
 const HAND_LOST_GRACE_MS = 300;
@@ -181,6 +211,14 @@ export class HandTracker {
   private trackedYHistory: { y: number; t: number }[] = [];
   private lastBackflipTimeMs = -Infinity;
   private lastFastUpwardFlickTimeMs = -Infinity;
+
+  // The upward stroke in progress, for near-miss coaching (see NEAR_MISS_*). `fired` is set once
+  // the stroke met both flick thresholds, so a real flick (even one swallowed by the cooldown)
+  // never also reports a near miss.
+  private stroke: { startY: number; minY: number; lastRiseMs: number; peakVelocity: number; fired: boolean } | null =
+    null;
+  private lastRawY: number | null = null;
+  private lastNearMissMs = -Infinity;
 
   /** `videoEl` must already be playing the webcam stream; the tracker never opens the camera itself. */
   constructor(videoEl: HTMLVideoElement, onUpdate: (state: HandControlState) => void) {
@@ -365,12 +403,17 @@ export class HandTracker {
         this.lastBackflipTimeMs = now;
       }
       this.trackedYHistory = [];
+      this.lastRawY = null;
+      // A stroke cut short by the hand leaving the frame is still scored.
+      const flickNearMiss = this.stroke && !lostBackflip ? this.finishStroke(now) : null;
+      this.stroke = null;
       this.onUpdate({
         handDetected: false,
         pitch: 0,
         roll: 0,
         boost: false,
         backflip: lostBackflip,
+        flickNearMiss,
         landmarks: null,
       });
       return;
@@ -412,8 +455,8 @@ export class HandTracker {
     // axisValue's "greater than center = positive" convention.
     const pitchRaw = axisValue(-this.smoothedY, -this.originY, -this.boxTopY, -this.boxBottomY);
 
-    const roll = clamp(applyDeadzone(rollRaw, NORMALIZED_DEADZONE) * this.sensitivity, -1, 1);
-    const pitch = clamp(applyDeadzone(pitchRaw, NORMALIZED_DEADZONE) * this.sensitivity, -1, 1);
+    const roll = clamp(applyDeadzone(rollRaw, STEERING_DEADZONE) * this.sensitivity, -1, 1);
+    const pitch = clamp(applyDeadzone(pitchRaw, STEERING_DEADZONE) * this.sensitivity, -1, 1);
 
     // Backflip gesture: a fast upward flick of the raw (un-smoothed) tracked point, tracked
     // independently of the smoothed steering signal so smoothing doesn't blur out the flick
@@ -425,22 +468,24 @@ export class HandTracker {
       this.trackedYHistory.shift();
     }
     let backflip = false;
+    let fastFlick = false;
+    let windowVelocity = 0;
     if (this.trackedYHistory.length >= 2) {
       const oldest = this.trackedYHistory[0];
       const dtSec = (now - oldest.t) / 1000;
       // Y decreases upward on screen, so a positive delta here means the point moved up.
       const upwardDistance = oldest.y - trackedRawY;
-      if (dtSec > 0.03 && upwardDistance > FLICK_MIN_DISTANCE) {
-        const upwardVelocity = upwardDistance / dtSec;
-        if (upwardVelocity > UPWARD_FLICK_VELOCITY_THRESHOLD) {
-          this.lastFastUpwardFlickTimeMs = now;
-          if (now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS) {
-            backflip = true;
-            this.lastBackflipTimeMs = now;
-          }
+      if (dtSec > 0.03 && upwardDistance > 0) windowVelocity = upwardDistance / dtSec;
+      if (dtSec > 0.03 && upwardDistance > FLICK_MIN_DISTANCE && windowVelocity > FLICK_MIN_VELOCITY) {
+        fastFlick = true;
+        this.lastFastUpwardFlickTimeMs = now;
+        if (now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS) {
+          backflip = true;
+          this.lastBackflipTimeMs = now;
         }
       }
     }
+    const flickNearMiss = this.trackStroke(trackedRawY, windowVelocity, fastFlick, now);
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];
@@ -480,7 +525,47 @@ export class HandTracker {
       roll,
       boost,
       backflip,
+      flickNearMiss,
       landmarks: hand,
     });
+  }
+
+  /**
+   * Follows the current upward stroke of the raw palm Y and, on the frame it ends, returns
+   * whether it was a near-miss flick. `windowVelocity` is the rolling-window upward speed the
+   * backflip detector just measured, and `fastFlick` whether it met both thresholds.
+   */
+  private trackStroke(y: number, windowVelocity: number, fastFlick: boolean, now: number): FlickNearMiss | null {
+    const previousY = this.lastRawY;
+    this.lastRawY = y;
+    if (!this.stroke) {
+      if (previousY === null || previousY - y <= STROKE_START_EPSILON) return null;
+      this.stroke = { startY: previousY, minY: y, lastRiseMs: now, peakVelocity: 0, fired: false };
+    } else if (y < this.stroke.minY) {
+      this.stroke.minY = y;
+      this.stroke.lastRiseMs = now;
+    }
+    const stroke = this.stroke;
+    stroke.peakVelocity = Math.max(stroke.peakVelocity, windowVelocity);
+    if (fastFlick) stroke.fired = true;
+    const ended = y > stroke.minY + STROKE_END_DROP || now - stroke.lastRiseMs > STROKE_STALL_MS;
+    return ended ? this.finishStroke(now) : null;
+  }
+
+  /** Ends the current stroke and scores it (see NEAR_MISS_*). */
+  private finishStroke(now: number): FlickNearMiss | null {
+    const stroke = this.stroke;
+    this.stroke = null;
+    if (!stroke || stroke.fired) return null;
+    const distance = stroke.startY - stroke.minY;
+    if (distance < NEAR_MISS_MIN_DISTANCE || stroke.peakVelocity < NEAR_MISS_MIN_VELOCITY) return null;
+    // Right after a backflip the player is recovering, not practising; and don't nag.
+    if (now - this.lastBackflipTimeMs < BACKFLIP_COOLDOWN_MS || now - this.lastNearMissMs < NEAR_MISS_INTERVAL_MS) {
+      return null;
+    }
+    this.lastNearMissMs = now;
+    // Rose far enough in total, just not within one window: faster. Otherwise no speed would have
+    // done it from a still hand: higher.
+    return distance >= FLICK_STILL_HAND_DISTANCE ? 'too-slow' : 'too-short';
   }
 }
