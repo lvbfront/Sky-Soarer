@@ -1,10 +1,21 @@
 import type { BirdType } from './bird';
 import type { MapType, WeatherPreset } from './presets';
+import { clamp, computeBox, validateCalibration } from './trackingMath';
+import {
+  MAX_SENSITIVITY,
+  MIN_SENSITIVITY,
+  type CalibrationCorner,
+  type CalibrationData,
+  type CalibrationPoint,
+} from './trackingShared';
 
 // Same "bird-flight-" prefix as the best-score key in highscore.ts.
 const STORAGE_KEY = 'bird-flight-settings';
 // Which control modes the player has ticked "Don't show again" for on the "How to fly" guide.
 const GUIDE_DISMISSED_KEY = 'bird-flight-guide-dismissed';
+// The last hand calibration (center, 4 corners, sensitivity), so returning players can skip it.
+const CALIBRATION_KEY = 'bird-flight-calibration';
+const CALIBRATION_VERSION = 1;
 
 /** How the bird is flown: a hand in front of the webcam, or the keyboard (no camera at all). */
 export type ControlMode = 'hand' | 'keyboard';
@@ -97,5 +108,55 @@ export function dismissGuide(mode: ControlMode) {
     window.localStorage.setItem(GUIDE_DISMISSED_KEY, JSON.stringify({ ...loadDismissedGuides(), [mode]: true }));
   } catch {
     // Storage disabled: the guide just keeps showing.
+  }
+}
+
+const CORNERS: readonly CalibrationCorner[] = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight'];
+
+function readPoint(value: unknown): CalibrationPoint | null {
+  if (!value || typeof value !== 'object') return null;
+  const { x, y } = value as Record<string, unknown>;
+  if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { x, y };
+}
+
+/**
+ * The hand calibration saved at the last takeoff, or null if there isn't one or it's unusable: every
+ * point must be a finite 0..1 coordinate and the whole must pass `validateCalibration`, so a stale
+ * or hand-edited value can't reach the tracker. The sensitivity is clamped to the slider's range.
+ */
+export function loadCalibration(): CalibrationData | null {
+  try {
+    const raw = window.localStorage.getItem(CALIBRATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (parsed.version !== CALIBRATION_VERSION) return null;
+    const center = readPoint(parsed.center);
+    const cornersIn = (parsed.corners ?? {}) as Record<string, unknown>;
+    const corners: Partial<Record<CalibrationCorner, CalibrationPoint>> = {};
+    for (const corner of CORNERS) {
+      const point = readPoint(cornersIn[corner]);
+      if (!point) return null;
+      corners[corner] = point;
+    }
+    if (!center) return null;
+    if (validateCalibration(center, computeBox(corners)).length > 0) return null;
+    const sensitivity = typeof parsed.sensitivity === 'number' && Number.isFinite(parsed.sensitivity) ? parsed.sensitivity : 1;
+    return {
+      center,
+      corners: corners as Record<CalibrationCorner, CalibrationPoint>,
+      sensitivity: clamp(sensitivity, MIN_SENSITIVITY, MAX_SENSITIVITY),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCalibration(calibration: CalibrationData) {
+  try {
+    window.localStorage.setItem(CALIBRATION_KEY, JSON.stringify({ version: CALIBRATION_VERSION, ...calibration }));
+  } catch {
+    // Storage disabled: the player just calibrates again next time.
   }
 }

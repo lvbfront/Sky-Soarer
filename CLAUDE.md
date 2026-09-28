@@ -24,7 +24,7 @@ How a session plays:
 2. **Pre-flight 01: boot sequence.** A full-screen HUD over the frozen backdrop types monospace status lines that follow the **real** startup events (see §6.11). In hand mode there are three:
    - `CAMERA [REQUESTING → ONLINE · 480×360]`
    - `HAND TRACKING MODEL [STANDBY → LOADING xx% → WARMING UP → READY]`, where the percentage is measured from the actual MediaPipe downloads
-   - `CALIBRATION [PENDING]`
+   - `CALIBRATION [PENDING]`, or `[SAVED]` when a saved calibration lets the player skip calibration
 
    A failure shows inline under the failing line (`DENIED`, `NOT FOUND`, `BUSY`, `FAILED`, `TIMEOUT`, …) with the message, the raw detail, and **Try Again** (or **Reload page** when a code chunk failed to import, see §6.12). **Back** is always available.
 
@@ -35,17 +35,18 @@ How a session plays:
    - Capture 5 points: the neutral center, then the top-left, top-right, bottom-left and bottom-right corners of your comfortable range. Each is drawn as a target reticle. The step being captured also shows a pulsing ghost reticle at a suggested spot, and a checklist shows each step as LOCKED / ACQUIRE / STANDBY.
    - Once a corner is captured you can drag its reticle on the feed to fine-tune it.
    - Set steering sensitivity from 0.5x to 2.0x on a styled slider.
-   - **Start Flying** stays disabled until all 5 points are captured. It plays a short GSAP **takeoff transition** into flight.
+   - **Start Flying** stays disabled until all 5 points are captured **and** the calibration is valid: the box must be at least 15% of the feed on each axis, and the center must sit inside it with 15% of the box's span to spare on every side. An invalid box turns red, with a message saying what to fix. Start Flying saves the calibration (points and sensitivity) in `localStorage` and plays a short GSAP **takeoff transition** into flight.
+   - **Returning players skip calibration.** When a valid calibration is saved, the hand boot shows `CALIBRATION [SAVED]` and goes straight to takeoff. To recalibrate, use **Recalibrate hand controls** under Begin pre-flight on the landing, **Recalibrate** in the pause menu, or the guide's **Back to calibration** (which opens the saved box). **Recalibrate** on a complete calibration screen starts over.
    - **"How to fly" guide.** Before takeoff (after Start Flying, or after the keyboard boot), the guide opens by itself until the player ticks **Don't show again**, stored per input mode. It has one card per move, each with a looping procedural SVG/CSS illustration and one precise tip whose numbers come from the real thresholds (§6.12). **Take off** continues; **Back** returns to calibration (hand) or the landing (keyboard).
 4. **Flight.**
    - Move your palm inside the calibrated box to pitch and roll (keyboard: W/↑ climb, S/↓ dive, A/← and D/→ bank, with a smooth ramp). Roll banks the bird, and banking turns it.
-   - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll.
-   - **Flick your hand up fast** (keyboard: **F**) for a 0.9 s backflip. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
+   - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll. Closing or opening the fist doesn't nudge the steering.
+   - **Flick your hand up fast**, about half the height of your calibrated box in under 0.2 s (keyboard: **F**), for a 0.9 s backflip. The flick doesn't pitch the bird up. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
    - Both tricks are cosmetic only. They never change heading or momentum.
-   - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Back to landing**), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
+   - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Recalibrate** (hand mode) **/ Back to landing**), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
    - On the ocean map you can dive under open water into a reef world with fish, a shark, caustics and bubbles. Surfacing sprays a water burst.
-   - In Ring Challenge, fly through glowing rings to score. A floating arrow points to the nearest ring, and the best score is saved in `localStorage`.
-   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score and best, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
+   - In Ring Challenge, fly through glowing rings to score. The **next ring** (the earliest-spawned ring still ahead that you haven't collected or missed) glows in a highlight color picked for the map + sky, a floating arrow in the same color points at it, and the HUD shows its distance (`NEXT RING 84 m`). The best score is saved in `localStorage`.
+   - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score, best and next-ring distance, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
 
 There is no win or lose state, no timer, and no collision damage. Terrain acts only as an altitude floor.
 
@@ -67,6 +68,7 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 | Landing animation | GSAP + ScrollTrigger (`gsap` package, plugins are free) | ^3.15.0 |
 | Noise | simplex-noise (v4 `createNoise2D`) | ^4.0.3 |
 | Audio | Web Audio API, fully synthesized (no audio files) | — |
+| Unit tests | Vitest (`vitest.config.ts`, Node environment, `src/**/*.test.ts`) | ^4.1.11. v5 needs Node 22.12+, and the repo supports Node 20.19. |
 | Replit-only dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | loaded only when `REPL_ID` is set |
 
 - Runtime libraries are listed in `dependencies`, and build tooling in `devDependencies`, in `artifacts/3d-game/package.json`.
@@ -82,7 +84,8 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 ```bash
 pnpm install --frozen-lockfile   # ~2 s warm; the root preinstall script refuses npm/yarn
 pnpm dev                         # Vite dev server  -> http://localhost:5173/
-pnpm run typecheck               # tsc --noEmit for the game
+pnpm run typecheck               # tsc --noEmit for the game (includes the *.test.ts files)
+pnpm test                        # Vitest unit tests (tracking math, flick detector, rings, damping, saved calibration)
 pnpm run build                   # typecheck, then vite build -> artifacts/3d-game/dist/public
 pnpm preview                     # serve the production build -> http://localhost:4173/
 ```
@@ -109,6 +112,10 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
   - The production preview confirmed keyboard mode never requests `handControls` or MediaPipe.
   - Hand mode with a stubbed detector: the auto guide over calibration, "Flick higher" / "Flick faster" hints, a real flick firing a backflip with no hint, and flicks ignored while paused.
   - The near-miss detector was also checked deterministically: the real `HandTracker` bundled with esbuild and fed synthetic 15/30/60 fps palm tracks.
+- The ring guidance + controls feel PR re-ran this headlessly (SwiftShader; harness notes in §11):
+  - `pnpm test`: 80 Vitest tests pass (tracking math, flick detector at 30/60 Hz plus sparse 15–60 Hz tracks, rings, damping, saved calibration).
+  - **Ring Challenge, keyboard mode, dev server:** screenshots of the arrow pointing at the highlighted next ring on both maps × all three skies. A missed ring (crossed 13 m outside the hoop) moved the target to the following ring on that frame, with the arrow's aim error easing 50° → 10° over ~0.25 s. A hard left bank from heading 000 to 195 stepped the target 3 → 4 → 5 → 6 → 7 as rings fell behind. The highlight was on exactly one ring on every frame.
+  - **Simulated hand** (fake camera + stubbed `@mediapipe/hands`; tracker ~15 Hz in flight at 640×360): 5 of 5 half-box flicks fired, and the bird's pitch peaked at 0.02 during a flick. A brisk climb didn't fire and wasn't held (pitch reached 1.0). A fist close/hold/open changed pitch by 0.0000 (the palm shift is ~0.07 of pitch). A slow flick showed "Flick faster ↑". Calibration validation, drag-to-fix, saving, the saved-calibration skip (`CALIBRATION [SAVED]`), Recalibrate from the landing and from the pause menu (one WebGL context throughout), and the guide's Back to calibration all worked, with no console errors.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -157,6 +164,7 @@ The game needs **no secrets, no backend and no database**.
 │       ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
 │       ├── index.html         # <title>Bird Flight</title>, meta/OG description, Google Fonts Inter, favicon
 │       ├── vite.config.ts     # PORT/BASE_PATH defaults; Replit plugins only when REPL_ID is set; @ -> src
+│       ├── vitest.config.ts   # unit tests only (no React/Tailwind/MediaPipe/Replit plugins); @ -> src
 │       ├── vite-plugin-mediapipe-assets.ts # serves/emits the MediaPipe runtime files under mediapipe/hands/, plus the
 │       │                                   #   `virtual:mediapipe-hands-assets` file-size manifest (typed in src/mediapipe-assets.d.ts)
 │       ├── public/            # favicon.svg, robots.txt (copied as-is into dist/public)
@@ -170,8 +178,8 @@ The game needs **no secrets, no backend and no database**.
 │           │   └── handPreview.ts       # CALIBRATION_STEPS, calibration types, drawHandPreview (reticles, box, ghost target)
 │           ├── flight/
 │           │   ├── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed or
-│           │   │                  #   keyboard input indicator, near-miss flick hint, ? / Pause / Stop buttons
-│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Back to landing
+│           │   │                  #   keyboard input indicator, near-miss flick hint, NEXT RING distance, ? / Pause / Stop buttons
+│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Recalibrate (hand) / Back to landing
 │           │   ├── FlightGuide.tsx # "How to fly" guide: per-move cards for hand or keyboard, tips built from real constants
 │           │   └── guideArt.tsx   # procedural SVG hand illustrations + animated keycaps (CSS keyframes in index.css)
 │           ├── ui/
@@ -183,14 +191,20 @@ The game needs **no secrets, no backend and no database**.
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
 │               ├── LandingScene.ts # landing backdrop: scroll-progress-driven bird/camera/altitude, cloud deck, live swaps, dispose
 │               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing); speeds and
-│               │                   #   trick durations (shared by engine + guide)
+│               │                   #   trick durations (shared by engine + guide); NEXT_RING_HIGHLIGHTS (engine + HUD)
+│               ├── damping.ts      # damp(rate, dt) + perFrameRate(alpha, fps): frame-rate independent smoothing
 │               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing)
 │               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings", incl. control mode), validated
-│               │                   #   on read; guide "Don't show again" per mode ("bird-flight-guide-dismissed")
-│               ├── trackingShared.ts # TrackingStartError, sensitivity bounds, flick/deadzone/fist thresholds (quoted by the
-│               │                     #   guide), importable without loading MediaPipe
-│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist/flick gestures, near-miss
-│               │                   #   flick coaching (lazy-loaded)
+│               │                   #   on read; guide "Don't show again" per mode ("bird-flight-guide-dismissed"); the saved
+│               │                   #   hand calibration ("bird-flight-calibration", validated on read)
+│               ├── trackingShared.ts # TrackingStartError, sensitivity bounds, calibration types/limits, DEFAULT_BOX,
+│               │                     #   flick/deadzone/fist thresholds (quoted by the guide); importable without MediaPipe
+│               ├── trackingMath.ts # pure steering math: axisValue, applyDeadzone, applySensitivity, computeBox,
+│               │                   #   validateCalibration (tracker, calibration UI, saved-calibration check, tests)
+│               ├── flickDetector.ts # pure backflip detector (box-relative flick, near-miss coaching, pitch hold)
+│               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist gesture + steering guard,
+│               │                   #   flick detector wiring (lazy-loaded)
+│               ├── *.test.ts       # Vitest unit tests (next to the module they test)
 │               ├── keyboardControls.ts # keyboard input → the same HandControlState (ramped axes, Space boost, F backflip)
 │               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
@@ -198,8 +212,8 @@ The game needs **no secrets, no backend and no database**.
 │               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
 │               ├── underwater.ts   # reef/fish/shark/caustics/bubbles (lazy-built)
 │               ├── clouds.ts       # flyable cloud clusters in the flight corridor
-│               ├── rings.ts        # Ring Challenge spawning + hit test
-│               ├── ringGuide.ts    # arrow pointing to nearest ring
+│               ├── rings.ts        # Ring Challenge spawning, hit test, next-ring selection + highlight
+│               ├── ringGuide.ts    # arrow pointing (smoothly) at the next ring
 │               ├── ringBurst.ts    # star-burst particles (custom ShaderMaterial)
 │               ├── waterBurst.ts   # surfacing droplet particles (copy of ringBurst, retuned)
 │               ├── splash.ts       # skimming spray particles (PointsMaterial – fade is broken)
@@ -254,7 +268,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   4. Call `video.play()`, then await the tracking module.
   5. Construct `new HandTracker(video, onUpdate)` and register it in `trackerRef`.
   6. `await tracker.start(onProgress)` loads the files, runs a warm-up frame, and starts the loop. `onProgress` reports the real download fraction.
-  7. Hold for `max(BOOT_READY_HOLD_MS 550, BOOT_MIN_DURATION_MS 1100 − elapsed)`, then switch to `'calibrating'`. The minimum is 0 under reduced motion. This hold is the only added time in the whole boot: it lets the typed lines finish and READY register, and adds at most ~1.1 s.
+  7. Hold for `max(BOOT_READY_HOLD_MS 550, BOOT_MIN_DURATION_MS 1100 − elapsed)`. The minimum is 0 under reduced motion. This hold is the only added time in the whole boot: it lets the typed lines finish and READY register, and adds at most ~1.1 s.
+  8. If `loadCalibration()` returns a valid saved calibration and the landing's **Recalibrate** didn't set `forceCalibrationRef`: apply it (`tracker.applyCalibration`, the calibration points ref, step 5, `calibrationRestored`), set the boot's calibration line to `saved`, and call `requestTakeoff()` (guide or straight to takeoff, from `'requesting'`). Otherwise switch to `'calibrating'`, starting from the saved sensitivity if there is one.
 
   Each step also updates `boot: BootStatus` (camera, resolution, model state and percent, calibration, `startedAt`). `buildBootLines()` turns that plus any error into the boot HUD's lines. A local `phase` (`camera` until the video plays, then `model`) is recorded on the error as `StartupError.phase`, and picks the line the error is reported under. The engine-chunk failure in `handleStartFlying` uses phase `engine`, which adds a `FLIGHT ENGINE [FAILED]` line.
 
@@ -271,8 +286,10 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   | (engine chunk import failed, set directly in `handleStartFlying`) | `engine-load-failed` |
 
   Each kind has its own text in `STARTUP_ERROR_MESSAGES`. `needsReload` is set when a code chunk import failed (the engine, or the tracking module while `chunkImport` is true). Chromium caches a failed dynamic `import()` for the page's lifetime, so retrying in place can't work, and the boot HUD's button becomes **Reload page**.
-- **Takeoff request.** Start Flying and the end of the keyboard boot both call `requestTakeoff()`. It opens the guide (`guide = 'preflight'`) if `shouldAutoShowGuide(mode)`, otherwise calls `handleStartFlying()`. The guide's **Take off** stores "Don't show again" if ticked, then calls `handleStartFlying()`. `startKeyboardPreflight` reaches `requestTakeoff` through `requestTakeoffRef`, since it's created first. `handleStartFlying` reads the bird/map/weather/rings/controls from `settingsRef.current`, never from its closure (a Quick start may have changed them). In keyboard mode it creates and starts `KeyboardControls` once `engine.start()` resolves.
+- **Takeoff request.** Start Flying (through `handleCalibratedTakeoff`, which re-validates and `saveCalibration()`s the points and sensitivity first), the end of the keyboard boot, and the end of a hand boot with a saved calibration all call `requestTakeoff()`. It opens the guide (`guide = 'preflight'`) if `shouldAutoShowGuide(mode)`, otherwise calls `handleStartFlying()`. The guide's **Take off** stores "Don't show again" if ticked, then calls `handleStartFlying()`. Its **Back** in hand mode closes the guide and, if a saved calibration skipped the calibration screen (`flightState` still `'requesting'`), opens it (`'calibrating'`, with the saved box loaded). `startKeyboardPreflight` reaches `requestTakeoff` through `requestTakeoffRef`, since it's created first. `handleStartFlying` reads the bird/map/weather/rings/controls from `settingsRef.current`, never from its closure (a Quick start may have changed them). In keyboard mode it creates and starts `KeyboardControls` once `engine.start()` resolves.
 - **Pause.** An effect keyed on `paused` calls `engine.setPaused()` and `keyboard.setPaused()`, and clears any flick hint. One window `keydown` handler takes Esc: it closes the guide (in pre-flight, as its Back), or toggles the pause menu in flight. The same handler opens the guide on `?`. A `visibilitychange` to hidden opens the pause menu. While paused the HUD is `inert`, and so is the pre-flight screen behind the pre-flight guide.
+- **Recalibrate from the pause menu** (hand mode, `handleRecalibrate`): disposes the engine but keeps the session, the camera stream and the `HandTracker` (no session-id bump). It resets the HUD state and score, turns the landing backdrop back on (the engine's WebGL context is already released, so there's still one context), and switches to `'calibrating'` with the current points still loaded. Start Flying builds a new engine exactly like the first takeoff.
+- **Calibration state in App.** Points live in `calibrationPointsRef` (the preview rAF and drag handlers read it). `calibrationProblems` (state plus a ref for the rAF) is recomputed with `validateCalibration(center, computeBox(corners))` on every capture, drag move and reset. `calibrationRestored` marks points loaded from storage, and `calibrationSaved` (re-read on returning to the landing) drives the landing's Recalibrate button.
 - **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
 - **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
@@ -293,12 +310,13 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Screen effects.** The boost motion blur, the surfacing flash and the underwater tint are **CSS overlays in `App.tsx`**, not post-processing. There is no `EffectComposer`.
 
 ### 6.2 Flight physics and camera (`GameEngine.update`)
-- `currentPitch` and `currentRoll` chase the tracker's targets with a per-frame lerp of 0.06, then scale by max angles of 38° pitch and 48° roll.
+- **Every smoothing is frame-rate independent:** `value += (target - value) * damp(RATE, dt)` with `damp = 1 - exp(-rate·dt)` (`damping.ts`). Each rate is written as `perFrameRate(oldFactor, 60)`, so the feel at 60 FPS is exactly the old per-frame lerp, and 30/144 Hz now match it. Unit-tested in `damping.test.ts`.
+- `currentPitch` and `currentRoll` chase the tracker's targets at `ORIENTATION_RATE` (0.06 per frame at 60 FPS), then scale by max angles of 38° pitch and 48° roll.
 - **Steering and visual angles are separate.** Heading, the forward vector and movement use only `steeringPitchAngle`/`steeringRollAngle`. The mesh rotation uses `visual*Angle`, which adds the 360° trick sweep. **Never merge these.** See `.agents/memory/decouple-visual-sweep-from-physics.md`.
 - **Turning.** `headingYaw -= steeringRoll * dt * 0.6`, and the heading is locked while a barrel roll is in progress.
 - **Speed.**
   - Base speed is 9 and boost is 20. Underwater they're 5 and 10.
-  - Speed lerps toward its target at 0.04 per frame, or 0.02 underwater.
+  - Speed chases its target at `SPEED_RATE` (0.04 per frame at 60 FPS), or `UNDERWATER_SPEED_RATE` (0.02).
   - Collecting a ring adds a +7 pulse that decays at 9/s.
 - **Altitude.**
   - Over solid ground (mountains or islands) the floor is `height + 3.5`.
@@ -306,10 +324,10 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Over open water the only floor is `SEABED_FLOOR_Y = -15`.
   - The ceiling is y = 140.
   - The bird starts at (0, 26, 0) heading +Z.
-- **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, with a per-frame lerp of 0.05 (0.03 underwater).
+- **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, chasing at `CAMERA_RATE` (0.05 per frame at 60 FPS; 0.03 underwater). FOV chases at `FOV_RATE` (0.06).
 - **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` to false, so the bird eases back to level cruise instead of latching the last input.
-- **Timing.** `dt` is clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
-- **Pause.** `setPaused(true)` cancels the rAF loop, so there's no update and no render and the canvas holds the last frame. It also suspends the wind `AudioContext`, and `applyControls` returns early (input can't steer, boost or start a trick behind the menu). `setPaused(false)` discards the paused time with `clock.getDelta()` and restarts the loop. A resize while paused re-renders the held frame once. Before `start()` has finished, `setPaused` only records the flag, and `start()` honors it (so two loops are never scheduled).
+- **Timing.** A `THREE.Timer` (not the deprecated `Clock`), connected to the document so a hidden tab yields a zero delta; `loop` calls `timer.update().getDelta()`. `dt` is still clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
+- **Pause.** `setPaused(true)` cancels the rAF loop, so there's no update and no render and the canvas holds the last frame. It also suspends the wind `AudioContext`, and `applyControls` returns early (input can't steer, boost or start a trick behind the menu). `setPaused(false)` discards the paused time with `timer.reset()` and restarts the loop. A resize while paused re-renders the held frame once. Before `start()` has finished, `setPaused` only records the flag, and `start()` honors it (so two loops are never scheduled).
 - **Wing flaps.** Flap rate is mapped from speed onto 7–17, times 0.55 when gliding in a dive (pitch below -0.15 and not boosting), and uses a gentle paddle stroke underwater.
 
 ### 6.3 Hand tracking (`handControls.ts`)
@@ -333,33 +351,45 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   1. Compute the palm center, the mean of landmarks 0, 5, 9, 13 and 17.
   2. The palm center is the only tracked point. Finger mode was removed.
   3. Mirror X as `1 - x`, so the steering matches the mirrored "selfie" preview.
-  4. Smooth with an EMA, α = 0.35 per frame.
+  4. Subtract the closed-fist offset (see **Fist steering guard**), then smooth with a frame-rate independent EMA, `damp(SMOOTHING_RATE, frameDt)` where the rate is the old 0.35 per frame at a webcam's 30 FPS. The EMA is **not updated** while the fist guard holds the steering sample.
   5. Map onto -1..1 **within the calibrated box** with `axisValue()`. Each side of the center uses its own asymmetric extent.
   6. Apply a normalized deadzone of 0.06, rescaled so there's no jump at its edge.
-  7. Multiply by sensitivity (0.5–2.0) and clamp to ±1.
+  7. Apply the sensitivity (0.5–2.0) as a response curve, `applySensitivity(v, s) = s·v / (1 + (s − 1)·|v|)`. It keeps 0 → 0 and ±1 → ±1, so a box corner is full deflection at every sensitivity, and its gain at the center is `s`. At 0.5x the edge is still 1 (the middle of the box reads 0.33), and at 2x it doesn't saturate mid-box (the middle reads 0.67). The old plain multiply got both of those wrong.
+  8. Feed the raw palm Y to the `FlickDetector`, which returns the pitch to output (the steering pitch, or the held pre-flick value).
+
+  Frame times come from `frameStartMs`, taken in `processFrame` when a new video frame is picked up, *before* `hands.send()`. So MediaPipe's variable inference time doesn't jitter the flick speeds or the EMA. The warm-up frame falls back to `performance.now()`.
 - **Box calibration.**
   - `captureNeutralCenter()` and `captureCorner()` snapshot the smoothed point.
-  - `recomputeBox()` averages the two corners that share a side, so the left edge is the mean of `topLeft.x` and `bottomLeft.x`.
-  - `setCorner()` sets a corner directly and backs the drag-to-fine-tune feature.
-  - Default box: x 0.24–0.76, y 0.28–0.72.
+  - `computeBox()` (`trackingMath.ts`, pure) averages the two corners that share a side, so the left edge is the mean of `topLeft.x` and `bottomLeft.x`, and keeps a side at its default until both of its corners exist.
+  - `setCorner()` sets a corner directly and backs the drag-to-fine-tune feature. `applyCalibration(data)` restores a saved center + 4 corners + sensitivity. `getCalibrationProblems()` runs `validateCalibration`.
+  - Default box (`DEFAULT_BOX` in `trackingShared.ts`, also the calibration screen's ghost-reticle hints): x 0.24–0.76, y 0.28–0.72.
+  - **Validation** (`validateCalibration`): the box must be at least `MIN_BOX_SIZE` (0.15 of the frame) on each axis, so an inside-out box with left and right swapped fails too. The center must sit inside it with at least `MIN_CENTER_MARGIN` (0.15 of the box's span) on every side. The problems are `box-too-narrow`, `box-too-short` and `center-outside`.
+  - **Persistence** (`settings.ts`): `saveCalibration` writes `{version: 1, center, corners, sensitivity}` to `bird-flight-calibration` at Start Flying. `loadCalibration` rejects anything that isn't four finite 0..1 corners plus a center, or that fails validation, and clamps the sensitivity.
 - **Boost (fist).**
   - `fistRatio` is the mean fingertip-to-palm distance divided by the wrist-to-middle-MCP distance.
   - The fist closes below 0.62 and opens above 0.8, with 3 frames of hysteresis in each direction.
   - Hand loss resets `fistActive`, so boost can't come back latched when the hand reappears.
-- **Backflip (upward flick).**
-  - The thresholds (`FLICK_WINDOW_MS` 220, `FLICK_MIN_DISTANCE` 0.1, `FLICK_MIN_VELOCITY` 1.1, `BACKFLIP_COOLDOWN_MS` 1200) live in `trackingShared.ts` because the guide quotes them.
-  - Keeps a 220 ms rolling history of the **raw**, unsmoothed Y.
-  - It fires when the point has moved up more than 0.1 at more than 1.1 frame-heights/s, with a 1200 ms cooldown.
-  - **The speed is measured from the oldest sample in the window**, so once the hand has been in view for a moment it is `rise / ~0.22 s`, not rise / (time the snap took). From a still hand, a backflip therefore needs the palm to rise **~24% of the frame height within 0.22 s** (`FLICK_STILL_HAND_DISTANCE`). The 0.1 minimum only decides right after the hand reappears. The guide says "at least a quarter of the frame, within 0.2 s".
-  - It needs at least 2 samples inside 220 ms, so it can't fire if the tracker runs below ~4.5 FPS (a webcam runs at 30).
+- **Fist steering guard** (`updateFistGuard`). Curling the fingers moves the knuckles, so the palm center shifts as a fist closes or opens (in the simulated hand, 0.016 of the frame, ~0.07 of a default half-box of pitch).
+  - While the fist ratio changes faster than 1.5/s (measured over ≥ 60 ms), or the open/closed state is mid-hysteresis, the steering sample is **held**: the EMA isn't updated.
+  - When the hand settles (90 ms without that motion), a *closing* transition stores the palm shift since the transition began (capped at 0.06 of the frame) as an offset, subtracted from the steering point while the fist stays closed. Opening clears it.
+  - A hold never lasts more than 450 ms, and a hold that hit the limit isn't restarted until the fist motion stops, so steering can't freeze.
+- **Backflip (upward flick)**, `flickDetector.ts` (pure, unit-tested at 15–60 Hz).
+  - Everything is in **heights of the calibrated box** (`rawY / boxHeight`), not the camera frame, so the gesture scales with the range the player steers in.
+  - The thresholds live in `trackingShared.ts` because the guide quotes them: `FLICK_WINDOW_MS` 250, `FLICK_MIN_RISE` 0.35 box, `FLICK_SPEED_SPAN_MS` 50, `FLICK_MIN_SPEED` 3.5 box/s, `BACKFLIP_COOLDOWN_MS` 1200.
+  - Each sample gets a **short-span speed**: the rise over the most recent step back that spans ≥ 50 ms (2 frames at 30 FPS, 3 at 60), steady against single-frame jitter.
+  - A backflip fires when, **over the 250 ms window**, the rise from its lowest point reaches 0.35 box **and** the peak of those speeds reaches 3.5 box/s. They're judged over the window, not on the same frame, because a flick's speed peaks mid-snap, before it has risen far enough. Requiring both on one frame made a 0.4-box flick at 60 Hz fire only 17 of 40 times.
+  - Tuning (smooth snap of d box in T s peaks at ≈ 1.5·d/T): a natural half-box flick in 0.15 s peaks near 5 box/s and fires ~0.1 s in, every time from 15 to 60 Hz, even with ±10% frame jitter. A 0.2 s one fires reliably at webcam rates. Steering stays below the speed: center to the top edge in 0.35 s peaks ≈ 2.1, and even a full bottom-to-top sweep in 0.45 s (≈ 3.3) never fires at any rate. A closing fist moves the palm < 0.1 box. A threshold of 3.2 would let that 0.45 s sweep fire.
+  - `FLICK_TIP_RISE` (½ box) and `FLICK_TIP_SECONDS` (0.2 s, derived as the longest a ½-box snap may take to reach the speed) are what the guide and the "Flick higher" hint recommend.
+- **Pitch-spike suppression.** A flick is also a big, fast climb input. Once the current stroke's speed passes the near-miss bar (0.75 × 3.5 ≈ 2.6 box/s, above normal steering), the detector returns the pitch from just before the stroke instead of the live one.
+  - A stroke that fired keeps the hold until 450 ms after it ends, which also covers the hand dropping back.
+  - One that doesn't fire is released at its end, or 250 ms after it started, whichever is first, so a very fast steering sweep is delayed a fraction of a second at most.
+  - The first ~50 ms before the hold engages still pass through. After the engine's orientation smoothing, the bird's pitch peaks at ~0.02 during a flick, versus > 0.5 without the hold.
 - **Near-miss coaching** (`trackStroke` / `finishStroke`):
-  - Each upward stroke of the raw Y (from when it starts rising until it drops back 0.02 or makes no new high for 120 ms) is scored once, when it ends.
-  - A stroke that fired no backflip, rose ≥ 0.06, and peaked ≥ 64% of the flick speed reports `flickNearMiss`:
-    - `too-slow` ("Flick faster ↑") if it rose ≥ `FLICK_STILL_HAND_DISTANCE` in total
-    - otherwise `too-short` ("Flick higher ↑")
-  - Hints are rate-limited to one per 2.5 s and suppressed during the backflip cooldown. Steering (up to ~0.6 frame-heights/s) and jitter never trigger one.
+  - Each upward stroke of the raw Y (from when it starts rising by > 0.01 box between frames until it drops back 0.05 box or makes no new high for 120 ms) is scored once, when it ends.
+  - A stroke that fired no backflip, rose ≥ 0.6 × 0.35 box within a window and peaked ≥ 0.75 × 3.5 box/s reports `flickNearMiss`. It's `too-slow` ("Flick faster ↑") if its speed fell further short than its rise, otherwise `too-short` ("Flick higher ↑").
+  - Hints are rate-limited to one per 2.5 s and suppressed during the backflip cooldown. Steering (center to top in 0.35 s peaks ≈ 2.1 box/s) and jitter never trigger one.
   - App shows the hint for 1.8 s, only while flying and not paused.
-  - **Fallback:** if the hand vanishes within 300 ms of a fast flick, the tracker emits `backflip: true` with `handDetected: false`. `GameEngine.applyControls` checks `backflip` **before** its `if (!handDetected) return` guard, so don't reorder these. See `.agents/memory/gesture-fallback-before-detection-guard.md`.
+  - **Fallback:** if the hand vanishes within 300 ms of a fast (≥ 3.5 box/s) upward stroke that had already risen half the minimum, the tracker emits `backflip: true` with `handDetected: false` (`FlickDetector.handLost`). `GameEngine.applyControls` checks `backflip` **before** its `if (!handDetected) return` guard, so don't reorder these. See `.agents/memory/gesture-fallback-before-detection-guard.md`.
 - **Robustness.**
   - A `stopped` flag guards `send()` after `stop()`, which avoids MediaPipe's "deleted object" wasm race.
   - Per-frame `send()` errors are logged and swallowed, never re-thrown.
@@ -372,7 +402,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Canvas text** (reticle labels such as `TL`) is drawn pre-flipped around its anchor (`drawMirroredLabel`), so it reads correctly after the CSS mirror.
 - **The overlay** (calibration only), drawn in this order:
   1. an ink wash
-  2. the box (dashed, faint fill)
+  2. the box (dashed, faint fill), in the fault color when `overlay.invalid` (the finished calibration fails validation)
   3. the current step's ghost reticle at `CalibrationStep.hint` (the tracker's default box corners, a suggestion only)
   4. captured corners as warm bracket reticles (the drag handles)
   5. the captured center as a cyan crosshair
@@ -417,9 +447,12 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Spawning.**
   - The first ring spawns immediately, 42 units dead ahead.
   - After that, one spawns every 2.1 s, 55–80 units ahead along the *current* forward vector.
+  - When no ring is ahead (the bird turned away from all of them), one spawns at once; if all 6 slots are taken, the oldest ring (none of them is ahead) is recycled to make room.
   - Rings are offset laterally and vertically on a sine curve (phase +0.85 per ring).
   - Rings are clamped to at least 8 above the ground, with at most 6 active.
-- **Hit test.** In the ring's own frame: axial distance under 2.2 and radial distance under 3.4.
+- **Hit test.** `ringFrame()` measures the bird in the ring's own frame (`axial` along the ring's normal, negative while short of the plane; `radial` from its axis). `isRingHit`: |axial| under 2.2 and radial under 3.4. `isRingPassed`: axial over 2.2, i.e. the bird crossed the plane outside the hoop; the ring is then flagged `missed` for good (it can still be collected by flying back through it, but is never targeted again).
+- **Next ring** (`selectNextRing`, pure and unit-tested): the earliest-spawned ring (`active` is kept in spawn order) that isn't `missed` and whose center is no more than 3 units behind the bird along its **horizontal heading**. So collecting or missing the target moves it to the following ring, and after a sharp turn rings that fell behind are skipped (turning back makes an earlier ring ahead, and the target, again). Recomputed every frame after the hit/miss/despawn pass.
+- **Highlight.** The target's torus and glow disc swap to their own materials in the `NEXT_RING_HIGHLIGHTS[map][weather]` color (one table in `presets.ts` for all 6 combinations: magenta, cyan, mint, violet or pink, chosen to contrast with that palette and with the gold of the other rings). Its emissive intensity breathes 1.0–1.7, its scale pulses ±7%, and a shared additive halo torus is re-parented onto it. Other rings keep the gold, dimmed (emissive 0.55, glow opacity 0.2).
 - **Despawn.** A missed ring is recycled once it is 40 units *past* along its own normal (`axialDist > 40`; `delta` points from the ring to the bird), **or** once it is more than 120 units from the bird in any direction. The distance check covers turns and U-turns.
   - Before this fix the sign was inverted (`< -40`), so every ring spawned 42+ units ahead was recycled in the frame it spawned. Ring Challenge never showed a ring.
   - Clouds use the same two-part rule: past 60 axially, or more than 240 away. Reef items do too: past 42 axially, or more than 80 away horizontally.
@@ -429,7 +462,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - the chime
   - a star burst
   - `onScoreChange`, which calls `saveBestScoreIfHigher` on **every** ring
-- `RingGuideArrow` floats above and ahead of the bird and uses `lookAt()` to point at the nearest active ring.
+- `RingGuideArrow` floats above and ahead of the bird, in the highlight color, and turns toward `getNextRingPosition()` by slerping its quaternion (`damp(7, dt)`), so a retarget swings smoothly. It is modelled along local **+Z**: `Object3D.lookAt` (and `Matrix4.lookAt(target, eye, up)`, which it mirrors) turns a non-camera object's +Z toward the target. Before this, it was modelled along −Z and pointed *away* from the ring.
+- **HUD readout.** `GameEngine.getNextRingDistance()` (straight-line, world units = meters) is written by the HUD's telemetry rAF under the ring score as `NEXT RING 84 m`, next to a marker in the highlight color; `—` when there's no target.
 
 ### 6.8 Audio (`audio.ts`)
 - `WindAudio` plays 2 s of looping white noise through a lowpass filter and a gain node. Filter cutoff and gain follow a speed ratio that its own rAF feeds in with `setTargetAtTime`. It is muted underwater.
@@ -464,7 +498,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - ←/→ step the bird only while chapter 1 is active.
   - **Sound** starts a `WindAudio` from the toggle's click. Its intensity follows the vertical speed, and it's stopped on unmount.
 - **Reduced motion** (`prefers-reduced-motion: reduce`, read live by `usePrefersReducedMotion`): no scrub, no snapping, no intro choreography and no parallax. Chapters activate when centered, and the backdrop *cuts* to that chapter's shot (`setProgress(p, true)`) behind a quick fade. Reveals are opacity-only, bird/map/sky swaps are instant, and the bird's weave is reduced. Changing the setting rebuilds the scene.
-- **Settings.** `settings.ts` persists `{bird, map, weather, ringChallenge}` under `bird-flight-settings` when pre-flight begins, and validates every field on read. The landing starts from the saved choices, and **Quick start** uses them.
+- **Settings.** `settings.ts` persists `{bird, map, weather, ringChallenge}` under `bird-flight-settings` when pre-flight begins, and validates every field on read. The landing starts from the saved choices, and **Quick start** uses them. With a saved hand calibration (`bird-flight-calibration`, §6.3), hand mode's Begin button reads "Camera · saved calibration", and a **Recalibrate hand controls** button under it begins pre-flight with `{recalibrate: true}`, which opens the calibration screen even though a saved calibration exists.
 
 ### 6.11 Pre-flight boot HUD, flight HUD and takeoff (`preflight/BootSequence.tsx`, `flight/FlightHud.tsx`, `App.tsx`)
 - **Boot HUD.** `BootSequence` is presentational: App passes `lines` (from `buildBootLines`), the error line/message/detail, `startedAt` and `running`.
@@ -497,7 +531,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Guide** (`FlightGuide`):
   - Hand mode has 4 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick). Keyboard mode has 4: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Pause (Esc / ?).
   - Each card has an illustration, the input, one precise tip, and a small mono line with the exact numbers.
-  - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick thresholds), `presets.ts` (speeds in knots, trick durations) and `keyboardControls.ts` (ramp). Change those constants, never the copy.
+  - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick thresholds and the recommended `FLICK_TIP_RISE`/`FLICK_TIP_SECONDS`), `presets.ts` (speeds in knots, trick durations) and `keyboardControls.ts` (ramp). Change those constants, never the copy. The FlightHud "Flick higher" hint uses the same `FLICK_TIP_RISE` through `describeBoxFraction`.
+  - The Backflip card: "Snap your open palm straight up about half the height of your calibrated box, in one quick motion of 0.2 s or less", with the spec "Needs ≥ 35% of your box within 250 ms, peaking > 3.5 box-heights/s · 1.2 s cooldown". Its art draws the calibrated box as a dashed rectangle, 54 units tall, so the 27-unit `ascent-guide-flick` travel reads as half of it. The Steer card says a corner is full deflection "at any sensitivity", and the Boost card says steering holds still while the fist closes.
   - **Buttons by origin:**
     - `'preflight'`: **Take off** (primary), **Back** (to calibration / to landing) and **Don't show again**
     - `'pause'`: **Back to pause menu**
@@ -513,15 +548,17 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Use one manager class per system**, with the same lifecycle: `constructor(scene)`, then `update(dt, birdPosition, forward, …)` every frame, then `dispose()`. `GameEngine.update` calls them in order. New systems should follow this shape.
 - **Pool and stream around the bird.** Objects spawn ahead of the bird along `forward` and are reused through `visible = false` and a pool array. They're recycled once they're some distance *behind* along their spawn-time forward, **or** beyond a max distance from the bird. Always include the distance cap, or a U-turn can fill the pool with unreachable objects and stop spawning. Terrain and ocean tiles are keyed by `"x,z"` strings.
 - **Tune with constants at the top of each file**, in `UPPER_SNAKE_CASE` with a comment explaining the *why*. Change these rather than inlining magic numbers.
+- **Smoothing is per second, never per frame.** Use `x += (target - x) * damp(RATE, dt)` from `damping.ts`. When you port an old per-frame factor, write the rate as `perFrameRate(factor, referenceFps)` so its origin stays visible. For slerps, use `quaternion.slerp(target, damp(RATE, dt))`.
+- **Keep testable logic pure.** Tracking math (`trackingMath.ts`), the flick detector (`flickDetector.ts`) and ring selection and hit tests (`rings.ts` exports) have no MediaPipe or DOM dependency, so Vitest can run them in Node. New gesture or scoring logic should follow that pattern and come with a `*.test.ts` next to it.
 - **Generate assets procedurally.** Meshes are built from three primitives with `flatShading: true`, textures from `<canvas>`, and sound from Web Audio. There are no binary assets, and it's worth keeping it that way.
 - **Comments are dense and explain intent**, often pointing to `.agents/memory/*`. Match that density in `src/game/`.
 - **Style:**
   - 2-space indent, single quotes, semicolons, trailing commas, about 120 columns.
   - Prettier is installed but there's no config file, so defaults apply apart from the quote style already used in the code.
-  - There's no ESLint and **no tests**.
+  - There's no ESLint. Unit tests are Vitest (`pnpm test`), for the pure modules only. There are no component or browser tests.
 - **Imports.** Use the `@/` alias for `src`. Use `import * as THREE from 'three'`. Put `type` imports inline, as in `import { Bird, type BirdType }`.
 - **React style.** One big `App` function component. Every handler is wrapped in `useCallback`. Refs mirror state that the long-lived tracker closure needs to read, such as `barrelRollingRef`. Styling is Tailwind utility classes with inline styles for gradients. There's no component library: the shadcn scaffold was removed. Theme tokens such as `bg-card` and `text-primary` still come from `index.css`.
-- **Verification habit:** always run `pnpm run build` from the root, which also typechecks, and check visual changes in a real browser with a webcam.
+- **Verification habit:** always run `pnpm test` and `pnpm run build` from the root (the build also typechecks, tests included), and check visual changes in a real browser with a webcam.
 - **Styling.** The landing, the pre-flight screens and the in-flight HUD share one cinematic, instrument-panel look:
   - dark glass (`ascent-glass`, `ascent-glass-strong`)
   - `ascent-hud` monospace caps for labels and readouts
@@ -565,6 +602,7 @@ There is no Replit DB, Replit Auth or Replit secrets usage anywhere. The game is
 These come from code reading plus headless runs.
 
 **Fixed so far, and removed from this list:**
+- **Ring guidance + controls feel PR:** the arrow pointed at the *nearest* ring (and, being modelled along −Z, actually pointed *away* from it); frame-rate-dependent lerps and `THREE.Clock` (#1, #16); the fist nudging steering, the flick pitch spike, unvalidated calibration and the sensitivity gain (#2); no tests (#20, partly); the frame-relative, window-averaged flick (#29).
 - **Standalone cleanup (earlier PR):** env vars were required, installs only worked on linux-x64, template scaffolding, and a placeholder meta description.
 - **P0 correctness pass:**
   - steering and boost latched on hand loss
@@ -581,12 +619,8 @@ These come from code reading plus headless runs.
   - the Index Finger mode
 
 ### Gameplay and control bugs
-1. **Frame-rate-dependent feel.** Every lerp (orientation 0.06, speed 0.04, camera 0.05, FOV 0.06, the tracker EMA 0.35, fish-school lerp 0.02) is per frame, not scaled by `dt`. The game behaves differently at 30, 60 and 144 Hz. Separately, `dt` is clamped to 0.05, so below 20 FPS everything runs in slow motion.
-2. **Gestures that interfere with steering:**
-   - Closing a fist shifts the palm-center landmarks slightly, so boosting nudges steering.
-   - An upward flick is also a large pitch-up input.
-   - A center captured outside the corner box makes `axisValue()` return 0 on that side, silently disabling steering in that direction.
-   - Sensitivity is applied after the box mapping. At 0.5x the bird can never reach full pitch or roll, and at 2x it saturates at the middle of the box.
+1. ~~**Frame-rate-dependent feel.**~~ Every lerp is now `damp(rate, dt)`, tuned to match the old per-frame factors at 60 FPS (the tracker EMA at 30). Still open: `dt` is clamped to 0.05, so below 20 FPS everything runs in slow motion.
+2. ~~**Gestures that interfere with steering.**~~ Fixed: the fist steering guard, flick pitch suppression, calibration validation, and the sensitivity response curve (§6.3). Remaining edge: the fist guard's closed-fist offset is capped at 0.06 of the frame, so a hand with a much bigger knuckle shift would still nudge steering by the excess. The flick hold lets the first ~50 ms of a flick's climb through (≈ 0.02 of pitch at the bird).
 3. **Reef items float mid-water.** Reef items spawn at a random depth between -13 and -4, not on the seabed, and there is no visible seabed mesh, only caustic rings at y = -14. Coral heights use `geometry.boundingSphere`, which is always null because it's never computed, so the offset is always 0.8. Pooled reef items keep their original `kind`.
 4. The skimming splash particles don't fade (the `PointsMaterial` issue in §6.9).
 5. **Surface-level island pop.** A bird skimming *above* the water that flies into an island is still lifted to `height + 3.5` in one frame. Near the shore that's about 3.5 units. Only the underwater case was fixed.
@@ -597,7 +631,7 @@ These come from code reading plus headless runs.
 8. **Cryptic load-error detail.** When a MediaPipe file 404s, the detail under the friendly message is minified MediaPipe internals such as `TypeError: jt is not a function`. The friendly message is correct, but the detail line doesn't help users.
 9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
 28. **A failed chunk import can't be retried in place.** Chromium caches a failed dynamic `import()` for the page's lifetime. So when the engine or tracking chunk fails to download, the boot HUD offers **Reload page** instead of Try Again. Other failures (camera, MediaPipe wasm/model loads) keep Try Again. Recovery after a denied camera is verified; recovery after a MediaPipe asset failure is not.
-29. **Flick detection is frame-rate sensitive.** Below ~4.5 tracker FPS, the 220 ms window holds a single sample and no flick can register (see §6.3). Headless SwiftShader sits right at that edge.
+29. **Flick detection at low tracker rates.** The flick is reliable from 15 Hz up (unit-tested with ±10% frame jitter). Around 10 Hz a 0.15 s flick fires only about half the time, because a single 100 ms step averages away its peak speed, and slower (0.2 s) flicks need ≥ 30 Hz to be dependable. Headless SwiftShader in flight runs the tracker at ~15 Hz at 640×360, and at less at larger viewports.
 
 ### Performance
 10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole `App` during flight. React bails out of identical values, but any change re-renders App and the HUD. The flight telemetry avoids this (refs plus rAF), and boot progress re-renders at most once per whole percent.
@@ -608,13 +642,13 @@ These come from code reading plus headless runs.
 15. **Large downloads.** The entry chunk is 908 kB (264 kB gzip: React, three, GSAP). MediaPipe's JS and the engine are now split out and only loaded at pre-flight, but each session still downloads about 13 MB of MediaPipe files.
 
 ### three.js deprecations (seen in the console on r185)
-16. `THREE.Clock` is deprecated in favor of `THREE.Timer`.
+16. ~~`THREE.Clock` is deprecated in favor of `THREE.Timer`.~~ `GameEngine` uses `THREE.Timer`.
 17. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
 
 ### Tech debt
 18. **A god component and a god class.** The screens now live in `preflight/` and `flight/`, and canvas drawing in `handPreview.ts`. `App.tsx` still owns the tracker lifecycle, the calibration state machine, boot status and the takeoff timelines. `GameEngine.update` is a roughly 190-line function.
 19. **Duplication.** `ringBurst.ts` and `waterBurst.ts` are near-copies. `TerrainManager` and `OceanManager` duplicate the tiling logic with no shared interface type.
-20. **No tests, no lint and no CI.** The pure math in `axisValue`, `applyDeadzone`, `recomputeBox`, the flick detector, the ring hit test and despawn, and `classifyStartupError` is easy to unit-test and currently isn't. The ring despawn sign bug shipped unnoticed for exactly this reason.
+20. **No lint and no CI.** Vitest now covers `axisValue`, `applyDeadzone`, `applySensitivity`, `computeBox`, `validateCalibration`, the flick detector (30/60 Hz and sparse 15–60 Hz tracks), the ring hit test and next-ring selection, `damp`, and saved-calibration loading. Still untested: ring despawn inside `RingManager.update`, the fist steering guard (it lives in `HandTracker`, which needs MediaPipe), and `classifyStartupError`. Nothing runs the tests automatically.
 21. **Inconsistent naming.** The repo and root package are "Sky Soarer" / `sky-soarer`, the UI is "Bird Flight", the game package is `@workspace/3d-game`, and the localStorage key is `bird-flight-best-score`.
 22. **Stale `replit.md`.** It is kept as is by request (see the top of this file). It still describes Finger mode and the CDN.
 23. **Untested installs.** The macOS, Windows and ARM installs are expected to work now that the platform overrides are gone, but they haven't been tested yet.
@@ -633,10 +667,10 @@ These come from code reading plus headless runs.
 
 **P1: controls feel**
 
-3. Make all lerps frame-rate independent with `1 - Math.exp(-k * dt)`, and use `THREE.Timer`.
-4. While the fist is closing, freeze or hold the steering sample so boosting doesn't nudge steering.
-5. Validate calibration: the center must lie inside the box, and the box must have a minimum size. Offer a "use default box" quick start, and persist calibration in `localStorage` so returning players can skip it.
-6. Make flick detection relative to the calibration box size, and suppress the pitch spike it causes.
+3. ~~Make all lerps frame-rate independent with `1 - Math.exp(-k * dt)`, and use `THREE.Timer`.~~ Done.
+4. ~~While the fist is closing, freeze or hold the steering sample so boosting doesn't nudge steering.~~ Done (plus a closed-fist offset).
+5. ~~Validate calibration and persist it in `localStorage` so returning players can skip it.~~ Done, with Recalibrate on the landing and in the pause menu. Still open: a "use default box" quick start for first-time players.
+6. ~~Make flick detection relative to the calibration box size, and suppress the pitch spike it causes.~~ Done.
 7. Migrate from the legacy `@mediapipe/hands` to `@mediapipe/tasks-vision` `HandLandmarker`, which is maintained, supports a GPU delegate, and can run in a worker.
 
 **P2: performance**
@@ -658,7 +692,7 @@ These come from code reading plus headless runs.
 **P4: code quality**
 
 18. Add a `MapEnvironment` interface for Terrain and Ocean, split `App.tsx` into screens and hooks (`useHandTracker`, `useGameEngine`), and break `GameEngine.update` into named steps.
-19. Add Vitest unit tests for the tracker math, ring hit and despawn tests, and `classifyStartupError`. Add ESLint and Prettier configs, and a GitHub Actions workflow that runs `pnpm install --frozen-lockfile && pnpm run build` on Linux, macOS and Windows.
+19. ~~Add Vitest unit tests for the tracker math and ring hit tests.~~ Done (see §9 #20 for what's left: ring despawn, the fist guard, `classifyStartupError`). Add ESLint and Prettier configs, and a GitHub Actions workflow that runs `pnpm install --frozen-lockfile && pnpm test && pnpm run build` on Linux, macOS and Windows.
 20. Unify the naming (Sky Soarer vs Bird Flight), keeping the localStorage key backward-compatible.
 
 ---
@@ -679,6 +713,9 @@ These come from code reading plus headless runs.
 - Don't put Tailwind's plain `transition` utility (it includes `opacity` and `transform`) on elements GSAP animates (`data-hud`, `data-intro`, `data-reveal`). The CSS transition fights the tween and left the Sound button stuck at opacity 0. Use `transition-colors`.
 - Don't wrap text that has `ascent-shadow` in `overflow-hidden` masks. The clip turns the soft shadow into visible rectangles, so reveal it with opacity and a transform instead.
 - Don't fold the trick sweep into the steering angles (see memory note).
+- Flick thresholds are in **box heights** (`rawY / boxHeight`), and the rise and peak speed are judged **over the window**, not on one frame. If you retune them, run `pnpm test`: `flickDetector.test.ts` pins both "a natural half-box flick fires every time at 15–60 Hz" and "a 0.45 s full-range steering sweep never fires". Keep `FLICK_TIP_*` clearing both thresholds with room to spare, since the guide and the hints quote them.
+- Don't add per-frame lerp factors (`x += (t - x) * 0.05`). Use `damp(rate, dt)` (§7).
+- The ring guide arrow is modelled along **+Z** because `Object3D.lookAt` aims a non-camera object's +Z at the target. The target is the *next* ring (`RingManager.getNextRingPosition()`), never the nearest, and highlight colors live only in `NEXT_RING_HIGHLIGHTS`.
 - Don't move the `state.backflip` check below the `handDetected` guard in `applyControls`.
 - Don't re-throw from the per-frame `hands.send()` catch. Startup failures are different: `start()` surfaces them as `TrackingStartError` so the UI can show them.
 - Don't reintroduce `@mediapipe/camera_utils` or a CDN `locateFile`. The app owns the single `MediaStream`, and MediaPipe files are self-hosted. When bumping `@mediapipe/hands`, change only `package.json`, then check that the file list the plugin emits still matches what the new version requests.
@@ -699,4 +736,5 @@ These come from code reading plus headless runs.
   - SwiftShader runs at ~5 FPS at 1280×720 (the sim then runs at ~¼ speed). Shrink the viewport (e.g. 800×450) for physics and flick checks, and restore it for screenshots.
   - After a hint or overlay appears, wait ~0.7 s before a screenshot: its CSS fade-in hasn't produced a frame yet.
   - Playwright's role queries don't honor `inert`, so scope locators to the open dialog.
-  - Near-miss and flick thresholds are best checked deterministically: bundle `handControls.ts` with esbuild (`--alias:@mediapipe/hands=<stub>`, `--alias:virtual:mediapipe-hands-assets=<stub>`, `--define:import.meta.env.BASE_URL='"/"'`), stub `performance.now`, and call `handleResults` with synthetic landmarks at a fixed frame rate.
+  - Near-miss and flick thresholds are best checked deterministically: `FlickDetector` is pure, so extend `flickDetector.test.ts` (synthetic tracks at any frame rate, with jitter). The fist guard still lives in `HandTracker`: to check it outside a browser, bundle `handControls.ts` with esbuild (`--alias:@mediapipe/hands=<stub>`, `--alias:virtual:mediapipe-hands-assets=<stub>`, `--define:import.meta.env.BASE_URL='"/"'`), stub `performance.now`, and call `handleResults` with synthetic landmarks.
+  - In a browser, a simulated hand is easiest with Chromium's `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` plus the stubbed `@mediapipe/hands` deps module, whose `send()` evaluates a scripted `window.__handPose(now)` → `{x, y, closure}` and builds 21 landmarks from it (curl the fingertips toward the palm for a fist, and drop the MCPs slightly to reproduce the real palm-center shift). Wrap `HandTracker.prototype.handleResults` and `FlickDetector.prototype.update` from `import('/src/game/…')` to record outputs. After editing a module, restart the dev server before such runs: HMR gives edited modules `?t=` URLs, so a plain `import('/src/game/X.ts')` then gets a *second* module instance and the patches don't reach the app.

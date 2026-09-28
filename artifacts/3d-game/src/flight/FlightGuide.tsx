@@ -5,10 +5,13 @@ import { BACKFLIP_DURATION, BARREL_ROLL_DURATION, BASE_SPEED, BOOST_SPEED } from
 import {
   BACKFLIP_COOLDOWN_MS,
   FIST_HOLD_FRAMES,
-  FLICK_MIN_VELOCITY,
-  FLICK_STILL_HAND_DISTANCE,
+  FLICK_MIN_RISE,
+  FLICK_MIN_SPEED,
+  FLICK_TIP_RISE,
+  FLICK_TIP_SECONDS,
   FLICK_WINDOW_MS,
   STEERING_DEADZONE,
+  describeBoxFraction,
 } from '@/game/trackingShared';
 import { RAMP_UP_PER_SEC } from '@/game/keyboardControls';
 import type { ControlMode } from '@/game/settings';
@@ -26,12 +29,11 @@ const BOOST_KT = Math.round(BOOST_SPEED * MS_TO_KNOTS);
 const percent = (fraction: number) => `${Math.round(fraction * 100)}%`;
 const seconds = (value: number) => `${value.toFixed(1)} s`;
 
-// From a still hand, the backflip needs the palm to rise FLICK_STILL_HAND_DISTANCE of the frame
-// height (~24%) within one FLICK_WINDOW_MS window. The tip rounds that up to the nearest quarter
-// and the window down to a tenth of a second, so following it always clears the real threshold.
-const FLICK_TIP_FRACTION = Math.ceil(FLICK_STILL_HAND_DISTANCE * 4) / 4;
-const FLICK_TIP_SECONDS = Math.floor((FLICK_WINDOW_MS / 1000) * 10) / 10;
-const FLICK_TIP_LABEL = FLICK_TIP_FRACTION === 0.25 ? 'a quarter' : `${percent(FLICK_TIP_FRACTION)}`;
+// The backflip is measured in heights of the player's calibrated box: at least FLICK_MIN_RISE of it
+// within FLICK_WINDOW_MS, peaking above FLICK_MIN_SPEED box heights per second. The tip recommends
+// FLICK_TIP_RISE (half the box) within FLICK_TIP_SECONDS, which clears both with room to spare.
+const FLICK_TIP_LABEL = describeBoxFraction(FLICK_TIP_RISE);
+const FLICK_TIP_GLYPH = FLICK_TIP_RISE === 0.5 ? '½' : FLICK_TIP_RISE === 0.75 ? '¾' : percent(FLICK_TIP_RISE);
 
 interface Move {
   code: string;
@@ -51,17 +53,17 @@ const HAND_MOVES: Move[] = [
     title: 'Steer',
     input: 'Move your palm inside your box',
     art: <SteerArt />,
-    tip: `A corner of your calibrated box is full climb or dive plus full bank, and the middle ${percent(
+    tip: `A corner of your calibrated box is full climb or dive plus full bank at any sensitivity, and the middle ${percent(
       STEERING_DEADZONE,
     )} is a dead zone, so a steady palm flies level.`,
-    spec: 'At 1.0x sensitivity · tracks your palm center · bank to turn',
+    spec: 'Sensitivity sets the response near the center · tracks your palm center · bank to turn',
   },
   {
     code: '02',
     title: 'Boost',
     input: 'Close your fist',
     art: <BoostArt />,
-    tip: 'Curl all four fingertips into your palm and hold it: boost lasts exactly as long as the fist does.',
+    tip: 'Curl all four fingertips into your palm and hold it: boost lasts exactly as long as the fist does, and steering holds still while it closes.',
     spec: `Locks after ${FIST_HOLD_FRAMES} camera frames · ${CRUISE_KT} → ${BOOST_KT} kt`,
   },
   {
@@ -77,17 +79,14 @@ const HAND_MOVES: Move[] = [
     title: 'Backflip',
     input: 'Quick upward flick',
     art: (
-      <BackflipArt
-        distanceLabel={FLICK_TIP_FRACTION === 0.25 ? '≥ ¼ FRAME' : `≥ ${percent(FLICK_TIP_FRACTION)}`}
-        timeLabel={`< ${FLICK_TIP_SECONDS.toFixed(1)} S`}
-      />
+      <BackflipArt distanceLabel={`≈ ${FLICK_TIP_GLYPH} BOX`} timeLabel={`< ${FLICK_TIP_SECONDS.toFixed(1)} S`} />
     ),
-    tip: `Snap your open palm straight up by at least ${FLICK_TIP_LABEL} of the camera frame's height, all within ${seconds(
+    tip: `Snap your open palm straight up about ${FLICK_TIP_LABEL} the height of your calibrated box, in one quick motion of ${seconds(
       FLICK_TIP_SECONDS,
-    )}.`,
-    spec: `Needs > ${FLICK_MIN_VELOCITY} frame-heights/s averaged over ${FLICK_WINDOW_MS} ms, so ≥ ${percent(
-      FLICK_STILL_HAND_DISTANCE,
-    )} of the frame from a still hand · ${seconds(BACKFLIP_COOLDOWN_MS / 1000)} cooldown`,
+    )} or less. The bird's nose stays level through it.`,
+    spec: `Needs ≥ ${percent(FLICK_MIN_RISE)} of your box within ${FLICK_WINDOW_MS} ms, peaking > ${FLICK_MIN_SPEED.toFixed(
+      1,
+    )} box-heights/s · ${seconds(BACKFLIP_COOLDOWN_MS / 1000)} cooldown`,
   },
 ];
 

@@ -1,5 +1,5 @@
 import type { NormalizedLandmark } from '@mediapipe/hands';
-import type { CalibrationPoint } from '@/game/handControls';
+import { DEFAULT_BOX, type CalibrationPoint } from '@/game/trackingShared';
 
 // Everything here is type-only on the tracking side: the landmark connection list is passed in by
 // App, which gets it from the lazily loaded handControls module.
@@ -31,8 +31,8 @@ export interface CalibrationStep {
   buttonLabel: string;
   /**
    * Where the ghost reticle suggests going for this step, in the tracker's mirrored space. These are
-   * the tracker's default box corners (handControls.ts), so they're only a hint: the player captures
-   * wherever their own comfortable range actually is.
+   * the tracker's default box corners (DEFAULT_BOX in trackingShared.ts), so they're only a hint:
+   * the player captures wherever their own comfortable range actually is.
    */
   hint: CalibrationPoint;
 }
@@ -53,7 +53,7 @@ export const CALIBRATION_STEPS: CalibrationStep[] = [
     name: 'Top-left boundary',
     instruction: 'Move to the top-left edge of your comfortable range, then lock it in.',
     buttonLabel: 'Set Top-Left',
-    hint: { x: 0.24, y: 0.28 },
+    hint: { x: DEFAULT_BOX.left, y: DEFAULT_BOX.top },
   },
   {
     key: 'topRight',
@@ -61,7 +61,7 @@ export const CALIBRATION_STEPS: CalibrationStep[] = [
     name: 'Top-right boundary',
     instruction: 'Move to the top-right edge of your comfortable range, then lock it in.',
     buttonLabel: 'Set Top-Right',
-    hint: { x: 0.76, y: 0.28 },
+    hint: { x: DEFAULT_BOX.right, y: DEFAULT_BOX.top },
   },
   {
     key: 'bottomLeft',
@@ -69,7 +69,7 @@ export const CALIBRATION_STEPS: CalibrationStep[] = [
     name: 'Bottom-left boundary',
     instruction: 'Move to the bottom-left edge of your comfortable range, then lock it in.',
     buttonLabel: 'Set Bottom-Left',
-    hint: { x: 0.24, y: 0.72 },
+    hint: { x: DEFAULT_BOX.left, y: DEFAULT_BOX.bottom },
   },
   {
     key: 'bottomRight',
@@ -77,7 +77,7 @@ export const CALIBRATION_STEPS: CalibrationStep[] = [
     name: 'Bottom-right boundary',
     instruction: 'Move to the bottom-right edge of your comfortable range, then lock it in.',
     buttonLabel: 'Set Bottom-Right',
-    hint: { x: 0.76, y: 0.72 },
+    hint: { x: DEFAULT_BOX.right, y: DEFAULT_BOX.bottom },
   },
 ];
 
@@ -88,11 +88,14 @@ export interface PreviewOverlay {
   target: CalibrationStep | null;
   /** `performance.now()`, drives the ghost reticle's pulse. */
   time: number;
+  /** The finished calibration fails validation: the box is drawn in the fault color. */
+  invalid: boolean;
 }
 
 // Instrument palette, matching --ascent-cyan / --ascent-warm in index.css.
 const CYAN = '159, 243, 228';
 const WARM = '255, 179, 122';
+const FAULT = '255, 149, 128';
 const PALM_POINTS = [0, 5, 9, 13, 17];
 const LABEL_FONT = '600 10px "JetBrains Mono", ui-monospace, Menlo, monospace';
 
@@ -184,7 +187,8 @@ export function drawHandPreview(
   // afterward via CSS (`scale-x-[-1]`) for display. So every point here must be un-mirrored
   // back to raw canvas space, or it would land on the wrong side once the CSS flip applies.
   const toCanvas = (p: CalibrationPoint) => ({ x: (1 - p.x) * width, y: p.y * height });
-  const { points, target, time } = overlay;
+  const { points, target, time, invalid } = overlay;
+  const boxColor = invalid ? FAULT : CYAN;
   ctx.font = LABEL_FONT;
   ctx.textBaseline = 'middle';
 
@@ -197,9 +201,9 @@ export function drawHandPreview(
       else ctx.lineTo(c.x, c.y);
     });
     ctx.closePath();
-    ctx.fillStyle = `rgba(${CYAN}, 0.07)`;
+    ctx.fillStyle = `rgba(${boxColor}, ${invalid ? 0.12 : 0.07})`;
     ctx.fill();
-    ctx.strokeStyle = `rgba(${CYAN}, 0.75)`;
+    ctx.strokeStyle = `rgba(${boxColor}, ${invalid ? 0.95 : 0.75})`;
     ctx.lineWidth = 1.4 * u;
     ctx.setLineDash([6 * u, 4 * u]);
     ctx.stroke();

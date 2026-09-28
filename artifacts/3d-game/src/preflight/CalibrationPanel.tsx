@@ -1,6 +1,11 @@
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
-import { ArrowRight, Check, ChevronLeft, Crosshair, RotateCcw } from 'lucide-react';
-import { MAX_SENSITIVITY, MIN_SENSITIVITY } from '@/game/trackingShared';
+import { AlertTriangle, ArrowRight, Check, ChevronLeft, Crosshair, RotateCcw } from 'lucide-react';
+import {
+  MAX_SENSITIVITY,
+  MIN_BOX_SIZE,
+  MIN_SENSITIVITY,
+  type CalibrationProblem,
+} from '@/game/trackingShared';
 import { CornerBrackets } from '@/ui/hud';
 import { CALIBRATION_STEPS } from './handPreview';
 
@@ -14,6 +19,10 @@ interface CalibrationPanelProps {
   /** Index of the step being captured; CALIBRATION_STEPS.length once all five are captured. */
   step: number;
   sensitivity: number;
+  /** What's wrong with the finished calibration (empty when it's usable, or not finished yet). */
+  problems: CalibrationProblem[];
+  /** The points were restored from the calibration saved last time, not captured just now. */
+  restored: boolean;
   /** The camera's actual resolution, e.g. "480×360", once known. */
   feedResolution: string | null;
   /** True while the takeoff transition runs: every control is locked. */
@@ -27,6 +36,16 @@ interface CalibrationPanelProps {
   onCanvasPointerMove: CanvasPointerHandler;
   onCanvasPointerUp: CanvasPointerHandler;
 }
+
+const PROBLEM_TEXT: Record<CalibrationProblem, string> = {
+  'box-too-narrow': `The box is too narrow: spread the left and right corners at least ${Math.round(
+    MIN_BOX_SIZE * 100,
+  )}% of the feed apart.`,
+  'box-too-short': `The box is too short: spread the top and bottom corners at least ${Math.round(
+    MIN_BOX_SIZE * 100,
+  )}% of the feed apart.`,
+  'center-outside': 'The center (C) must sit well inside the box. Drag the corners out around it, or recalibrate.',
+};
 
 function sensitivityLabel(value: number) {
   if (value < 0.85) return 'Low';
@@ -44,6 +63,8 @@ export function CalibrationPanel({
   handDetected,
   step,
   sensitivity,
+  problems,
+  restored,
   feedResolution,
   launching,
   onCapture,
@@ -56,6 +77,7 @@ export function CalibrationPanel({
   onCanvasPointerUp,
 }: CalibrationPanelProps) {
   const complete = step >= CALIBRATION_STEPS.length;
+  const valid = complete && problems.length === 0;
   const current = CALIBRATION_STEPS[step] ?? null;
   const fill = ((sensitivity - MIN_SENSITIVITY) / (MAX_SENSITIVITY - MIN_SENSITIVITY)) * 100;
 
@@ -198,11 +220,30 @@ export function CalibrationPanel({
               </p>
               <p className="mt-1 text-sm leading-relaxed text-white/80">{current.instruction}</p>
             </>
+          ) : problems.length > 0 ? (
+            <>
+              <p className="ascent-hud flex items-center gap-2 text-[color:var(--ascent-fault)]">
+                <AlertTriangle className="h-3.5 w-3.5" /> Check your box
+              </p>
+              <ul className="mt-1 space-y-1 text-sm leading-relaxed text-white/80">
+                {problems.map((problem) => (
+                  <li key={problem}>{PROBLEM_TEXT[problem]}</li>
+                ))}
+              </ul>
+            </>
+          ) : restored ? (
+            <>
+              <p className="ascent-hud text-[color:var(--ascent-cyan)]">Saved calibration loaded.</p>
+              <p className="mt-1 text-sm leading-relaxed text-white/75">
+                Your box from last time is set. Drag a corner to adjust it, or recalibrate if you've moved.
+              </p>
+            </>
           ) : (
             <>
               <p className="ascent-hud text-[color:var(--ascent-cyan)]">Calibrated! Your control range is set.</p>
               <p className="mt-1 text-sm leading-relaxed text-white/75">
-                Flight pitch and roll are now mapped to fit exactly within the box you just drew.
+                Flight pitch and roll are now mapped to fit exactly within the box you just drew. It's saved for
+                next time.
               </p>
             </>
           )}
@@ -228,7 +269,7 @@ export function CalibrationPanel({
             className="ascent-hud mt-3 flex items-center justify-center gap-1.5 self-center text-white/65 transition-colors hover:text-white disabled:opacity-40"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Start Over
+            {complete ? 'Recalibrate' : 'Start Over'}
           </button>
         ) : (
           <div className="mt-3 h-4" />
@@ -276,13 +317,17 @@ export function CalibrationPanel({
         <button
           type="button"
           onClick={onStartFlying}
-          disabled={!complete || launching}
+          disabled={!valid || launching}
           className="group mt-auto flex w-full items-center justify-between rounded-full bg-white py-2 pl-6 pr-2 text-[color:var(--ascent-ink)] transition-colors hover:bg-[color:var(--ascent-warm)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-white"
         >
           <span className="text-left">
             <span className="block text-base font-semibold">Start Flying</span>
             <span className="ascent-hud block text-[10px] opacity-60">
-              {complete ? 'Cleared for takeoff' : `${step} / ${CALIBRATION_STEPS.length} points locked`}
+              {valid
+                ? 'Cleared for takeoff'
+                : complete
+                  ? 'Fix the box to continue'
+                  : `${step} / ${CALIBRATION_STEPS.length} points locked`}
             </span>
           </span>
           <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[color:var(--ascent-ink)] text-white">

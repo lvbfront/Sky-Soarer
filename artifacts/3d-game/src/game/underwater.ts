@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { damp, perFrameRate } from './damping';
 
 // Reef band: coral/flora/anemones/fish/shark all live in this depth range below the water
 // surface (y = 0 at water level). The seabed sits close to the surface (see
@@ -6,6 +7,9 @@ import * as THREE from 'three';
 // a deep empty ocean.
 const REEF_DEPTH_MIN = -13;
 const REEF_DEPTH_MAX = -4;
+
+// How quickly each fish school's center drifts after the bird (per second; 0.02 per frame at 60 FPS).
+const SCHOOL_FOLLOW_RATE = perFrameRate(0.02, 60);
 
 const REEF_SPAWN_INTERVAL = 0.38;
 const REEF_SPAWN_DISTANCE_MIN = 16;
@@ -537,13 +541,14 @@ export class UnderwaterEnvironment {
     // laterally/vertically/ahead so the schools don't overlap), with each fish wandering on
     // its own sine orbit around that center.
     const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+    const schoolAlpha = damp(SCHOOL_FOLLOW_RATE, dt);
     for (const school of this.schools) {
       const desiredCenter = birdPosition
         .clone()
         .addScaledVector(forward, school.driftOffset.z)
         .addScaledVector(right, school.driftOffset.x);
       desiredCenter.y = REEF_DEPTH_MAX - school.depthFraction * (REEF_DEPTH_MAX - REEF_DEPTH_MIN);
-      school.center.lerp(desiredCenter, 0.02);
+      school.center.lerp(desiredCenter, schoolAlpha);
     }
     for (const f of this.fish) {
       const school = this.schools[f.schoolIndex];

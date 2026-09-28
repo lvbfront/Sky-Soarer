@@ -1,6 +1,6 @@
 import { useId, useLayoutEffect, useRef } from 'react';
 import { gsap } from 'gsap';
-import { BookOpen, ChevronLeft, Play } from 'lucide-react';
+import { BookOpen, ChevronLeft, Crosshair, Play } from 'lucide-react';
 import { CornerBrackets } from '@/ui/hud';
 
 interface PauseMenuProps {
@@ -11,6 +11,8 @@ interface PauseMenuProps {
   reducedMotion: boolean;
   onResume: () => void;
   onGuide: () => void;
+  /** Hand mode: back to the calibration screen (keeps the camera), then take off again. */
+  onRecalibrate?: () => void;
   onExit: () => void;
 }
 
@@ -18,7 +20,7 @@ interface PauseMenuProps {
  * The pause menu, in the flight HUD's instrument style. The game loop is frozen while it's open
  * (App pauses the engine and the keyboard input). Esc is handled by App.
  */
-export function PauseMenu({ summary, score, reducedMotion, onResume, onGuide, onExit }: PauseMenuProps) {
+export function PauseMenu({ summary, score, reducedMotion, onResume, onGuide, onRecalibrate, onExit }: PauseMenuProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const resumeRef = useRef<HTMLButtonElement | null>(null);
   const titleId = useId();
@@ -86,6 +88,12 @@ export function PauseMenu({ summary, score, reducedMotion, onResume, onGuide, on
             <BookOpen className="h-4 w-4 text-[color:var(--ascent-cyan)]" />
             How to fly
           </button>
+          {onRecalibrate && (
+            <button type="button" onClick={onRecalibrate} className={secondary}>
+              <Crosshair className="h-4 w-4 text-[color:var(--ascent-warm)]" />
+              Recalibrate
+            </button>
+          )}
           <button type="button" onClick={onExit} className={secondary}>
             <ChevronLeft className="h-4 w-4 text-white/70" />
             Back to landing

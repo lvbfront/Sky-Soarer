@@ -1,17 +1,21 @@
 import { Hands, type NormalizedLandmark, type Results } from '@mediapipe/hands';
 import { MEDIAPIPE_FILE_SIZES } from 'virtual:mediapipe-hands-assets';
+import { damp, perFrameRate } from './damping';
 import { meterDownloads } from './downloadMeter';
+import { FlickDetector } from './flickDetector';
+import { applyDeadzone, applySensitivity, axisValue, clamp, computeBox, validateCalibration } from './trackingMath';
 import {
-  BACKFLIP_COOLDOWN_MS,
+  DEFAULT_BOX,
   FIST_HOLD_FRAMES,
-  FLICK_MIN_DISTANCE,
-  FLICK_MIN_VELOCITY,
-  FLICK_STILL_HAND_DISTANCE,
-  FLICK_WINDOW_MS,
   MAX_SENSITIVITY,
   MIN_SENSITIVITY,
   STEERING_DEADZONE,
   TrackingStartError,
+  type CalibrationBox,
+  type CalibrationCorner,
+  type CalibrationData,
+  type CalibrationPoint,
+  type CalibrationProblem,
   type FlickNearMiss,
 } from './trackingShared';
 
@@ -22,6 +26,11 @@ export {
   MAX_SENSITIVITY,
   MIN_SENSITIVITY,
   TrackingStartError,
+  type CalibrationBox,
+  type CalibrationCorner,
+  type CalibrationData,
+  type CalibrationPoint,
+  type CalibrationProblem,
   type FlickNearMiss,
   type TrackingStartErrorKind,
 } from './trackingShared';
@@ -44,47 +53,32 @@ export interface HandControlState {
   landmarks: NormalizedLandmark[] | null;
 }
 
-export type CalibrationCorner = 'topLeft' | 'topRight' | 'bottomLeft' | 'bottomRight';
-
-export interface CalibrationPoint {
-  x: number;
-  y: number;
-}
-
 const FINGER_TIPS = [4, 8, 12, 16, 20];
 const PALM_POINTS = [0, 5, 9, 13, 17];
 
 const FIST_CLOSE_RATIO = 0.62;
 const FIST_OPEN_RATIO = 0.8;
 
-const SMOOTHING_ALPHA = 0.35;
+// Steering EMA on the palm point, per second: the old per-frame 0.35 at a webcam's 30 FPS, now
+// independent of the camera's actual frame rate.
+const SMOOTHING_RATE = perFrameRate(0.35, 30);
+// Longest gap between two tracked frames the smoothing treats as continuous motion.
+const MAX_SMOOTHING_DT = 0.1;
 
-
-// A rapid upward flick of the raw (un-smoothed) tracked point triggers the backflip gesture.
-// Detected over a short rolling time window (see `trackedYHistory`) rather than a single
-// frame-to-frame delta, so one noisy MediaPipe frame can't mask (or falsely fabricate) the
-// gesture, and detection stays consistent across different camera frame rates. The thresholds
-// (FLICK_WINDOW_MS, FLICK_MIN_DISTANCE, FLICK_MIN_VELOCITY, BACKFLIP_COOLDOWN_MS) live in
-// trackingShared.ts because the "How to fly" guide quotes them.
-
-// Near-miss coaching. Each upward stroke of the raw palm point (from when it starts rising until
-// it drops back or stalls) is scored once when it ends. A stroke that never fired a backflip but
-// reached these fractions of the real thresholds counts as an attempted flick. Because the flick
-// speed is averaged over the whole window (see FLICK_STILL_HAND_DISTANCE), 64% of the speed means
-// rising ~15% of the frame within 220 ms: well above jitter and ordinary steering (easing the palm
-// up a fifth of the frame over a third of a second peaks around 0.6 frame-heights/s).
-const NEAR_MISS_MIN_DISTANCE = FLICK_MIN_DISTANCE * 0.6;
-const NEAR_MISS_MIN_VELOCITY = FLICK_MIN_VELOCITY * 0.64;
-// A stroke starts once the raw point rises by more than this between two frames, and ends when it
-// falls back this far below its highest point or makes no new high for STROKE_STALL_MS.
-const STROKE_START_EPSILON = 0.004;
-const STROKE_END_DROP = 0.02;
-const STROKE_STALL_MS = 120;
-// At most one hint this often, so a player practising doesn't get a hint on every attempt.
-const NEAR_MISS_INTERVAL_MS = 2500;
-// If the hand disappears shortly after a fast upward flick (common when the flick carries
-// the hand out of frame), still fire the backflip once rather than losing the gesture.
-const HAND_LOST_GRACE_MS = 300;
+// Fist steering guard. Curling the fingers moves the knuckles, so the palm center (wrist + MCPs)
+// shifts slightly as a fist closes or opens, which used to nudge the steering every time the
+// player boosted. While the fist ratio is changing fast (faster than FIST_RATE_THRESHOLD per second,
+// measured over at least FIST_RATE_SPAN_MS), or the open/closed state is mid-hysteresis, the
+// steering sample is held. When the hand settles (FIST_SETTLE_MS without that motion) the shift the
+// closing caused is kept as an offset for as long as the fist stays closed (capped at
+// FIST_OFFSET_MAX, so a real move during the close isn't swallowed), and dropped again on opening.
+// A hold never lasts longer than FIST_HOLD_MAX_MS, so steering can't freeze.
+const FIST_RATE_SPAN_MS = 60;
+const FIST_RATE_THRESHOLD = 1.5;
+const FIST_SETTLE_MS = 90;
+const FIST_HOLD_MAX_MS = 450;
+const FIST_OFFSET_MAX = 0.06;
+const FIST_HISTORY_MS = 200;
 
 // The MediaPipe wasm/model/graph files are self-hosted: vite-plugin-mediapipe-assets.ts copies
 // them out of the installed @mediapipe/hands package (so the version lives only in package.json)
@@ -129,41 +123,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-// Default calibration box (mirrored-frame coordinates) used until the player completes the
-// 4-corner calibration flow, so the tracker still produces sane output before that.
-const DEFAULT_BOX_LEFT_X = 0.24;
-const DEFAULT_BOX_RIGHT_X = 0.76;
-const DEFAULT_BOX_TOP_Y = 0.28;
-const DEFAULT_BOX_BOTTOM_Y = 0.72;
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
 function dist2D(a: { x: number; y: number }, b: { x: number; y: number }) {
   return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-/** Maps `value` onto -1..1 given its calibrated center and the positive/negative-side extents
- * of the calibration box on this axis (already in the same coordinate units as `value`). */
-function axisValue(value: number, center: number, positiveExtent: number, negativeExtent: number) {
-  if (value >= center) {
-    const span = positiveExtent - center;
-    if (span <= 0.001) return 0;
-    return clamp((value - center) / span, 0, 1);
-  }
-  const span = center - negativeExtent;
-  if (span <= 0.001) return 0;
-  return clamp((value - center) / span, -1, 0);
-}
-
-/** Zeroes out small values near 0, then rescales the remainder back up to +-1 so there's no
- * jump at the deadzone edge. */
-function applyDeadzone(value: number, deadzone: number) {
-  const magnitude = Math.abs(value);
-  if (magnitude <= deadzone) return 0;
-  const sign = Math.sign(value);
-  return sign * ((magnitude - deadzone) / (1 - deadzone));
 }
 
 export class HandTracker {
@@ -174,14 +135,28 @@ export class HandTracker {
   // Frame loop state: a new frame is sent to MediaPipe only when the video has actually advanced.
   private rafId: number | null = null;
   private lastVideoTime = -1;
+  // When the frame being processed was picked up, before inference: the gesture timing (flick
+  // speed, smoothing) uses this, so MediaPipe's variable inference time doesn't jitter it.
+  private frameStartMs: number | null = null;
 
   // Smoothed palm-center position, in mirrored-frame coordinates.
   private smoothedX = 0.5;
   private smoothedY = 0.5;
   private hasSmoothed = false;
+  private lastTrackedMs: number | null = null;
 
   private fistFrameCounter = 0;
   private fistActive = false;
+  // Fist steering guard (see FIST_*): recent fist ratios, the transition being held (if any), and
+  // the palm-center shift a closed fist caused, subtracted from the steering point while closed.
+  private fistRatios: { r: number; t: number }[] = [];
+  private fistTransition: { startMs: number; lastMovingMs: number; anchorX: number; anchorY: number; wasActive: boolean } | null =
+    null;
+  // Set when a hold hit FIST_HOLD_MAX_MS: no new hold until the fist motion stops.
+  private fistGuardSpent = false;
+  private fistOffsetX = 0;
+  private fistOffsetY = 0;
+  private previousPoint: { x: number; y: number } | null = null;
 
   private stopped = false;
   // Stops the download meter `start()` installs; also called from `stop()` so an abandoned load
@@ -196,29 +171,17 @@ export class HandTracker {
   // The 4-corner calibration box: flight pitch/roll are mapped strictly within this box, so
   // steering feels fitted to the player's own natural range of motion instead of a fixed gain.
   private corners: Partial<Record<CalibrationCorner, CalibrationPoint>> = {};
-  private boxLeftX = DEFAULT_BOX_LEFT_X;
-  private boxRightX = DEFAULT_BOX_RIGHT_X;
-  private boxTopY = DEFAULT_BOX_TOP_Y;
-  private boxBottomY = DEFAULT_BOX_BOTTOM_Y;
+  private box: CalibrationBox = { ...DEFAULT_BOX };
 
-  // Multiplier applied on top of the box-normalized signal, controlled by the calibration
-  // screen's slider; 1 = default, >1 = twitchier, <1 = calmer.
+  // Steering response curve applied on top of the box-normalized signal (see applySensitivity),
+  // set by the calibration screen's slider; 1 = linear, >1 = twitchier near center, <1 = calmer.
   private sensitivity = 1;
 
-  // Upward-flick backflip tracking: a short rolling history of the raw (un-smoothed)
-  // tracked-point Y + its timestamp, used to compute a velocity estimate independent of the
-  // roll/pitch smoothing (smoothing would blur out a fast, brief flick — see project memory).
-  private trackedYHistory: { y: number; t: number }[] = [];
-  private lastBackflipTimeMs = -Infinity;
-  private lastFastUpwardFlickTimeMs = -Infinity;
-
-  // The upward stroke in progress, for near-miss coaching (see NEAR_MISS_*). `fired` is set once
-  // the stroke met both flick thresholds, so a real flick (even one swallowed by the cooldown)
-  // never also reports a near miss.
-  private stroke: { startY: number; minY: number; lastRiseMs: number; peakVelocity: number; fired: boolean } | null =
-    null;
-  private lastRawY: number | null = null;
-  private lastNearMissMs = -Infinity;
+  // The backflip gesture, measured in box heights on the raw (un-smoothed) palm Y, tracked
+  // independently of the smoothed steering signal so smoothing doesn't blur out the flick (see
+  // project memory on gesture-control smoothing tradeoffs). It also holds the pitch output while a
+  // flick is under way, so the flick doesn't double as a sharp climb.
+  private flick = new FlickDetector();
 
   /** `videoEl` must already be playing the webcam stream; the tracker never opens the camera itself. */
   constructor(videoEl: HTMLVideoElement, onUpdate: (state: HandControlState) => void) {
@@ -289,6 +252,7 @@ export class HandTracker {
     const video = this.videoEl;
     if (video.readyState >= 2 && video.currentTime !== this.lastVideoTime) {
       this.lastVideoTime = video.currentTime;
+      this.frameStartMs = performance.now();
       try {
         await this.hands.send({ image: video });
       } catch (error) {
@@ -326,7 +290,7 @@ export class HandTracker {
     return { x: this.originX, y: this.originY };
   }
 
-  /** Scales the box-normalized signal; 1 = default gain, >1 = twitchier, <1 = calmer. */
+  /** Sets the steering response curve; 1 = linear, >1 = twitchier near center, <1 = calmer. */
   setSensitivity(multiplier: number) {
     this.sensitivity = clamp(multiplier, MIN_SENSITIVITY, MAX_SENSITIVITY);
   }
@@ -352,7 +316,7 @@ export class HandTracker {
     if (!this.hasSmoothed) return null;
     const point = { x: this.smoothedX, y: this.smoothedY };
     this.corners[corner] = point;
-    this.recomputeBox();
+    this.box = computeBox(this.corners);
     return point;
   }
 
@@ -363,7 +327,23 @@ export class HandTracker {
    */
   setCorner(corner: CalibrationCorner, point: CalibrationPoint) {
     this.corners[corner] = { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
-    this.recomputeBox();
+    this.box = computeBox(this.corners);
+  }
+
+  /** Restores a complete calibration (center, 4 corners, sensitivity), e.g. one saved last session. */
+  applyCalibration(calibration: CalibrationData) {
+    this.setOrigin(calibration.center.x, calibration.center.y);
+    this.corners = {};
+    for (const [corner, point] of Object.entries(calibration.corners) as [CalibrationCorner, CalibrationPoint][]) {
+      this.corners[corner] = { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
+    }
+    this.box = computeBox(this.corners);
+    this.setSensitivity(calibration.sensitivity);
+  }
+
+  /** What's wrong with the current center + box, if anything (see validateCalibration). */
+  getCalibrationProblems(): CalibrationProblem[] {
+    return validateCalibration(this.getOrigin(), this.box);
   }
 
   /** Clears the neutral center and all captured corners back to their defaults. */
@@ -371,49 +351,31 @@ export class HandTracker {
     this.originX = 0.5;
     this.originY = 0.5;
     this.corners = {};
-    this.boxLeftX = DEFAULT_BOX_LEFT_X;
-    this.boxRightX = DEFAULT_BOX_RIGHT_X;
-    this.boxTopY = DEFAULT_BOX_TOP_Y;
-    this.boxBottomY = DEFAULT_BOX_BOTTOM_Y;
-  }
-
-  private recomputeBox() {
-    const { topLeft, topRight, bottomLeft, bottomRight } = this.corners;
-    if (topLeft && bottomLeft) this.boxLeftX = (topLeft.x + bottomLeft.x) / 2;
-    if (topRight && bottomRight) this.boxRightX = (topRight.x + bottomRight.x) / 2;
-    if (topLeft && topRight) this.boxTopY = (topLeft.y + topRight.y) / 2;
-    if (bottomLeft && bottomRight) this.boxBottomY = (bottomLeft.y + bottomRight.y) / 2;
+    this.box = { ...DEFAULT_BOX };
   }
 
   private handleResults(results: Results) {
     const hand = results.multiHandLandmarks?.[0];
-    const now = performance.now();
+    const now = this.frameStartMs ?? performance.now();
+    this.frameStartMs = null;
 
     if (!hand) {
       // Release the fist state along with the hand, so boost can't resume latched when the hand
       // reappears (the engine also drops boost on hand loss).
       this.fistFrameCounter = 0;
       this.fistActive = false;
-      // If the hand vanished shortly after a fast upward flick (the flick often carries the
-      // hand out of the webcam frame entirely), still honor the gesture once here.
-      const lostBackflip =
-        now - this.lastFastUpwardFlickTimeMs <= HAND_LOST_GRACE_MS &&
-        now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS;
-      if (lostBackflip) {
-        this.lastBackflipTimeMs = now;
-      }
-      this.trackedYHistory = [];
-      this.lastRawY = null;
-      // A stroke cut short by the hand leaving the frame is still scored.
-      const flickNearMiss = this.stroke && !lostBackflip ? this.finishStroke(now) : null;
-      this.stroke = null;
+      this.resetFistGuard();
+      this.previousPoint = null;
+      // If the hand vanished right after a fast upward flick (the flick often carries the hand out
+      // of the webcam frame entirely), the detector still honors the gesture once here.
+      const lost = this.flick.handLost(now);
       this.onUpdate({
         handDetected: false,
         pitch: 0,
         roll: 0,
         boost: false,
-        backflip: lostBackflip,
-        flickNearMiss,
+        backflip: lost.backflip,
+        flickNearMiss: lost.nearMiss,
         landmarks: null,
       });
       return;
@@ -429,63 +391,12 @@ export class HandTracker {
     palmX /= PALM_POINTS.length;
     palmY /= PALM_POINTS.length;
 
-    // Raw camera-frame coordinates of the steering point, not yet mirrored.
-    const trackedRawX = palmX;
+    // Raw camera-frame Y of the steering point (the flick detector's input), and the X mirrored
+    // horizontally (scaleX = -1) to match the mirrored webcam preview: this makes moving your hand
+    // to your own left steer left and to your own right steer right, the way a mirror (or any
+    // selfie camera app) naturally behaves.
     const trackedRawY = palmY;
-
-    // Mirror horizontally (scaleX = -1), matching the mirrored webcam preview: this makes
-    // moving your hand to your own left steer left and to your own right steer right,
-    // the way a mirror (or any selfie camera app) naturally behaves.
-    const mirroredTrackedX = 1 - trackedRawX;
-
-    if (!this.hasSmoothed) {
-      this.smoothedX = mirroredTrackedX;
-      this.smoothedY = trackedRawY;
-      this.hasSmoothed = true;
-    } else {
-      this.smoothedX = SMOOTHING_ALPHA * mirroredTrackedX + (1 - SMOOTHING_ALPHA) * this.smoothedX;
-      this.smoothedY = SMOOTHING_ALPHA * trackedRawY + (1 - SMOOTHING_ALPHA) * this.smoothedY;
-    }
-
-    // Map the smoothed tracked point onto -1..1 strictly within the calibrated box: at the
-    // neutral center both axes read 0, at a calibrated corner the relevant axis reads +-1 —
-    // steering is fitted to the player's own natural range of motion, not a fixed gain.
-    const rollRaw = axisValue(this.smoothedX, this.originX, this.boxRightX, this.boxLeftX);
-    // Y grows downward on screen, so climbing (moving up) needs the sign flipped relative to
-    // axisValue's "greater than center = positive" convention.
-    const pitchRaw = axisValue(-this.smoothedY, -this.originY, -this.boxTopY, -this.boxBottomY);
-
-    const roll = clamp(applyDeadzone(rollRaw, STEERING_DEADZONE) * this.sensitivity, -1, 1);
-    const pitch = clamp(applyDeadzone(pitchRaw, STEERING_DEADZONE) * this.sensitivity, -1, 1);
-
-    // Backflip gesture: a fast upward flick of the raw (un-smoothed) tracked point, tracked
-    // independently of the smoothed steering signal so smoothing doesn't blur out the flick
-    // (see project memory on gesture-control smoothing tradeoffs). Detected over a short
-    // rolling window rather than a single frame-to-frame delta, so one noisy frame can't mask
-    // (or falsely fabricate) the gesture.
-    this.trackedYHistory.push({ y: trackedRawY, t: now });
-    while (this.trackedYHistory.length > 0 && now - this.trackedYHistory[0].t > FLICK_WINDOW_MS) {
-      this.trackedYHistory.shift();
-    }
-    let backflip = false;
-    let fastFlick = false;
-    let windowVelocity = 0;
-    if (this.trackedYHistory.length >= 2) {
-      const oldest = this.trackedYHistory[0];
-      const dtSec = (now - oldest.t) / 1000;
-      // Y decreases upward on screen, so a positive delta here means the point moved up.
-      const upwardDistance = oldest.y - trackedRawY;
-      if (dtSec > 0.03 && upwardDistance > 0) windowVelocity = upwardDistance / dtSec;
-      if (dtSec > 0.03 && upwardDistance > FLICK_MIN_DISTANCE && windowVelocity > FLICK_MIN_VELOCITY) {
-        fastFlick = true;
-        this.lastFastUpwardFlickTimeMs = now;
-        if (now - this.lastBackflipTimeMs > BACKFLIP_COOLDOWN_MS) {
-          backflip = true;
-          this.lastBackflipTimeMs = now;
-        }
-      }
-    }
-    const flickNearMiss = this.trackStroke(trackedRawY, windowVelocity, fastFlick, now);
+    const mirroredTrackedX = 1 - palmX;
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];
@@ -496,6 +407,7 @@ export class HandTracker {
       tipDistSum += dist2D(hand[idx], { x: palmX, y: palmY });
     }
     const fistRatio = tipDistSum / FINGER_TIPS.length / handScale;
+    const wasFistActive = this.fistActive;
 
     if (this.fistActive) {
       if (fistRatio > FIST_OPEN_RATIO) {
@@ -517,55 +429,106 @@ export class HandTracker {
       this.fistFrameCounter = 0;
     }
 
-    const boost = this.fistActive;
+    const holdSteering = this.updateFistGuard(fistRatio, wasFistActive, mirroredTrackedX, trackedRawY, now);
+    this.previousPoint = { x: mirroredTrackedX, y: trackedRawY };
+
+    // Steering point: the palm center minus a closed fist's shift, smoothed with a frame-rate
+    // independent EMA, and held (not updated) while a fist is closing or opening.
+    const targetX = mirroredTrackedX - this.fistOffsetX;
+    const targetY = trackedRawY - this.fistOffsetY;
+    const frameDt = this.lastTrackedMs === null ? 0 : Math.min((now - this.lastTrackedMs) / 1000, MAX_SMOOTHING_DT);
+    this.lastTrackedMs = now;
+    if (!this.hasSmoothed) {
+      this.smoothedX = targetX;
+      this.smoothedY = targetY;
+      this.hasSmoothed = true;
+    } else if (!holdSteering) {
+      const alpha = damp(SMOOTHING_RATE, frameDt);
+      this.smoothedX += (targetX - this.smoothedX) * alpha;
+      this.smoothedY += (targetY - this.smoothedY) * alpha;
+    }
+
+    // Map the smoothed tracked point onto -1..1 strictly within the calibrated box: at the
+    // neutral center both axes read 0, at a calibrated corner the relevant axis reads +-1 —
+    // steering is fitted to the player's own natural range of motion, not a fixed gain.
+    const box = this.box;
+    const rollRaw = axisValue(this.smoothedX, this.originX, box.right, box.left);
+    // Y grows downward on screen, so climbing (moving up) needs the sign flipped relative to
+    // axisValue's "greater than center = positive" convention.
+    const pitchRaw = axisValue(-this.smoothedY, -this.originY, -box.top, -box.bottom);
+
+    const roll = applySensitivity(applyDeadzone(rollRaw, STEERING_DEADZONE), this.sensitivity);
+    const steeringPitch = applySensitivity(applyDeadzone(pitchRaw, STEERING_DEADZONE), this.sensitivity);
+
+    // Backflip gesture on the raw palm Y, in heights of the calibrated box. While a flick is under
+    // way the detector hands back the pre-flick pitch instead of the spike the flick causes.
+    const flick = this.flick.update(trackedRawY, box.bottom - box.top, now, steeringPitch);
 
     this.onUpdate({
       handDetected: true,
-      pitch,
+      pitch: flick.pitch,
       roll,
-      boost,
-      backflip,
-      flickNearMiss,
+      boost: this.fistActive,
+      backflip: flick.backflip,
+      flickNearMiss: flick.nearMiss,
       landmarks: hand,
     });
   }
 
   /**
-   * Follows the current upward stroke of the raw palm Y and, on the frame it ends, returns
-   * whether it was a near-miss flick. `windowVelocity` is the rolling-window upward speed the
-   * backflip detector just measured, and `fastFlick` whether it met both thresholds.
+   * Follows the fist ratio and decides whether the steering sample is held this frame (see
+   * FIST_*). Updates the closed-fist offset when a transition settles.
    */
-  private trackStroke(y: number, windowVelocity: number, fastFlick: boolean, now: number): FlickNearMiss | null {
-    const previousY = this.lastRawY;
-    this.lastRawY = y;
-    if (!this.stroke) {
-      if (previousY === null || previousY - y <= STROKE_START_EPSILON) return null;
-      this.stroke = { startY: previousY, minY: y, lastRiseMs: now, peakVelocity: 0, fired: false };
-    } else if (y < this.stroke.minY) {
-      this.stroke.minY = y;
-      this.stroke.lastRiseMs = now;
+  private updateFistGuard(fistRatio: number, wasActive: boolean, x: number, y: number, now: number) {
+    this.fistRatios.push({ r: fistRatio, t: now });
+    while (this.fistRatios.length > 0 && now - this.fistRatios[0].t > FIST_HISTORY_MS) this.fistRatios.shift();
+    let rate = 0;
+    for (let i = this.fistRatios.length - 2; i >= 0; i -= 1) {
+      const sample = this.fistRatios[i];
+      if (now - sample.t >= FIST_RATE_SPAN_MS) {
+        rate = Math.abs(fistRatio - sample.r) / ((now - sample.t) / 1000);
+        break;
+      }
     }
-    const stroke = this.stroke;
-    stroke.peakVelocity = Math.max(stroke.peakVelocity, windowVelocity);
-    if (fastFlick) stroke.fired = true;
-    const ended = y > stroke.minY + STROKE_END_DROP || now - stroke.lastRiseMs > STROKE_STALL_MS;
-    return ended ? this.finishStroke(now) : null;
+    const moving = rate > FIST_RATE_THRESHOLD || this.fistFrameCounter > 0 || this.fistActive !== wasActive;
+    if (!moving) this.fistGuardSpent = false;
+
+    let transition = this.fistTransition;
+    if (moving && !transition && !this.fistGuardSpent) {
+      // Anchor on the previous frame's point: the motion was already under way by this frame.
+      const anchor = this.previousPoint ?? { x, y };
+      transition = { startMs: now, lastMovingMs: now, anchorX: anchor.x, anchorY: anchor.y, wasActive };
+      this.fistTransition = transition;
+    } else if (moving && transition) {
+      transition.lastMovingMs = now;
+    }
+    if (!transition) return false;
+
+    const settled = now - transition.lastMovingMs > FIST_SETTLE_MS;
+    const expired = now - transition.startMs > FIST_HOLD_MAX_MS;
+    if (!settled && !expired) return true;
+
+    // Settled (or held too long): keep a closing fist's shift as an offset while it stays closed.
+    this.fistTransition = null;
+    if (expired && !settled) this.fistGuardSpent = true;
+    if (!this.fistActive) {
+      this.fistOffsetX = 0;
+      this.fistOffsetY = 0;
+    } else if (!transition.wasActive) {
+      const dx = x - transition.anchorX;
+      const dy = y - transition.anchorY;
+      const scale = Math.min(1, FIST_OFFSET_MAX / (Math.hypot(dx, dy) || 1));
+      this.fistOffsetX = dx * scale;
+      this.fistOffsetY = dy * scale;
+    }
+    return false;
   }
 
-  /** Ends the current stroke and scores it (see NEAR_MISS_*). */
-  private finishStroke(now: number): FlickNearMiss | null {
-    const stroke = this.stroke;
-    this.stroke = null;
-    if (!stroke || stroke.fired) return null;
-    const distance = stroke.startY - stroke.minY;
-    if (distance < NEAR_MISS_MIN_DISTANCE || stroke.peakVelocity < NEAR_MISS_MIN_VELOCITY) return null;
-    // Right after a backflip the player is recovering, not practising; and don't nag.
-    if (now - this.lastBackflipTimeMs < BACKFLIP_COOLDOWN_MS || now - this.lastNearMissMs < NEAR_MISS_INTERVAL_MS) {
-      return null;
-    }
-    this.lastNearMissMs = now;
-    // Rose far enough in total, just not within one window: faster. Otherwise no speed would have
-    // done it from a still hand: higher.
-    return distance >= FLICK_STILL_HAND_DISTANCE ? 'too-slow' : 'too-short';
+  private resetFistGuard() {
+    this.fistRatios = [];
+    this.fistTransition = null;
+    this.fistGuardSpent = false;
+    this.fistOffsetX = 0;
+    this.fistOffsetY = 0;
   }
 }

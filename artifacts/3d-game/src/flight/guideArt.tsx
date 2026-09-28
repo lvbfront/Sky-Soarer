@@ -201,13 +201,15 @@ export function BarrelRollArt({ seconds }: { seconds: number }) {
 }
 
 /**
- * Backflip: the palm snaps up about a quarter of the camera frame, fast. The dashed lines mark the
- * start and end heights and the bracket the distance, against the whole frame (the art's height).
+ * Backflip: the palm snaps up about half the calibrated box, fast. The dashed rectangle is the box
+ * (54 units tall), the dashed lines mark the start and end heights and the bracket the 27-unit
+ * rise, which is the distance the `ascent-guide-flick` keyframes move the hand.
  */
 export function BackflipArt({ distanceLabel, timeLabel }: { distanceLabel: string; timeLabel: string }) {
   return (
-    <ArtFrame pose="-1.2s" label="An open palm snapping quickly upward by about a quarter of the camera frame">
+    <ArtFrame pose="-1.2s" label="An open palm snapping quickly upward by about half the calibrated box">
       <Svg>
+        <rect x={14} y={20} width={78} height={54} rx={3} stroke={FAINT} strokeDasharray="3 3" fill="none" />
         <line x1={16} x2={90} y1={72} y2={72} stroke={FAINT} strokeDasharray="2 3" />
         <line x1={16} x2={90} y1={45} y2={45} stroke={WARM} strokeDasharray="2 3" opacity={0.8} />
         <path d="M96 45 V72 M92 45 H100 M92 72 H100" stroke={WARM} strokeWidth={1.2} fill="none" />
@@ -230,7 +232,7 @@ export function BackflipArt({ distanceLabel, timeLabel }: { distanceLabel: strin
           </g>
         </g>
         <Label x={12} y={14} anchor="start">
-          CAM FRAME
+          YOUR BOX
         </Label>
       </Svg>
     </ArtFrame>
