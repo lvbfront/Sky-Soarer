@@ -1,11 +1,28 @@
 import { useEffect, useRef, type RefObject } from 'react';
-import { X } from 'lucide-react';
+import { Pause, X } from 'lucide-react';
 import type { GameEngine } from '@/game/GameEngine';
+import type { HandControlState } from '@/game/handControls';
+import type { ControlMode } from '@/game/settings';
+import type { FlickNearMiss } from '@/game/trackingShared';
 import { CornerBrackets } from '@/ui/hud';
+
+/** A near-miss flick to coach; `id` changes for every new one so the hint replays. */
+export interface FlickHint {
+  kind: FlickNearMiss;
+  id: number;
+}
+
+const FLICK_HINT_TEXT: Record<FlickNearMiss, { main: string; sub: string }> = {
+  'too-slow': { main: 'Flick faster ↑', sub: 'Almost a backflip: same move, in one quick snap' },
+  'too-short': { main: 'Flick higher ↑', sub: 'Almost a backflip: snap a quarter of the frame up' },
+};
 
 interface FlightHudProps {
   /** Read every frame for the telemetry readouts; type-only, so the engine chunk stays lazy. */
   engineRef: RefObject<GameEngine | null>;
+  controlMode: ControlMode;
+  /** The latest control reading, read every frame by the keyboard input indicator. */
+  controlStateRef: RefObject<HandControlState | null>;
   previewCanvasRef: RefObject<HTMLCanvasElement | null>;
   previewWidth: number;
   previewHeight: number;
@@ -21,6 +38,11 @@ interface FlightHudProps {
   score: number;
   bestScore: number;
   statusText: string;
+  flickHint: FlickHint | null;
+  /** True while the pause menu or guide is open over the HUD: it's inert (no focus, no clicks). */
+  paused: boolean;
+  onPause: () => void;
+  onGuide: () => void;
   onStop: () => void;
 }
 
@@ -59,8 +81,22 @@ function formatAltitude(meters: number) {
  * effect, and the small sensor feed. Every top-level block carries `data-flight-hud` so the
  * takeoff reveal in App can stagger them in; those wrappers must not carry CSS transitions.
  */
+// The keyboard input indicator: the stick dot moves this many px at full pitch or roll.
+const STICK_RANGE_X = 58;
+const STICK_RANGE_Y = 42;
+
+/** Blurs a HUD button after a mouse click, so Space (boost) can't "click" it again mid-flight. */
+function blurAfter(action: () => void) {
+  return (event: { currentTarget: HTMLElement }) => {
+    event.currentTarget.blur();
+    action();
+  };
+}
+
 export function FlightHud({
   engineRef,
+  controlMode,
+  controlStateRef,
   previewCanvasRef,
   previewWidth,
   previewHeight,
@@ -75,9 +111,15 @@ export function FlightHud({
   score,
   bestScore,
   statusText,
+  flickHint,
+  paused,
+  onPause,
+  onGuide,
   onStop,
 }: FlightHudProps) {
+  const keyboard = controlMode === 'keyboard';
   const tapeRef = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef<HTMLSpanElement | null>(null);
   const headingRef = useRef<HTMLSpanElement | null>(null);
   const speedRef = useRef<HTMLSpanElement | null>(null);
   const altitudeRef = useRef<HTMLSpanElement | null>(null);
@@ -100,11 +142,15 @@ export function FlightHud({
           if (altitudeRef.current) altitudeRef.current.textContent = formatAltitude(engine.getAltitude());
         }
       }
+      const control = controlStateRef.current;
+      if (stickRef.current && control) {
+        stickRef.current.style.transform = `translate3d(${control.roll * STICK_RANGE_X}px, ${-control.pitch * STICK_RANGE_Y}px, 0)`;
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [engineRef]);
+  }, [engineRef, controlStateRef]);
 
   const badges = [
     { key: 'boost', label: 'Boost', active: boosting, cool: false },
@@ -114,7 +160,7 @@ export function FlightHud({
   ];
 
   return (
-    <div className="fixed inset-0 z-10 overflow-hidden text-white">
+    <div className="fixed inset-0 z-10 overflow-hidden text-white" inert={paused}>
       {/* ---- Boost: a HUD effect rather than a color wash. Edge speed streaks rush past, a faint
           warm rim glows, and the frame brackets tighten in. ---- */}
       <div
@@ -209,8 +255,28 @@ export function FlightHud({
           // Inline, because .ascent-glass (unlayered CSS) outranks a Tailwind border utility.
           style={handDetected ? undefined : { borderColor: 'rgba(255, 149, 128, 0.6)' }}
         >
-          {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
+          {keyboard
+            ? 'WASD / arrows steer · Space boost · F flip'
+            : handDetected
+              ? 'Tilt your palm to glide'
+              : 'Show your hand to the camera to steer'}
         </p>
+        {/* Near-miss coaching: an upward flick that almost made a backflip. Re-keyed per hint so
+            each one flickers in again. */}
+        {flickHint && (
+          <div
+            key={flickHint.id}
+            className="ascent-blip ascent-glass-strong mt-3 flex flex-col items-center rounded-2xl px-5 pb-2.5 pt-2"
+            // Inline, because .ascent-glass-strong (unlayered CSS) fixes the border color.
+            style={{ borderColor: 'rgba(255, 179, 122, 0.55)' }}
+            role="status"
+          >
+            <p className="font-display text-3xl leading-none text-[color:var(--ascent-warm)]">
+              {FLICK_HINT_TEXT[flickHint.kind].main}
+            </p>
+            <p className="ascent-hud mt-1.5 text-[10px] text-white/85">{FLICK_HINT_TEXT[flickHint.kind].sub}</p>
+          </div>
+        )}
       </div>
 
       {/* ---- Top left: Ring Challenge score ---- */}
@@ -226,11 +292,30 @@ export function FlightHud({
         </div>
       )}
 
-      {/* ---- Top right: stop ---- */}
-      <div data-flight-hud className="absolute right-6 top-6 sm:right-8">
+      {/* ---- Top right: guide, pause, stop ---- */}
+      <div data-flight-hud className="absolute right-6 top-6 flex items-center gap-2 sm:right-8">
         <button
           type="button"
-          onClick={onStop}
+          onClick={blurAfter(onGuide)}
+          aria-label="How to fly"
+          title="How to fly (?)"
+          className="ascent-hud ascent-glass flex h-9 w-9 items-center justify-center rounded-full text-[13px] text-white/90 transition-colors hover:bg-white/15"
+        >
+          ?
+        </button>
+        <button
+          type="button"
+          onClick={blurAfter(onPause)}
+          title="Pause (Esc)"
+          className="ascent-hud ascent-glass flex items-center gap-2 rounded-full px-4 py-2 text-white/90 transition-colors hover:bg-white/15"
+        >
+          <Pause className="h-3.5 w-3.5" />
+          Pause
+          <span className="text-white/45">Esc</span>
+        </button>
+        <button
+          type="button"
+          onClick={blurAfter(onStop)}
           className="ascent-hud ascent-glass flex items-center gap-2 rounded-full px-4 py-2 text-white/90 transition-colors hover:bg-white/15"
         >
           <X className="h-3.5 w-3.5" />
@@ -285,19 +370,47 @@ export function FlightHud({
         ))}
       </div>
 
-      {/* ---- Bottom right: sensor feed + status ---- */}
+      {/* ---- Bottom right: sensor feed (hand) or input indicator (keyboard), + status ---- */}
       <div data-flight-hud className="absolute bottom-6 right-6 flex flex-col items-end gap-1.5 sm:bottom-8 sm:right-8">
-        <div className="relative overflow-hidden rounded-md border border-white/20 bg-black/40 shadow-lg">
-          <canvas ref={previewCanvasRef} width={previewWidth} height={previewHeight} className="block scale-x-[-1]" />
-          <div className="ascent-scanlines pointer-events-none absolute inset-0" />
-          <CornerBrackets size={10} inset={5} className="text-white/70" />
-          <span className="ascent-hud pointer-events-none absolute left-2.5 top-2 flex items-center gap-1.5 text-[9px] text-white/85">
+        {keyboard ? (
+          <div
+            className="relative overflow-hidden rounded-md border border-white/20 bg-black/40 shadow-lg"
+            style={{ width: previewWidth, height: previewHeight }}
+            aria-hidden="true"
+          >
+            {/* Full-deflection box and center cross; the dot is the live pitch/roll input. */}
             <span
-              className={`h-1.5 w-1.5 rounded-full ${handDetected ? 'bg-[color:var(--ascent-cyan)]' : 'bg-[color:var(--ascent-fault)]'}`}
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 border border-dashed border-white/25"
+              style={{ width: STICK_RANGE_X * 2, height: STICK_RANGE_Y * 2 }}
             />
-            Cam 01
-          </span>
-        </div>
+            <span className="absolute left-1/2 top-1/2 h-px w-3 -translate-x-1/2 bg-[color:var(--ascent-cyan)]/70" />
+            <span className="absolute left-1/2 top-1/2 h-3 w-px -translate-y-1/2 bg-[color:var(--ascent-cyan)]/70" />
+            <span className="absolute left-1/2 top-1/2 -ml-[5px] -mt-[5px] block h-2.5 w-2.5">
+              <span
+                ref={stickRef}
+                className="block h-2.5 w-2.5 rounded-full bg-[color:var(--ascent-warm)] shadow-[0_0_10px_rgba(255,179,122,0.8)] will-change-transform"
+              />
+            </span>
+            <div className="ascent-scanlines pointer-events-none absolute inset-0" />
+            <CornerBrackets size={10} inset={5} className="text-white/70" />
+            <span className="ascent-hud pointer-events-none absolute left-2.5 top-2 flex items-center gap-1.5 text-[9px] text-white/85">
+              <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--ascent-cyan)]" />
+              Input · Keys
+            </span>
+          </div>
+        ) : (
+          <div className="relative overflow-hidden rounded-md border border-white/20 bg-black/40 shadow-lg">
+            <canvas ref={previewCanvasRef} width={previewWidth} height={previewHeight} className="block scale-x-[-1]" />
+            <div className="ascent-scanlines pointer-events-none absolute inset-0" />
+            <CornerBrackets size={10} inset={5} className="text-white/70" />
+            <span className="ascent-hud pointer-events-none absolute left-2.5 top-2 flex items-center gap-1.5 text-[9px] text-white/85">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${handDetected ? 'bg-[color:var(--ascent-cyan)]' : 'bg-[color:var(--ascent-fault)]'}`}
+              />
+              Cam 01
+            </span>
+          </div>
+        )}
         <p className="ascent-hud ascent-glass rounded-sm px-2.5 py-1 text-[10px] text-white/90">
           <span className="text-white/50">Status</span> {statusText}
         </p>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
-import { ArrowRight, Check, ChevronLeft, ChevronRight, Volume2, VolumeX } from 'lucide-react';
+import { ArrowRight, Check, ChevronLeft, ChevronRight, Hand, Keyboard, Volume2, VolumeX } from 'lucide-react';
 import { BIRD_OPTIONS } from '@/game/bird';
 import { MAP_OPTIONS, WEATHER_LOOKS, WEATHER_OPTIONS } from '@/game/presets';
 import { WindAudio } from '@/game/audio';
@@ -10,6 +10,7 @@ import type { FlightSettings } from '@/game/settings';
 import {
   BIRD_PERSONALITY,
   CHAPTERS,
+  CONTROL_MODE_OPTIONS,
   CONTROLS_BRIEFING,
   MAP_DETAILS,
   TAGLINE,
@@ -400,7 +401,9 @@ export function Landing({
     birdName(quickStartSettings.bird).split(' /')[0],
     quickStartSettings.map === 'ocean' ? 'Ocean' : 'Mountains',
     weatherName(quickStartSettings.weather),
+    CONTROL_MODE_OPTIONS.find((option) => option.id === quickStartSettings.controls)?.short,
   ].join(' · ');
+  const keyboardMode = settings.controls === 'keyboard';
 
   const optionBase =
     'group relative w-full rounded-2xl px-5 py-4 text-left transition duration-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white';
@@ -742,6 +745,32 @@ export function Landing({
                   </div>
                 ))}
                 <div className="flex items-center gap-4 px-3 py-2.5">
+                  <dt className="ascent-hud w-14 text-white/55">Input</dt>
+                  <dd className="flex-1">
+                    <div role="radiogroup" aria-label="Controls" className="grid grid-cols-2 gap-1 rounded-full bg-white/10 p-1">
+                      {CONTROL_MODE_OPTIONS.map((option) => {
+                        const selected = option.id === settings.controls;
+                        const Icon = option.id === 'hand' ? Hand : Keyboard;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => onChange({ controls: option.id })}
+                            className={`flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
+                              selected ? 'bg-white text-[color:var(--ascent-ink)]' : 'text-white/80 hover:bg-white/10 hover:text-white'
+                            }`}
+                          >
+                            <Icon className="h-3.5 w-3.5" />
+                            {option.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </dd>
+                </div>
+                <div className="flex items-center gap-4 px-3 py-2.5">
                   <dt className="ascent-hud w-14 text-white/55">Rings</dt>
                   <dd className="flex-1">
                     <span className="block text-[15px] font-medium">Ring Challenge</span>
@@ -771,7 +800,7 @@ export function Landing({
             </div>
 
             <ul data-reveal className="mt-4 grid grid-cols-3 gap-2" aria-label="Controls">
-              {CONTROLS_BRIEFING.map((item) => (
+              {CONTROLS_BRIEFING[settings.controls].map((item) => (
                 <li key={item.key} className="rounded-xl border border-white/15 px-3 py-2.5" title={item.detail}>
                   <span className="ascent-hud block text-[10px] text-[color:var(--ascent-cyan)]">{item.key}</span>
                   <span className="mt-0.5 block text-sm font-medium">{item.action}</span>
@@ -787,14 +816,18 @@ export function Landing({
               >
                 <span>
                   <span className="block text-lg font-semibold">Begin pre-flight</span>
-                  <span className="ascent-hud block text-[10px] opacity-60">Camera + hand calibration</span>
+                  <span className="ascent-hud block text-[10px] opacity-60">
+                    {keyboardMode ? 'Keyboard · no camera needed' : 'Camera + hand calibration'}
+                  </span>
                 </span>
                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[color:var(--ascent-ink)] text-white transition group-hover:translate-x-1">
                   <ArrowRight className="h-5 w-5" />
                 </span>
               </button>
               <p className="mt-3 text-xs text-white/70">
-                Your camera feed stays on this page and is only used to read your hand position.
+                {keyboardMode
+                  ? 'No camera or download needed. Esc pauses the flight at any time.'
+                  : 'Your camera feed stays on this page and is only used to read your hand position.'}
               </p>
             </div>
           </div>

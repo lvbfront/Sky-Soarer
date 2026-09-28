@@ -1,5 +1,6 @@
 import type { BirdType } from '@/game/bird';
 import type { MapType, WeatherPreset } from '@/game/presets';
+import type { ControlMode } from '@/game/settings';
 
 /** One chapter of "The Ascent": each is a full-viewport section and one setup step. */
 export interface Chapter {
@@ -44,12 +45,24 @@ export const WEATHER_DETAILS: Record<WeatherPreset, { time: string; blurb: strin
   night: { time: '23:50', blurb: 'Moonlight and a sky full of stars.' },
 };
 
-/** Compact controls briefing shown before pre-flight (the old menu's gesture guide). */
-export const CONTROLS_BRIEFING = [
-  { key: 'Palm', action: 'Steer', detail: 'Move inside your calibrated box to pitch and bank.' },
-  { key: 'Fist', action: 'Boost', detail: 'Plus an automatic barrel roll as it closes.' },
-  { key: 'Flick up', action: 'Backflip', detail: 'A fast upward flick of the hand.' },
-] as const;
+/** Compact controls briefing shown before pre-flight, per control mode. */
+export const CONTROLS_BRIEFING: Record<ControlMode, readonly { key: string; action: string; detail: string }[]> = {
+  hand: [
+    { key: 'Palm', action: 'Steer', detail: 'Move inside your calibrated box to pitch and bank.' },
+    { key: 'Fist', action: 'Boost', detail: 'Plus an automatic barrel roll as it closes.' },
+    { key: 'Flick up', action: 'Backflip', detail: 'A fast upward flick of the hand.' },
+  ],
+  keyboard: [
+    { key: 'WASD / ←↑↓→', action: 'Steer', detail: 'W or ↑ climbs, S or ↓ dives, A/D or ←/→ bank.' },
+    { key: 'Space', action: 'Boost', detail: 'Hold to boost; each press also fires a barrel roll.' },
+    { key: 'F', action: 'Backflip', detail: 'One press, one backflip. Esc pauses.' },
+  ],
+};
+
+export const CONTROL_MODE_OPTIONS: { id: ControlMode; name: string; short: string }[] = [
+  { id: 'hand', name: 'Hand (webcam)', short: 'Hand' },
+  { id: 'keyboard', name: 'Keyboard', short: 'Keyboard' },
+];
 
 /** "0 m" → "00 000", "1200" → "01 200": the instrument-style altitude readout. */
 export function formatAltitude(meters: number) {

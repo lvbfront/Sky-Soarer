@@ -68,6 +68,13 @@ export class WindAudio {
     this.targetFreq = 350 + clamped * 900;
   }
 
+  /** Silences the wind while the game is paused (suspending the context), and brings it back. */
+  setSuspended(suspended: boolean) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'closed') return;
+    void (suspended ? ctx.suspend() : ctx.resume()).catch(() => undefined);
+  }
+
   stop() {
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     this.source?.stop();

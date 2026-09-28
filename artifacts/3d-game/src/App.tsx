@@ -16,7 +16,16 @@ import { MAP_OPTIONS, WEATHER_OPTIONS } from '@/game/presets';
 import { TrackingStartError } from '@/game/trackingShared';
 import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
-import { hasSavedSettings, loadSettings, saveSettings, type FlightSettings } from '@/game/settings';
+import { KeyboardControls } from '@/game/keyboardControls';
+import {
+  dismissGuide,
+  hasSavedSettings,
+  loadSettings,
+  saveSettings,
+  shouldAutoShowGuide,
+  type ControlMode,
+  type FlightSettings,
+} from '@/game/settings';
 import { Landing } from '@/landing/Landing';
 import { BootSequence, type BootLine } from '@/preflight/BootSequence';
 import { CalibrationPanel } from '@/preflight/CalibrationPanel';
@@ -26,7 +35,9 @@ import {
   drawHandPreview,
   type CalibrationPointsMap,
 } from '@/preflight/handPreview';
-import { FlightHud } from '@/flight/FlightHud';
+import { FlightHud, type FlickHint } from '@/flight/FlightHud';
+import { FlightGuide, type GuideOrigin } from '@/flight/FlightGuide';
+import { PauseMenu } from '@/flight/PauseMenu';
 
 // Hand tracking (handControls + the @mediapipe/hands runtime) and the full game engine are split
 // out of the first-load bundle: the landing page only needs the bird/terrain/ocean/sky modules.
@@ -92,6 +103,12 @@ interface StartupError {
   /** Raw error text, shown small under the friendly message to help with debugging. */
   detail?: string;
   phase: BootPhase;
+  /**
+   * A code chunk (the engine, or the tracking module) failed to import. Browsers cache a failed
+   * dynamic import for the page's lifetime, so retrying in place can't work: the boot HUD offers
+   * a page reload instead of Try Again.
+   */
+  needsReload?: boolean;
 }
 
 const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
@@ -107,7 +124,7 @@ const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
     'Hand tracking failed to load. Check your internet connection and try again.',
   'tracking-timeout':
     'Hand tracking took too long to load. Check your internet connection and try again.',
-  'engine-load-failed': 'The flight engine failed to load. Check your internet connection and try again.',
+  'engine-load-failed': 'The flight engine failed to load. Check your internet connection, then reload the page.',
   unknown: 'Something went wrong while starting the camera. Please try again.',
 };
 
@@ -153,7 +170,12 @@ const CALIBRATION_PREVIEW_HEIGHT = 360;
 const BOOT_MIN_DURATION_MS = 1100;
 const BOOT_READY_HOLD_MS = 550;
 
+// How long the near-miss "Flick faster ↑" hint stays up.
+const FLICK_HINT_MS = 1800;
+
 interface BootStatus {
+  /** The control mode this boot is for: keyboard mode shows only the controls and engine lines. */
+  controls: ControlMode;
   camera: 'requesting' | 'online';
   /** The camera's actual resolution once it's online, e.g. "480×360". */
   cameraResolution: string | null;
@@ -161,17 +183,24 @@ interface BootStatus {
   /** Real download percentage of the MediaPipe files while the model loads. */
   modelPercent: number;
   calibration: 'pending' | 'done';
+  /** Keyboard mode: the flight engine chunk, loaded (for real) during the boot. */
+  engine: 'standby' | 'loading' | 'ready';
+  /** True once every line is done (keyboard mode), which stops the T+ clock. */
+  done: boolean;
   /** `performance.now()` when this boot attempt began. */
   startedAt: number;
 }
 
-function freshBootStatus(): BootStatus {
+function freshBootStatus(controls: ControlMode = 'hand'): BootStatus {
   return {
+    controls,
     camera: 'requesting',
     cameraResolution: null,
     model: 'standby',
     modelPercent: 0,
     calibration: 'pending',
+    engine: 'standby',
+    done: false,
     startedAt: performance.now(),
   };
 }
@@ -193,6 +222,17 @@ const FAILURE_CODES: Record<StartupErrorKind, string> = {
 function buildBootLines(boot: BootStatus, error: StartupError | null): BootLine[] {
   const failedAt = error?.phase ?? null;
   const failCode = error ? FAILURE_CODES[error.kind] : '';
+
+  // Keyboard mode needs no camera, model or calibration: only the controls and the engine.
+  if (boot.controls === 'keyboard') {
+    const engine: BootLine =
+      failedAt === 'engine'
+        ? { key: 'engine', label: 'Flight engine', status: failCode, tone: 'fail', progress: null }
+        : boot.engine === 'ready'
+          ? { key: 'engine', label: 'Flight engine', status: 'Ready', tone: 'ok', progress: null }
+          : { key: 'engine', label: 'Flight engine', status: 'Loading', tone: 'active', progress: null };
+    return [{ key: 'controls', label: 'Controls', status: 'Keyboard', tone: 'ok', progress: null }, engine];
+  }
 
   const camera: BootLine =
     failedAt === 'camera'
@@ -243,8 +283,9 @@ function optionName(options: { id: string; name: string }[], id: string) {
   return options.find((option) => option.id === id)?.name.split(' /')[0] ?? id;
 }
 
-/** Small deadzone-aware label describing the current hand pose, shown under the in-flight sensor feed. */
+/** Small deadzone-aware label describing the current input, shown under the in-flight sensor feed. */
 function describeStatus(state: {
+  keyboard: boolean;
   handDetected: boolean;
   roll: number;
   pitch: number;
@@ -253,7 +294,7 @@ function describeStatus(state: {
   backflipping: boolean;
 }) {
   if (!state.handDetected) return 'No Hand Detected';
-  if (state.boost) return 'Fist (Boost) Active';
+  if (state.boost) return state.keyboard ? 'Boost Active' : 'Fist (Boost) Active';
   if (state.barrelRolling) return 'Barrel Roll Detected';
   if (state.backflipping) return 'Backflip!';
   if (state.roll > 0) return 'Steering Right';
@@ -273,6 +314,10 @@ function App() {
   const calibrationPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const engineRef = useRef<GameEngine | null>(null);
   const trackerRef = useRef<HandTracker | null>(null);
+  // Keyboard mode's input, created at takeoff (see handleStartFlying).
+  const keyboardRef = useRef<KeyboardControls | null>(null);
+  // The latest control reading from either input, for the HUD's keyboard input indicator.
+  const latestControlRef = useRef<HandControlState | null>(null);
   const previewRafRef = useRef<number | null>(null);
   const latestLandmarksRef = useRef<NormalizedLandmark[] | null>(null);
   const calibrationPointsRef = useRef<CalibrationPointsMap>({ ...EMPTY_CALIBRATION });
@@ -305,6 +350,11 @@ function App() {
   const [boot, setBoot] = useState<BootStatus>(freshBootStatus);
   // True from the Start Flying click until the takeoff reveal finishes; locks calibration controls.
   const [launching, setLaunching] = useState(false);
+  // The "How to fly" guide (null when closed) and where it was opened from, and the pause menu.
+  // In flight, either one pauses the game (see `paused`).
+  const [guide, setGuide] = useState<GuideOrigin | null>(null);
+  const [pauseOpen, setPauseOpen] = useState(false);
+  const [flickHint, setFlickHint] = useState<FlickHint | null>(null);
 
   // The landing page starts from the last choices saved in this browser (or the defaults).
   const [settings, setSettings] = useState<FlightSettings>(() => loadSettings());
@@ -331,6 +381,13 @@ function App() {
   const [landingScene, setLandingScene] = useState<LandingScene | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  const controlMode = settings.controls;
+
+  const flying = flightState === 'flying';
+  const paused = flying && (pauseOpen || guide !== null);
+  // Near-miss hints are only useful mid-flight, never behind a menu.
+  const flickHintsOnRef = useRef(false);
+  flickHintsOnRef.current = flying && !paused;
 
   useEffect(() => {
     if (!landingBackdropOn) return;
@@ -371,12 +428,13 @@ function App() {
   // instead of competing with MediaPipe; setPaused cuts to the shot before it freezes. It resumes
   // on Back or the error screen, and is disposed outright (not just paused) once Start Flying
   // builds the engine.
+  // Keyboard mode has no MediaPipe to make room for, so its short boot keeps the backdrop moving.
   useEffect(() => {
     if (!landingScene) return;
     const preflight = flightState === 'requesting' || flightState === 'calibrating' || flightState === 'error';
     if (preflight) landingScene.setProgress(1);
-    landingScene.setPaused(flightState === 'requesting' || flightState === 'calibrating');
-  }, [flightState, landingScene]);
+    landingScene.setPaused(controlMode === 'hand' && (flightState === 'requesting' || flightState === 'calibrating'));
+  }, [flightState, landingScene, controlMode]);
 
   const disposeLandingScene = useCallback(() => {
     landingSceneRef.current?.dispose();
@@ -409,6 +467,9 @@ function App() {
     sessionIdRef.current += 1;
     trackerRef.current?.stop();
     trackerRef.current = null;
+    keyboardRef.current?.stop();
+    keyboardRef.current = null;
+    latestControlRef.current = null;
     engineRef.current?.dispose();
     engineRef.current = null;
     if (previewRafRef.current !== null) cancelAnimationFrame(previewRafRef.current);
@@ -420,6 +481,32 @@ function App() {
   }, []);
 
   useEffect(() => stopEverything, [stopEverything]);
+
+  // Every control reading, from the hand tracker or the keyboard, goes through here. Defined once
+  // and never recreated: it forwards to whichever engine is active (a no-op during calibration,
+  // since engineRef.current is still null) and keeps the preview/status state fresh.
+  const handleControlState = useCallback((state: HandControlState) => {
+    engineRef.current?.applyControls(state);
+    latestControlRef.current = state;
+    latestLandmarksRef.current = state.landmarks;
+    setHandDetected(state.handDetected);
+    setBoosting(state.boost);
+    setStatusText(
+      describeStatus({
+        keyboard: settingsRef.current.controls === 'keyboard',
+        handDetected: state.handDetected,
+        roll: state.roll,
+        pitch: state.pitch,
+        boost: state.boost,
+        barrelRolling: barrelRollingRef.current,
+        backflipping: backflippingRef.current,
+      }),
+    );
+    const nearMiss = state.flickNearMiss;
+    if (nearMiss && flickHintsOnRef.current) {
+      setFlickHint((current) => ({ kind: nearMiss, id: (current?.id ?? 0) + 1 }));
+    }
+  }, []);
 
   // Requests camera access and starts hand tracking, then hands control to the calibration
   // screen. The GameEngine itself isn't created until "Start Flying" — the tracker's output
@@ -437,7 +524,7 @@ function App() {
     };
 
     const bootStartedAt = performance.now();
-    setBoot({ ...freshBootStatus(), startedAt: bootStartedAt });
+    setBoot({ ...freshBootStatus('hand'), startedAt: bootStartedAt });
 
     if (!window.isSecureContext) {
       showError({ kind: 'insecure-context', phase: 'camera' });
@@ -467,6 +554,8 @@ function App() {
     let stream: MediaStream | null = null;
     let tracker: HandTracker | null = null;
     let phase: BootPhase = 'camera';
+    // True while awaiting the tracking chunk itself, whose failure needs a reload to retry.
+    let chunkImport = false;
     // Releases everything this attempt acquired. Safe to call after stopEverything() has already
     // stopped some of it (stopping a track or tracker twice is a no-op).
     const releaseLocal = () => {
@@ -502,32 +591,15 @@ function App() {
       setBoot((current) => ({ ...current, camera: 'online', cameraResolution: resolution, model: 'loading' }));
 
       // MediaPipe's JS is loaded here, on the first pre-flight, not with the landing page.
+      chunkImport = true;
       const { HandTracker } = await trackingModule;
+      chunkImport = false;
       if (!isCurrent()) {
         releaseLocal();
         return;
       }
 
-      // Defined once and never recreated: it always forwards to whichever engine is
-      // currently active (a no-op during calibration, since engineRef.current is still
-      // null), and keeps the live preview/status state fresh on both the calibration and
-      // flying screens.
-      tracker = new HandTracker(video, (state: HandControlState) => {
-        engineRef.current?.applyControls(state);
-        latestLandmarksRef.current = state.landmarks;
-        setHandDetected(state.handDetected);
-        setBoosting(state.boost);
-        setStatusText(
-          describeStatus({
-            handDetected: state.handDetected,
-            roll: state.roll,
-            pitch: state.pitch,
-            boost: state.boost,
-            barrelRolling: barrelRollingRef.current,
-            backflipping: backflippingRef.current,
-          }),
-        );
-      });
+      tracker = new HandTracker(video, handleControlState);
       // Registered before the (possibly slow) model load, so pressing Back mid-load stops it
       // right away via stopEverything().
       trackerRef.current = tracker;
@@ -563,21 +635,72 @@ function App() {
       // A superseded attempt (the player already went back) must not pop an error screen.
       if (!isCurrent()) return;
       console.error('Failed to start hand tracking', error);
-      showError({ ...classifyStartupError(error), phase });
+      showError({ ...classifyStartupError(error), phase, needsReload: chunkImport });
     }
+  }, [handleControlState]);
+
+  // Keyboard mode's pre-flight: no camera, no MediaPipe, no calibration. The boot HUD shows only
+  // CONTROLS [KEYBOARD] and FLIGHT ENGINE, whose status follows the real engine chunk import, then
+  // it goes straight on to takeoff (via the guide, until the player turns that off).
+  const startKeyboardPreflight = useCallback(async () => {
+    const bootStartedAt = performance.now();
+    const sessionId = ++sessionIdRef.current;
+    const isCurrent = () => sessionId === sessionIdRef.current;
+    setBoot({ ...freshBootStatus('keyboard'), engine: 'loading', startedAt: bootStartedAt });
+    setStartupError(null);
+    setFlightState('requesting');
+    setScore(0);
+
+    try {
+      await loadGameEngine();
+    } catch (error) {
+      if (!isCurrent()) return;
+      console.error('Failed to load the game engine', error);
+      setStartupError({
+        kind: 'engine-load-failed',
+        detail: classifyStartupError(error).detail,
+        phase: 'engine',
+        needsReload: true,
+      });
+      setFlightState('error');
+      return;
+    }
+    if (!isCurrent()) return;
+    setBoot((current) => ({ ...current, engine: 'ready' }));
+
+    // The same short, capped hold as the hand boot, so the lines finish typing and READY registers.
+    const minDuration = reducedMotionRef.current ? 0 : BOOT_MIN_DURATION_MS;
+    const hold = Math.max(BOOT_READY_HOLD_MS, minDuration - (performance.now() - bootStartedAt));
+    await new Promise((resolve) => window.setTimeout(resolve, hold));
+    if (!isCurrent()) return;
+    setBoot((current) => ({ ...current, done: true }));
+    requestTakeoffRef.current();
   }, []);
 
-  // "Begin pre-flight" (and Quick start): remember these choices, then start camera + tracking.
+  // A failed chunk import can only be retried by reloading (see StartupError.needsReload). The
+  // settings are already saved, so Quick start is one click away afterwards.
+  const reloadPage = useCallback(() => window.location.reload(), []);
+
+  // Try Again restarts whichever pre-flight the current control mode uses.
+  const startPreflight = useCallback(() => {
+    if (settingsRef.current.controls === 'keyboard') void startKeyboardPreflight();
+    else void handleContinueToCalibration();
+  }, [startKeyboardPreflight, handleContinueToCalibration]);
+
+  // "Begin pre-flight" (and Quick start): remember these choices, then start the pre-flight for
+  // their control mode.
   const beginPreflight = useCallback(
     (chosen: FlightSettings) => {
       saveSettings(chosen);
       setQuickStartSettings(chosen);
       setHasSaved(true);
       setSettings(chosen);
+      // The async pre-flight reads settingsRef before React re-renders with `chosen`.
+      settingsRef.current = chosen;
       setIntroPending(false);
-      void handleContinueToCalibration();
+      startPreflight();
     },
-    [handleContinueToCalibration],
+    [startPreflight],
   );
 
   const handleBeginPreflight = useCallback(() => beginPreflight(settingsRef.current), [beginPreflight]);
@@ -585,9 +708,9 @@ function App() {
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
   // (the calibration sensor feed, or the compact in-flight HUD one), including the calibration
-  // reticles, box and current target while calibrating.
+  // reticles, box and current target while calibrating. Keyboard mode has no camera.
   useEffect(() => {
-    if (flightState !== 'calibrating' && flightState !== 'flying') return;
+    if (controlMode !== 'hand' || (flightState !== 'calibrating' && flightState !== 'flying')) return;
     const video = videoRef.current;
     const canvas = flightState === 'calibrating' ? calibrationPreviewCanvasRef.current : hudPreviewCanvasRef.current;
     const ctx = canvas?.getContext('2d') ?? null;
@@ -622,7 +745,7 @@ function App() {
     previewRafRef.current = rafId;
 
     return () => cancelAnimationFrame(rafId);
-  }, [flightState]);
+  }, [flightState, controlMode]);
 
   // Captures whichever calibration point the current step needs (neutral center, or one of
   // the 4 box corners), stores it for the overlay, and advances to the next step.
@@ -749,7 +872,8 @@ function App() {
         if (reducedMotionRef.current) {
           timeline.fromTo(veil, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.25, ease: 'none' });
         } else {
-          const panel = document.querySelector('[data-calibration-panel]');
+          // The calibration panel (hand) or the boot readout (keyboard).
+          const panel = document.querySelector('[data-takeoff-lift]');
           const text = veil.querySelectorAll('[data-takeoff-text]');
           const line = veil.querySelector('[data-takeoff-line]');
           if (panel) timeline.to(panel, { y: -28, scale: 0.97, autoAlpha: 0, duration: 0.5, ease: 'power2.in' }, 0);
@@ -787,7 +911,12 @@ function App() {
       resetTakeoff();
       stopEverything();
       setBoot((current) => ({ ...current, calibration: 'done', startedAt: performance.now() }));
-      setStartupError({ kind: 'engine-load-failed', detail: classifyStartupError(error).detail, phase: 'engine' });
+      setStartupError({
+        kind: 'engine-load-failed',
+        detail: classifyStartupError(error).detail,
+        phase: 'engine',
+        needsReload: true,
+      });
       setFlightState('error');
       return;
     }
@@ -800,11 +929,14 @@ function App() {
     // Free the landing backdrop's GPU memory and WebGL context before the engine creates its own.
     disposeLandingScene();
 
+    // Read through the ref: in keyboard mode this runs from the async boot, whose closure may
+    // predate a Quick start's settings.
+    const chosen = settingsRef.current;
     const engine = new GameEngineClass(canvasContainerRef.current, {
-      birdType: selectedBird,
-      mapType: selectedMap,
-      weather: selectedWeather,
-      ringChallenge: ringChallengeEnabled,
+      birdType: chosen.bird,
+      mapType: chosen.map,
+      weather: chosen.weather,
+      ringChallenge: chosen.ringChallenge,
       onScoreChange: (total) => {
         setScore(total);
         setBestScore(saveBestScoreIfHigher(total));
@@ -829,17 +961,26 @@ function App() {
     // The player may have pressed Back while the engine was starting; stopEverything() has
     // already disposed it in that case.
     if (engineRef.current !== engine) return;
+    if (chosen.controls === 'keyboard') {
+      const keyboard = new KeyboardControls(handleControlState);
+      keyboardRef.current = keyboard;
+      keyboard.start();
+    }
     setFlightState('flying');
-  }, [
-    selectedBird,
-    selectedMap,
-    selectedWeather,
-    ringChallengeEnabled,
-    stopEverything,
-    disposeLandingScene,
-    playTakeoffLaunch,
-    resetTakeoff,
-  ]);
+  }, [stopEverything, disposeLandingScene, playTakeoffLaunch, resetTakeoff, handleControlState]);
+
+  // The end of pre-flight (Start Flying, or keyboard mode's boot): the guide opens first until the
+  // player ticks "Don't show again" for this control mode, then takeoff.
+  const requestTakeoff = useCallback(() => {
+    if (shouldAutoShowGuide(settingsRef.current.controls)) {
+      setGuide('preflight');
+      return;
+    }
+    void handleStartFlying();
+  }, [handleStartFlying]);
+  // startKeyboardPreflight is created before requestTakeoff and calls it after awaits.
+  const requestTakeoffRef = useRef(requestTakeoff);
+  requestTakeoffRef.current = requestTakeoff;
 
   // Takeoff, part 2: once the first flight frame is up, the veil lifts off the chase camera's
   // swoop-in and the HUD blocks stagger in. Explicit from/to values keep this correct even if an
@@ -898,6 +1039,9 @@ function App() {
     stopEverything();
     setLandingBackdropOn(true);
     setFlightState('landing');
+    setGuide(null);
+    setPauseOpen(false);
+    setFlickHint(null);
     setHandDetected(false);
     setBoosting(false);
     setBarrelRolling(false);
@@ -911,7 +1055,70 @@ function App() {
 
   const handleStopFlight = handleBackToMenu;
 
-  const flying = flightState === 'flying';
+  // ---- Pause and the "How to fly" guide ----------------------------------------------------
+
+  // The game loop and the keyboard input freeze while the pause menu or the guide is open.
+  useEffect(() => {
+    engineRef.current?.setPaused(paused);
+    keyboardRef.current?.setPaused(paused);
+    if (paused) setFlickHint(null);
+  }, [paused]);
+
+  const handleGuidePrimary = useCallback(
+    (dontShowAgain: boolean) => {
+      const origin = guide;
+      setGuide(null);
+      if (origin !== 'preflight') return; // back to the pause menu, or resume
+      if (dontShowAgain) dismissGuide(settingsRef.current.controls);
+      void handleStartFlying();
+    },
+    [guide, handleStartFlying],
+  );
+
+  // Pre-flight "Back": to calibration in hand mode, to the landing in keyboard mode (its boot
+  // screen has nothing left to do).
+  const handleGuideBack = useCallback(() => {
+    if (settingsRef.current.controls === 'keyboard') handleBackToMenu();
+    else setGuide(null);
+  }, [handleBackToMenu]);
+
+  // Esc: closes the guide (as its Back/close button), else toggles the pause menu in flight.
+  // "?" opens the guide mid-flight. A tab switch pauses the flight.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === 'Escape') {
+        if (guide === 'preflight') handleGuideBack();
+        else if (guide) setGuide(null);
+        else if (flying) setPauseOpen((open) => !open);
+        else return;
+        event.preventDefault();
+      } else if (event.key === '?' && flying && !guide) {
+        event.preventDefault();
+        setGuide(pauseOpen ? 'pause' : 'hud');
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden && flying) setPauseOpen(true);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [guide, flying, pauseOpen, handleGuideBack]);
+
+  const handleResume = useCallback(() => setPauseOpen(false), []);
+  const handleOpenPause = useCallback(() => setPauseOpen(true), []);
+  const handleOpenGuideFromHud = useCallback(() => setGuide('hud'), []);
+  const handleOpenGuideFromPause = useCallback(() => setGuide('pause'), []);
+
+  useEffect(() => {
+    if (!flickHint) return;
+    const timeout = window.setTimeout(() => setFlickHint(null), FLICK_HINT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [flickHint]);
   const takeoffSummary = [
     optionName(BIRD_OPTIONS, selectedBird),
     optionName(MAP_OPTIONS, selectedMap),
@@ -928,6 +1135,8 @@ function App() {
       {flying && (
         <FlightHud
           engineRef={engineRef}
+          controlMode={controlMode}
+          controlStateRef={latestControlRef}
           previewCanvasRef={hudPreviewCanvasRef}
           previewWidth={HUD_PREVIEW_WIDTH}
           previewHeight={HUD_PREVIEW_HEIGHT}
@@ -942,7 +1151,33 @@ function App() {
           score={score}
           bestScore={bestScore}
           statusText={statusText}
+          flickHint={flickHint}
+          paused={paused}
+          onPause={handleOpenPause}
+          onGuide={handleOpenGuideFromHud}
           onStop={handleStopFlight}
+        />
+      )}
+
+      {flying && pauseOpen && guide === null && (
+        <PauseMenu
+          summary={takeoffSummary}
+          score={ringChallengeEnabled ? score : null}
+          reducedMotion={reducedMotion}
+          onResume={handleResume}
+          onGuide={handleOpenGuideFromPause}
+          onExit={handleBackToMenu}
+        />
+      )}
+
+      {guide !== null && (
+        <FlightGuide
+          key={guide}
+          mode={controlMode}
+          origin={guide}
+          reducedMotion={reducedMotion}
+          onPrimary={handleGuidePrimary}
+          onSecondary={handleGuideBack}
         />
       )}
 
@@ -973,15 +1208,18 @@ function App() {
           errorMessage={startupError ? STARTUP_ERROR_MESSAGES[startupError.kind] : null}
           errorDetail={startupError?.detail ?? null}
           startedAt={boot.startedAt}
-          running={flightState === 'requesting'}
+          running={flightState === 'requesting' && !boot.done}
           reducedMotion={reducedMotion}
-          onRetry={handleContinueToCalibration}
+          keyboard={boot.controls === 'keyboard'}
+          inert={guide !== null}
+          retryLabel={startupError?.needsReload ? 'Reload page' : 'Try Again'}
+          onRetry={startupError?.needsReload ? reloadPage : startPreflight}
           onBack={handleBackToMenu}
         />
       )}
 
       {flightState === 'calibrating' && (
-        <PreflightLayer>
+        <PreflightLayer inert={guide !== null}>
           <CalibrationPanel
             canvasRef={calibrationPreviewCanvasRef}
             canvasWidth={CALIBRATION_PREVIEW_WIDTH}
@@ -994,7 +1232,7 @@ function App() {
             onCapture={handleCaptureCalibrationStep}
             onReset={handleResetCalibration}
             onSensitivityChange={handleSensitivityChange}
-            onStartFlying={handleStartFlying}
+            onStartFlying={requestTakeoff}
             onBack={handleBackToMenu}
             onCanvasPointerDown={handleCornerPointerDown}
             onCanvasPointerMove={handleCornerPointerMove}
@@ -1030,9 +1268,9 @@ function App() {
  * flex box rather than directly in an `items-center` scroller, so a card taller than the window
  * starts at the top and scrolls instead of having its top cut off (CLAUDE.md §9 #7).
  */
-function PreflightLayer({ children }: { children: ReactNode }) {
+function PreflightLayer({ children, inert = false }: { children: ReactNode; inert?: boolean }) {
   return (
-    <div className="fixed inset-0 z-30 overflow-y-auto bg-[#06101f]/25">
+    <div className="fixed inset-0 z-30 overflow-y-auto bg-[#06101f]/25" inert={inert}>
       <div className="flex min-h-full items-center justify-center px-4 py-8 sm:px-6 sm:py-10">{children}</div>
     </div>
   );

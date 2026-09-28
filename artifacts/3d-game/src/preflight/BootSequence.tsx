@@ -26,6 +26,12 @@ interface BootSequenceProps {
   /** False freezes the T+ clock (after a failure). */
   running: boolean;
   reducedMotion: boolean;
+  /** Keyboard mode has one pre-flight step (no calibration) and no camera to explain. */
+  keyboard: boolean;
+  /** True while the guide is open over it. */
+  inert?: boolean;
+  /** "Try Again", or "Reload page" when retrying in place can't work. */
+  retryLabel: string;
   onRetry: () => void;
   onBack: () => void;
 }
@@ -54,6 +60,9 @@ export function BootSequence({
   startedAt,
   running,
   reducedMotion,
+  keyboard,
+  inert = false,
+  retryLabel,
   onRetry,
   onBack,
 }: BootSequenceProps) {
@@ -127,7 +136,7 @@ export function BootSequence({
   }, [startedAt, running]);
 
   return (
-    <div ref={rootRef} className="fixed inset-0 z-30 overflow-y-auto text-white">
+    <div ref={rootRef} className="fixed inset-0 z-30 overflow-y-auto text-white" inert={inert}>
       {/* Ink scrim over the frozen backdrop: heavier on the left where the readout sits. */}
       <div
         className="pointer-events-none fixed inset-0"
@@ -148,11 +157,13 @@ export function BootSequence({
       </header>
 
       <main className="relative flex min-h-full items-center py-24 pl-[clamp(1.5rem,9vw,9.5rem)] pr-6">
-        <div className="w-full max-w-[40rem]">
+        {/* data-takeoff-lift: in keyboard mode the takeoff transition lifts this away, as it does the
+            calibration panel in hand mode. */}
+        <div data-takeoff-lift className="w-full max-w-[40rem]">
           <p className="ascent-hud mb-5 flex items-center gap-3 text-[color:var(--ascent-cyan)]">
             <span>Pre-flight</span>
             <span className="h-px w-10 bg-current opacity-60" />
-            <span>01 / 02</span>
+            <span>{keyboard ? '01 / 01' : '01 / 02'}</span>
             <span className="opacity-60">·</span>
             <span className="text-white/80">Systems check</span>
           </p>
@@ -162,7 +173,9 @@ export function BootSequence({
           <p className="ascent-shadow mt-4 max-w-md text-[15px] leading-relaxed text-white/80">
             {failed
               ? 'One of the systems below could not start. Fix it, then run the check again.'
-              : 'Allow camera access, then hand tracking loads (about 13 MB the first time).'}
+              : keyboard
+                ? 'Keyboard controls: no camera, no hand tracking, nothing big to download.'
+                : 'Allow camera access, then hand tracking loads (about 13 MB the first time).'}
           </p>
 
           <ol className="mt-10 space-y-5 font-mono text-[13px] uppercase tracking-[0.1em] sm:text-sm">
@@ -206,7 +219,7 @@ export function BootSequence({
                       className="mt-4 flex items-center gap-2 rounded-full bg-white px-5 py-2.5 font-sans text-sm font-semibold text-[color:var(--ascent-ink)] transition-colors hover:bg-[color:var(--ascent-warm)]"
                     >
                       <RotateCcw className="h-4 w-4" />
-                      Try Again
+                      {retryLabel}
                     </button>
                   </div>
                 )}
@@ -229,7 +242,9 @@ export function BootSequence({
               Back
             </button>
             {!failed && (
-              <p className="ascent-hud text-[10px] text-white/50">Your camera feed never leaves this page.</p>
+              <p className="ascent-hud text-[10px] text-white/50">
+                {keyboard ? 'Steer with WASD or the arrow keys · Esc pauses' : 'Your camera feed never leaves this page.'}
+              </p>
             )}
           </div>
         </div>
