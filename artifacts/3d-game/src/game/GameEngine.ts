@@ -10,6 +10,7 @@ import { UnderwaterEnvironment } from './underwater';
 import { WaterBurstEffect } from './waterBurst';
 import { RingGuideArrow } from './ringGuide';
 import { WindAudio, SoundEffects } from './audio';
+import { damp, perFrameRate } from './damping';
 import type { HandControlState } from './handControls';
 
 import {
@@ -53,8 +54,11 @@ export interface GameEngineOptions {
   onWaterTransition?: (state: 'submerged' | 'surfaced') => void;
 }
 
+// Every smoothing rate below is per second, applied with damp(rate, dt) so the feel is the same at
+// any frame rate. Each is written as the per-frame factor it replaced, at the 60 FPS it was tuned at.
+
 // BASE_SPEED and BOOST_SPEED live in presets.ts (the guide quotes them).
-const SPEED_LERP = 0.04;
+const SPEED_RATE = perFrameRate(0.04, 60);
 const RING_SPEED_PULSE = 7;
 const SPEED_PULSE_DECAY_PER_SEC = 9;
 
@@ -62,7 +66,7 @@ const SPEED_PULSE_DECAY_PER_SEC = 9;
 // bleeds off more gradually, matching the "more drag, floatier" swimming feel from spec.
 const UNDERWATER_BASE_SPEED = 5;
 const UNDERWATER_BOOST_SPEED = 10;
-const UNDERWATER_SPEED_LERP = 0.02;
+const UNDERWATER_SPEED_RATE = perFrameRate(0.02, 60);
 // Steering input is damped underwater so both the visual roll and the actual turn rate
 // soften together — swimming banks gentler than flying.
 const UNDERWATER_STEERING_DAMPING = 0.5;
@@ -71,17 +75,17 @@ const BASE_FOV = 58;
 const BOOST_FOV = 72;
 const UNDERWATER_BASE_FOV = 50;
 const UNDERWATER_BOOST_FOV = 60;
-const FOV_LERP = 0.06;
+const FOV_RATE = perFrameRate(0.06, 60);
 
-const CAMERA_LERP = 0.05;
-const UNDERWATER_CAMERA_LERP = 0.03;
+const CAMERA_RATE = perFrameRate(0.05, 60);
+const UNDERWATER_CAMERA_RATE = perFrameRate(0.03, 60);
 const CAMERA_BACK_DISTANCE = 6.5;
 const CAMERA_HEIGHT = 2.2;
 const LOOK_AHEAD_DISTANCE = 8;
 
 const MAX_PITCH_ANGLE = THREE.MathUtils.degToRad(38);
 const MAX_ROLL_ANGLE = THREE.MathUtils.degToRad(48);
-const ORIENTATION_LERP = 0.06;
+const ORIENTATION_RATE = perFrameRate(0.06, 60);
 
 // Trick lengths (BARREL_ROLL_DURATION, BACKFLIP_DURATION) live in presets.ts (the guide quotes them).
 
@@ -132,7 +136,9 @@ export class GameEngine {
 
   private options: GameEngineOptions;
 
-  private clock = new THREE.Clock();
+  // THREE.Timer (THREE.Clock is deprecated), connected to the Page Visibility API so a hidden tab
+  // doesn't produce one huge delta on return.
+  private timer = new THREE.Timer();
   private animationHandle: number | null = null;
 
   private targetPitch = 0;
@@ -217,6 +223,7 @@ export class GameEngine {
 
     this.environment.update(this.bird.group.position);
 
+    this.timer.connect(document);
     window.addEventListener('resize', this.handleResize);
   }
 
@@ -304,7 +311,7 @@ export class GameEngine {
   async start() {
     await this.wind.start();
     if (this.disposed) return;
-    this.clock.start();
+    this.timer.reset();
     this.started = true;
     if (this.paused) {
       this.wind.setSuspended(true);
@@ -315,7 +322,7 @@ export class GameEngine {
 
   private loop = () => {
     if (this.disposed || this.paused) return;
-    const dt = Math.min(this.clock.getDelta(), 0.05);
+    const dt = Math.min(this.timer.update().getDelta(), 0.05);
     this.update(dt);
     this.renderer.render(this.scene, this.camera);
     this.animationHandle = requestAnimationFrame(this.loop);
@@ -336,7 +343,8 @@ export class GameEngine {
       this.animationHandle = null;
       return;
     }
-    this.clock.getDelta();
+    // Discard the paused time: the next update() measures from now.
+    this.timer.reset();
     this.animationHandle = requestAnimationFrame(this.loop);
   }
 
@@ -360,7 +368,7 @@ export class GameEngine {
     }
 
     // Hand lost: ease back to level flight at cruise speed instead of latching the last steering
-    // and boost input (the pitch/roll ease comes from the ORIENTATION_LERP chase in `update`).
+    // and boost input (the pitch/roll ease comes from the ORIENTATION_RATE chase in `update`).
     if (!state.handDetected) {
       this.targetPitch = 0;
       this.targetRoll = 0;
@@ -387,8 +395,9 @@ export class GameEngine {
   private update(dt: number) {
     // Smoothly chase the gesture-driven pitch/roll targets (extra jitter removal beyond
     // the exponential smoothing already applied to the raw hand keypoints).
-    this.currentPitch += (this.targetPitch - this.currentPitch) * ORIENTATION_LERP;
-    this.currentRoll += (this.targetRoll - this.currentRoll) * ORIENTATION_LERP;
+    const orientationAlpha = damp(ORIENTATION_RATE, dt);
+    this.currentPitch += (this.targetPitch - this.currentPitch) * orientationAlpha;
+    this.currentRoll += (this.targetRoll - this.currentRoll) * orientationAlpha;
 
     // `steeringPitchAngle`/`steeringRollAngle` are the player's actual steering input and are
     // the ONLY things allowed to change the flight path (forward vector, heading/yaw).
@@ -435,9 +444,9 @@ export class GameEngine {
     this.speedPulse = Math.max(0, this.speedPulse - SPEED_PULSE_DECAY_PER_SEC * dt);
     const baseSpeed = this.underwater ? UNDERWATER_BASE_SPEED : BASE_SPEED;
     const boostSpeed = this.underwater ? UNDERWATER_BOOST_SPEED : BOOST_SPEED;
-    const speedLerp = this.underwater ? UNDERWATER_SPEED_LERP : SPEED_LERP;
+    const speedRate = this.underwater ? UNDERWATER_SPEED_RATE : SPEED_RATE;
     const targetSpeed = (this.boosting ? boostSpeed : baseSpeed) + this.speedPulse;
-    this.speed += (targetSpeed - this.speed) * speedLerp;
+    this.speed += (targetSpeed - this.speed) * damp(speedRate, dt);
 
     // The actual flight path uses only the steering pitch (never the trick sweep above), so
     // a backflip never alters where the bird is actually heading.
@@ -548,7 +557,7 @@ export class GameEngine {
 
     // Camera follow: heavy lerp for a floaty, relaxed feel — even heavier underwater so the
     // chase camera reads as swimming through water rather than flying through air.
-    const cameraLerp = this.underwater ? UNDERWATER_CAMERA_LERP : CAMERA_LERP;
+    const cameraLerp = damp(this.underwater ? UNDERWATER_CAMERA_RATE : CAMERA_RATE, dt);
     const behind = forward.clone().multiplyScalar(-CAMERA_BACK_DISTANCE);
     const desiredCameraPos = bird.position.clone().add(behind).add(new THREE.Vector3(0, CAMERA_HEIGHT, 0));
     this.cameraTarget.lerp(desiredCameraPos, cameraLerp);
@@ -561,7 +570,7 @@ export class GameEngine {
     const baseFov = this.underwater ? UNDERWATER_BASE_FOV : BASE_FOV;
     const boostFov = this.underwater ? UNDERWATER_BOOST_FOV : BOOST_FOV;
     const targetFov = this.boosting ? boostFov : baseFov;
-    this.camera.fov += (targetFov - this.camera.fov) * FOV_LERP;
+    this.camera.fov += (targetFov - this.camera.fov) * damp(FOV_RATE, dt);
     this.camera.updateProjectionMatrix();
 
     // Keep the sun's shadow frustum centered near the bird as it travels the endless map.
@@ -636,6 +645,7 @@ export class GameEngine {
     this.disposed = true;
     if (this.animationHandle !== null) cancelAnimationFrame(this.animationHandle);
     window.removeEventListener('resize', this.handleResize);
+    this.timer.dispose();
     this.wind.stop();
     this.sfx.dispose();
     this.clouds.dispose();

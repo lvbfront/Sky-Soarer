@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
-import { ArrowRight, Check, ChevronLeft, ChevronRight, Hand, Keyboard, Volume2, VolumeX } from 'lucide-react';
+import { ArrowRight, Check, ChevronLeft, ChevronRight, Hand, Keyboard, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { BIRD_OPTIONS } from '@/game/bird';
 import { MAP_OPTIONS, WEATHER_LOOKS, WEATHER_OPTIONS } from '@/game/presets';
 import { WindAudio } from '@/game/audio';
@@ -34,11 +34,15 @@ interface LandingProps {
   /** Settings the Quick start button will use (the last ones saved in this browser). */
   quickStartSettings: FlightSettings;
   hasSavedSettings: boolean;
+  /** A hand calibration is saved: hand-mode pre-flight skips the calibration screen. */
+  calibrationSaved: boolean;
   reducedMotion: boolean;
   /** Plays the full intro timeline (first visit of the page load only). */
   playIntro: boolean;
   onChange: (patch: Partial<FlightSettings>) => void;
   onBegin: () => void;
+  /** Begin pre-flight, but show the calibration screen even though one is saved. */
+  onRecalibrate: () => void;
   onQuickStart: () => void;
   subscribeTelemetry: (listener: ((telemetry: LandingTelemetry) => void) | null) => void;
 }
@@ -72,10 +76,12 @@ export function Landing({
   bestScore,
   quickStartSettings,
   hasSavedSettings,
+  calibrationSaved,
   reducedMotion,
   playIntro,
   onChange,
   onBegin,
+  onRecalibrate,
   onQuickStart,
   subscribeTelemetry,
 }: LandingProps) {
@@ -817,7 +823,11 @@ export function Landing({
                 <span>
                   <span className="block text-lg font-semibold">Begin pre-flight</span>
                   <span className="ascent-hud block text-[10px] opacity-60">
-                    {keyboardMode ? 'Keyboard · no camera needed' : 'Camera + hand calibration'}
+                    {keyboardMode
+                      ? 'Keyboard · no camera needed'
+                      : calibrationSaved
+                        ? 'Camera · saved calibration'
+                        : 'Camera + hand calibration'}
                   </span>
                 </span>
                 <span className="flex h-12 w-12 items-center justify-center rounded-full bg-[color:var(--ascent-ink)] text-white transition group-hover:translate-x-1">
@@ -829,6 +839,16 @@ export function Landing({
                   ? 'No camera or download needed. Esc pauses the flight at any time.'
                   : 'Your camera feed stays on this page and is only used to read your hand position.'}
               </p>
+              {!keyboardMode && calibrationSaved && (
+                <button
+                  type="button"
+                  onClick={onRecalibrate}
+                  className="ascent-hud mt-3 flex items-center gap-1.5 text-white/75 transition-colors hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  Recalibrate hand controls
+                </button>
+              )}
             </div>
           </div>
         </section>

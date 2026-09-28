@@ -12,7 +12,8 @@
     "dev": "pnpm --filter @workspace/3d-game run dev",
     "build": "pnpm run typecheck && pnpm -r --if-present run build",
     "preview": "pnpm --filter @workspace/3d-game run serve",
-    "typecheck": "pnpm -r --if-present run typecheck"
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test"
   },
   "devDependencies": {
     "prettier": "^3.9.6",

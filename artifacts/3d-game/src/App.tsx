@@ -13,14 +13,17 @@ import type { GameEngine } from '@/game/GameEngine';
 import { BIRD_OPTIONS } from '@/game/bird';
 import { LandingScene, type LandingTelemetry } from '@/game/LandingScene';
 import { MAP_OPTIONS, NEXT_RING_HIGHLIGHTS, WEATHER_OPTIONS } from '@/game/presets';
-import { TrackingStartError } from '@/game/trackingShared';
+import { TrackingStartError, type CalibrationData, type CalibrationProblem } from '@/game/trackingShared';
+import { computeBox, validateCalibration } from '@/game/trackingMath';
 import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 import { KeyboardControls } from '@/game/keyboardControls';
 import {
   dismissGuide,
   hasSavedSettings,
+  loadCalibration,
   loadSettings,
+  saveCalibration,
   saveSettings,
   shouldAutoShowGuide,
   type ControlMode,
@@ -182,7 +185,8 @@ interface BootStatus {
   model: 'standby' | 'loading' | 'warming' | 'ready';
   /** Real download percentage of the MediaPipe files while the model loads. */
   modelPercent: number;
-  calibration: 'pending' | 'done';
+  /** `saved`: a calibration saved last time was restored, so the calibration screen is skipped. */
+  calibration: 'pending' | 'done' | 'saved';
   /** Keyboard mode: the flight engine chunk, loaded (for real) during the boot. */
   engine: 'standby' | 'loading' | 'ready';
   /** True once every line is done (keyboard mode), which stops the T+ clock. */
@@ -270,13 +274,28 @@ function buildBootLines(boot: BootStatus, error: StartupError | null): BootLine[
   const calibration: BootLine =
     boot.calibration === 'done'
       ? { key: 'calibration', label: 'Calibration', status: 'Complete', tone: 'ok', progress: null }
-      : { key: 'calibration', label: 'Calibration', status: 'Pending', tone: 'idle', progress: null };
+      : boot.calibration === 'saved'
+        ? { key: 'calibration', label: 'Calibration', status: 'Saved', tone: 'ok', progress: null }
+        : { key: 'calibration', label: 'Calibration', status: 'Pending', tone: 'idle', progress: null };
 
   const lines = [camera, model, calibration];
   if (failedAt === 'engine') {
     lines.push({ key: 'engine', label: 'Flight engine', status: failCode, tone: 'fail', progress: null });
   }
   return lines;
+}
+
+/** The calibration screen's points as the tracker's calibration data, once all five are captured. */
+function calibrationFromPoints(points: CalibrationPointsMap, sensitivity: number): CalibrationData | null {
+  const { center, topLeft, topRight, bottomLeft, bottomRight } = points;
+  if (!center || !topLeft || !topRight || !bottomLeft || !bottomRight) return null;
+  return { center, corners: { topLeft, topRight, bottomLeft, bottomRight }, sensitivity };
+}
+
+/** What's wrong with the captured points (see validateCalibration); empty until all five exist. */
+function calibrationProblemsFor(points: CalibrationPointsMap): CalibrationProblem[] {
+  const calibration = calibrationFromPoints(points, 1);
+  return calibration ? validateCalibration(calibration.center, computeBox(calibration.corners)) : [];
 }
 
 function optionName(options: { id: string; name: string }[], id: string) {
@@ -366,6 +385,16 @@ function App() {
 
   const [sensitivity, setSensitivity] = useState(1);
   const [calibrationStep, setCalibrationStep] = useState(0);
+  // Validation of the finished calibration (also read by the preview rAF, through the ref), whether
+  // the points came from the saved calibration, and whether one is saved at all (the landing's
+  // Recalibrate button). Set by the landing's Recalibrate: the next pre-flight shows the
+  // calibration screen even though a saved calibration exists.
+  const [calibrationProblems, setCalibrationProblems] = useState<CalibrationProblem[]>([]);
+  const calibrationProblemsRef = useRef(calibrationProblems);
+  calibrationProblemsRef.current = calibrationProblems;
+  const [calibrationRestored, setCalibrationRestored] = useState(false);
+  const [calibrationSaved, setCalibrationSaved] = useState(() => loadCalibration() !== null);
+  const forceCalibrationRef = useRef(false);
 
   const calibrationStepRef = useRef(calibrationStep);
   calibrationStepRef.current = calibrationStep;
@@ -629,6 +658,26 @@ function App() {
         return;
       }
 
+      // A returning player's saved calibration skips the calibration screen (the landing's
+      // Recalibrate, the guide's Back, the pause menu and the calibration screen itself all lead
+      // back to it). Otherwise it opens, starting from the saved sensitivity if there is one.
+      const saved = loadCalibration();
+      const useSaved = saved !== null && !forceCalibrationRef.current;
+      forceCalibrationRef.current = false;
+      if (saved) {
+        tracker.setSensitivity(saved.sensitivity);
+        setSensitivity(saved.sensitivity);
+      }
+      if (useSaved) {
+        tracker.applyCalibration(saved);
+        calibrationPointsRef.current = { center: saved.center, ...saved.corners };
+        setCalibrationStep(CALIBRATION_STEPS.length);
+        setCalibrationProblems([]);
+        setCalibrationRestored(true);
+        setBoot((current) => ({ ...current, calibration: 'saved', done: true }));
+        requestTakeoffRef.current();
+        return;
+      }
       setFlightState('calibrating');
     } catch (error) {
       releaseLocal();
@@ -690,7 +739,8 @@ function App() {
   // "Begin pre-flight" (and Quick start): remember these choices, then start the pre-flight for
   // their control mode.
   const beginPreflight = useCallback(
-    (chosen: FlightSettings) => {
+    (chosen: FlightSettings, { recalibrate = false } = {}) => {
+      forceCalibrationRef.current = recalibrate;
       saveSettings(chosen);
       setQuickStartSettings(chosen);
       setHasSaved(true);
@@ -705,6 +755,10 @@ function App() {
 
   const handleBeginPreflight = useCallback(() => beginPreflight(settingsRef.current), [beginPreflight]);
   const handleQuickStart = useCallback(() => beginPreflight(loadSettings()), [beginPreflight]);
+  const handleBeginRecalibration = useCallback(
+    () => beginPreflight(settingsRef.current, { recalibrate: true }),
+    [beginPreflight],
+  );
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
   // (the calibration sensor feed, or the compact in-flight HUD one), including the calibration
@@ -735,6 +789,7 @@ function App() {
                 points: calibrationPointsRef.current,
                 target: CALIBRATION_STEPS[calibrationStepRef.current] ?? null,
                 time: performance.now(),
+                invalid: calibrationProblemsRef.current.length > 0,
               }
             : null,
         );
@@ -758,12 +813,16 @@ function App() {
         : trackerRef.current.captureCorner(step.key as CalibrationCorner);
     if (!point) return;
     calibrationPointsRef.current = { ...calibrationPointsRef.current, [step.key]: point };
+    setCalibrationProblems(calibrationProblemsFor(calibrationPointsRef.current));
+    setCalibrationRestored(false);
     setCalibrationStep((s) => s + 1);
   }, [calibrationStep]);
 
   const handleResetCalibration = useCallback(() => {
     trackerRef.current?.resetCalibration();
     calibrationPointsRef.current = { ...EMPTY_CALIBRATION };
+    setCalibrationProblems([]);
+    setCalibrationRestored(false);
     setCalibrationStep(0);
   }, []);
 
@@ -821,6 +880,9 @@ function App() {
       if (!point) return;
       calibrationPointsRef.current = { ...calibrationPointsRef.current, [corner]: point };
       trackerRef.current?.setCorner(corner, point);
+      // Re-validate live, so the box turns red (and Start Flying locks) the moment a drag breaks it.
+      const problems = calibrationProblemsFor(calibrationPointsRef.current);
+      setCalibrationProblems((current) => (current.join() === problems.join() ? current : problems));
       event.preventDefault();
     },
     [getCalibrationPointFromEvent],
@@ -982,6 +1044,15 @@ function App() {
   const requestTakeoffRef = useRef(requestTakeoff);
   requestTakeoffRef.current = requestTakeoff;
 
+  // Start Flying on the calibration screen: remember this calibration for next time, then take off.
+  const handleCalibratedTakeoff = useCallback(() => {
+    const calibration = calibrationFromPoints(calibrationPointsRef.current, sensitivity);
+    if (!calibration || calibrationProblemsFor(calibrationPointsRef.current).length > 0) return;
+    saveCalibration(calibration);
+    setCalibrationSaved(true);
+    requestTakeoff();
+  }, [sensitivity, requestTakeoff]);
+
   // Takeoff, part 2: once the first flight frame is up, the veil lifts off the chase camera's
   // swoop-in and the HUD blocks stagger in. Explicit from/to values keep this correct even if an
   // earlier run was killed halfway.
@@ -1050,8 +1121,34 @@ function App() {
     setSurfaceSplash(false);
     setStartupError(null);
     setCalibrationStep(0);
+    setCalibrationProblems([]);
+    setCalibrationRestored(false);
+    setCalibrationSaved(loadCalibration() !== null);
     setStatusText('No Hand Detected');
   }, [stopEverything, resetTakeoff]);
+
+  // Pause menu "Recalibrate" (hand mode): end this flight but keep the camera and the tracker, and
+  // reopen the calibration screen with the current calibration loaded. Start Flying builds a new
+  // engine from there, like the first takeoff. The landing backdrop comes back behind the panel
+  // (held on the pre-flight shot), after the engine has released its WebGL context.
+  const handleRecalibrate = useCallback(() => {
+    if (!trackerRef.current) return;
+    resetTakeoff();
+    engineRef.current?.dispose();
+    engineRef.current = null;
+    setPauseOpen(false);
+    setGuide(null);
+    setFlickHint(null);
+    setBoosting(false);
+    setBarrelRolling(false);
+    setBackflipping(false);
+    setUnderwater(false);
+    setSurfaceSplash(false);
+    setScore(0);
+    setCalibrationProblems(calibrationProblemsFor(calibrationPointsRef.current));
+    setLandingBackdropOn(true);
+    setFlightState('calibrating');
+  }, [resetTakeoff]);
 
   const handleStopFlight = handleBackToMenu;
 
@@ -1077,9 +1174,15 @@ function App() {
 
   // Pre-flight "Back": to calibration in hand mode, to the landing in keyboard mode (its boot
   // screen has nothing left to do).
+  // A saved calibration skipped the calibration screen, so the guide opened over the boot screen:
+  // Back opens the calibration screen (with that calibration loaded) instead.
   const handleGuideBack = useCallback(() => {
-    if (settingsRef.current.controls === 'keyboard') handleBackToMenu();
-    else setGuide(null);
+    if (settingsRef.current.controls === 'keyboard') {
+      handleBackToMenu();
+      return;
+    }
+    setGuide(null);
+    setFlightState((state) => (state === 'requesting' ? 'calibrating' : state));
   }, [handleBackToMenu]);
 
   // Esc: closes the guide (as its Back/close button), else toggles the pause menu in flight.
@@ -1167,6 +1270,7 @@ function App() {
           reducedMotion={reducedMotion}
           onResume={handleResume}
           onGuide={handleOpenGuideFromPause}
+          onRecalibrate={controlMode === 'hand' ? handleRecalibrate : undefined}
           onExit={handleBackToMenu}
         />
       )}
@@ -1191,10 +1295,12 @@ function App() {
           bestScore={bestScore}
           quickStartSettings={quickStartSettings}
           hasSavedSettings={hasSaved}
+          calibrationSaved={calibrationSaved}
           reducedMotion={reducedMotion}
           playIntro={introPending}
           onChange={handleSettingsChange}
           onBegin={handleBeginPreflight}
+          onRecalibrate={handleBeginRecalibration}
           onQuickStart={handleQuickStart}
           subscribeTelemetry={subscribeTelemetry}
         />
@@ -1228,12 +1334,14 @@ function App() {
             handDetected={handDetected}
             step={calibrationStep}
             sensitivity={sensitivity}
+            problems={calibrationProblems}
+            restored={calibrationRestored}
             feedResolution={boot.cameraResolution}
             launching={launching}
             onCapture={handleCaptureCalibrationStep}
             onReset={handleResetCalibration}
             onSensitivityChange={handleSensitivityChange}
-            onStartFlying={requestTakeoff}
+            onStartFlying={handleCalibratedTakeoff}
             onBack={handleBackToMenu}
             onCanvasPointerDown={handleCornerPointerDown}
             onCanvasPointerMove={handleCornerPointerMove}

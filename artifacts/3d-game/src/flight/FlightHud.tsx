@@ -4,7 +4,7 @@ import type { GameEngine } from '@/game/GameEngine';
 import type { HandControlState } from '@/game/handControls';
 import type { RingHighlight } from '@/game/presets';
 import type { ControlMode } from '@/game/settings';
-import type { FlickNearMiss } from '@/game/trackingShared';
+import { FLICK_TIP_RISE, describeBoxFraction, type FlickNearMiss } from '@/game/trackingShared';
 import { CornerBrackets } from '@/ui/hud';
 
 /** A near-miss flick to coach; `id` changes for every new one so the hint replays. */
@@ -15,7 +15,10 @@ export interface FlickHint {
 
 const FLICK_HINT_TEXT: Record<FlickNearMiss, { main: string; sub: string }> = {
   'too-slow': { main: 'Flick faster ↑', sub: 'Almost a backflip: same move, in one quick snap' },
-  'too-short': { main: 'Flick higher ↑', sub: 'Almost a backflip: snap a quarter of the frame up' },
+  'too-short': {
+    main: 'Flick higher ↑',
+    sub: `Almost a backflip: snap about ${describeBoxFraction(FLICK_TIP_RISE)} your box up`,
+  },
 };
 
 interface FlightHudProps {
