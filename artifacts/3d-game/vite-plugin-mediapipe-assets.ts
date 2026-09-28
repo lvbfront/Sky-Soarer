@@ -12,6 +12,12 @@ const PUBLIC_DIR = 'mediapipe/hands';
 // Package files that MediaPipe never requests at runtime (`hands.js` is the bundled JS entry point).
 const EXCLUDED_FILES = new Set(['hands.js', 'index.d.ts', 'package.json', 'README.md']);
 
+// Virtual module exporting each served file's byte size, read from the same installed package. The
+// tracker weights its loading percentage by these (see downloadMeter.ts), so the sizes follow the
+// pinned version automatically. Typed in src/mediapipe-assets.d.ts.
+const MANIFEST_MODULE_ID = 'virtual:mediapipe-hands-assets';
+const RESOLVED_MANIFEST_ID = `\0${MANIFEST_MODULE_ID}`;
+
 const CONTENT_TYPES: Record<string, string> = {
   '.js': 'text/javascript',
   '.wasm': 'application/wasm',
@@ -32,8 +38,19 @@ export function mediapipeAssets(): Plugin {
   const packageDir = resolvePackageDir();
   const files = new Set(listAssetFiles(packageDir));
 
+  const sizes = Object.fromEntries([...files].map((file) => [file, fs.statSync(path.join(packageDir, file)).size]));
+
   return {
     name: 'mediapipe-assets',
+
+    resolveId(id) {
+      return id === MANIFEST_MODULE_ID ? RESOLVED_MANIFEST_ID : undefined;
+    },
+
+    load(id) {
+      if (id !== RESOLVED_MANIFEST_ID) return undefined;
+      return `export const MEDIAPIPE_FILE_SIZES = ${JSON.stringify(sizes)};`;
+    },
 
     // Dev server: serve the files directly from node_modules (works under any BASE_PATH, since
     // only the trailing `mediapipe/hands/<file>` part of the URL is matched).

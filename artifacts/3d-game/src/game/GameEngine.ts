@@ -531,8 +531,23 @@ export class GameEngine {
     this.wind.setIntensity(this.underwater ? 0 : 0.3 + speedRatio);
   }
 
+  /** Current airspeed in world units per second (treated as m/s by the HUD). */
   getSpeed() {
     return this.speed;
+  }
+
+  /** Bird altitude in world units (treated as meters by the HUD); sea level is 0 on the ocean map. */
+  getAltitude() {
+    return this.bird.group.position.y;
+  }
+
+  /**
+   * Compass heading in degrees, 0..360, where 0 is the starting direction (+Z). A right bank
+   * decreases `headingYaw`, so the yaw is negated to make right turns raise the heading.
+   */
+  getHeadingDegrees() {
+    const degrees = THREE.MathUtils.radToDeg(-this.headingYaw) % 360;
+    return degrees < 0 ? degrees + 360 : degrees;
   }
 
   getScore() {

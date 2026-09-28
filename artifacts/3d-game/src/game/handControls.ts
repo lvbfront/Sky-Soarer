@@ -1,4 +1,6 @@
 import { Hands, type NormalizedLandmark, type Results } from '@mediapipe/hands';
+import { MEDIAPIPE_FILE_SIZES } from 'virtual:mediapipe-hands-assets';
+import { meterDownloads } from './downloadMeter';
 import { MAX_SENSITIVITY, MIN_SENSITIVITY, TrackingStartError } from './trackingShared';
 
 // Re-exported so existing imports of these from handControls keep working. HAND_CONNECTIONS is
@@ -58,6 +60,23 @@ const HAND_LOST_GRACE_MS = 300;
 // them out of the installed @mediapipe/hands package (so the version lives only in package.json)
 // and serves them under this path, in dev and in the production build alike.
 const MEDIAPIPE_ASSET_DIR = `${import.meta.env.BASE_URL}mediapipe/hands/`;
+
+// The large files `start()` downloads, weighted by size for the pre-flight loading percentage
+// (the small loader scripts and graph file are left out). MediaPipe picks the SIMD or plain wasm at
+// runtime; both are ~6 MB, so they share one slot weighted by the SIMD build. The model file must
+// match `modelComplexity` below (0 = lite).
+const MODEL_FILE = 'hand_landmark_lite.tflite';
+const PACKED_ASSETS_FILE = 'hands_solution_packed_assets.data';
+const DOWNLOAD_WEIGHTS: Record<string, number> = {
+  wasm: MEDIAPIPE_FILE_SIZES['hands_solution_simd_wasm_bin.wasm'] ?? 0,
+  [PACKED_ASSETS_FILE]: MEDIAPIPE_FILE_SIZES[PACKED_ASSETS_FILE] ?? 0,
+  [MODEL_FILE]: MEDIAPIPE_FILE_SIZES[MODEL_FILE] ?? 0,
+};
+
+function downloadSlot(fileName: string) {
+  if (fileName.endsWith('.wasm')) return 'wasm';
+  return fileName in DOWNLOAD_WEIGHTS ? fileName : null;
+}
 
 // Upper bound on loading the wasm + model and running the first frame through the graph. The
 // assets are ~15 MB, so this is generous for slow connections while still turning a stuck load
@@ -135,6 +154,9 @@ export class HandTracker {
   private fistActive = false;
 
   private stopped = false;
+  // Stops the download meter `start()` installs; also called from `stop()` so an abandoned load
+  // doesn't keep reporting.
+  private stopMeter: (() => void) | null = null;
 
   // Calibrated neutral center — defaults to dead-center of frame, but the player sets it via
   // the calibration flow's "Set Center" step.
@@ -185,8 +207,15 @@ export class HandTracker {
    * Loads MediaPipe (wasm + model), runs one warm-up frame through the full graph, then starts
    * the per-frame loop. Rejects with a `TrackingStartError` if loading fails or takes longer than
    * `TRACKING_START_TIMEOUT_MS`, so the UI can show a clear error instead of waiting forever.
+   * `onProgress` receives the real download fraction (0..1) of the wasm, graph data and model as
+   * bytes arrive; after it reaches 1 the graph still has to build and run its warm-up frame.
    */
-  async start() {
+  async start(onProgress?: (fraction: number) => void) {
+    if (onProgress) {
+      this.stopMeter = meterDownloads(MEDIAPIPE_ASSET_DIR, DOWNLOAD_WEIGHTS, downloadSlot, (fraction) => {
+        if (!this.stopped) onProgress(fraction);
+      });
+    }
     try {
       await withTimeout(
         (async () => {
@@ -200,6 +229,9 @@ export class HandTracker {
     } catch (error) {
       if (error instanceof TrackingStartError) throw error;
       throw new TrackingStartError('load-failed', error);
+    } finally {
+      this.stopMeter?.();
+      this.stopMeter = null;
     }
     if (this.stopped) return;
     this.scheduleFrame();
@@ -237,6 +269,8 @@ export class HandTracker {
   /** Stops the frame loop and releases MediaPipe. Does not touch the video's MediaStream — the caller owns it. */
   stop() {
     this.stopped = true;
+    this.stopMeter?.();
+    this.stopMeter = null;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
     this.rafId = null;
     this.hands.close().catch(() => {

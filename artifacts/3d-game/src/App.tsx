@@ -1,13 +1,32 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
+import { gsap } from 'gsap';
 import type { NormalizedLandmark } from '@mediapipe/hands';
-import { X, Crosshair, ChevronLeft, RotateCcw, ArrowRight } from 'lucide-react';
 import type { GameEngine } from '@/game/GameEngine';
+import { BIRD_OPTIONS } from '@/game/bird';
 import { LandingScene, type LandingTelemetry } from '@/game/LandingScene';
-import { TrackingStartError, MIN_SENSITIVITY, MAX_SENSITIVITY } from '@/game/trackingShared';
+import { MAP_OPTIONS, WEATHER_OPTIONS } from '@/game/presets';
+import { TrackingStartError } from '@/game/trackingShared';
 import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 import { hasSavedSettings, loadSettings, saveSettings, type FlightSettings } from '@/game/settings';
 import { Landing } from '@/landing/Landing';
+import { BootSequence, type BootLine } from '@/preflight/BootSequence';
+import { CalibrationPanel } from '@/preflight/CalibrationPanel';
+import {
+  CALIBRATION_STEPS,
+  EMPTY_CALIBRATION,
+  drawHandPreview,
+  type CalibrationPointsMap,
+} from '@/preflight/handPreview';
+import { FlightHud } from '@/flight/FlightHud';
 
 // Hand tracking (handControls + the @mediapipe/hands runtime) and the full game engine are split
 // out of the first-load bundle: the landing page only needs the bird/terrain/ocean/sky modules.
@@ -62,12 +81,17 @@ type StartupErrorKind =
   | 'camera-in-use'
   | 'tracking-load-failed'
   | 'tracking-timeout'
+  | 'engine-load-failed'
   | 'unknown';
+
+/** The startup step a failure happened in; the boot HUD reports the error under that step's line. */
+type BootPhase = 'camera' | 'model' | 'engine';
 
 interface StartupError {
   kind: StartupErrorKind;
   /** Raw error text, shown small under the friendly message to help with debugging. */
   detail?: string;
+  phase: BootPhase;
 }
 
 const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
@@ -83,11 +107,12 @@ const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
     'Hand tracking failed to load. Check your internet connection and try again.',
   'tracking-timeout':
     'Hand tracking took too long to load. Check your internet connection and try again.',
+  'engine-load-failed': 'The flight engine failed to load. Check your internet connection and try again.',
   unknown: 'Something went wrong while starting the camera. Please try again.',
 };
 
 /** Maps a getUserMedia / video.play() / HandTracker failure onto a specific, user-facing error. */
-function classifyStartupError(error: unknown): StartupError {
+function classifyStartupError(error: unknown): Omit<StartupError, 'phase'> {
   const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   if (error instanceof TrackingStartError) {
     const cause = error.cause instanceof Error ? `${error.cause.name}: ${error.cause.message}` : undefined;
@@ -115,155 +140,110 @@ function classifyStartupError(error: unknown): StartupError {
   }
 }
 
-// The small in-flight HUD preview stays compact; the calibration screen gets a larger one
-// so the player can clearly see the crosshair/box and their hand while setting it up.
+// The small in-flight HUD preview stays compact; the calibration sensor feed is drawn at the
+// camera's requested 480×360 so its reticles stay crisp at the larger display size.
 const HUD_PREVIEW_WIDTH = 176;
 const HUD_PREVIEW_HEIGHT = 132;
-const CALIBRATION_PREVIEW_WIDTH = 360;
-const CALIBRATION_PREVIEW_HEIGHT = 270;
+const CALIBRATION_PREVIEW_WIDTH = 480;
+const CALIBRATION_PREVIEW_HEIGHT = 360;
 
-interface CalibrationPointsMap {
-  center: CalibrationPoint | null;
-  topLeft: CalibrationPoint | null;
-  topRight: CalibrationPoint | null;
-  bottomLeft: CalibrationPoint | null;
-  bottomRight: CalibrationPoint | null;
+// The boot HUD's lines finish typing about a second in. A load faster than that waits for them,
+// and READY is always held briefly so it registers before calibration opens. Together these add
+// at most ~1.1 s to a real load (and never the two added together).
+const BOOT_MIN_DURATION_MS = 1100;
+const BOOT_READY_HOLD_MS = 550;
+
+interface BootStatus {
+  camera: 'requesting' | 'online';
+  /** The camera's actual resolution once it's online, e.g. "480×360". */
+  cameraResolution: string | null;
+  model: 'standby' | 'loading' | 'warming' | 'ready';
+  /** Real download percentage of the MediaPipe files while the model loads. */
+  modelPercent: number;
+  calibration: 'pending' | 'done';
+  /** `performance.now()` when this boot attempt began. */
+  startedAt: number;
 }
 
-const EMPTY_CALIBRATION: CalibrationPointsMap = {
-  center: null,
-  topLeft: null,
-  topRight: null,
-  bottomLeft: null,
-  bottomRight: null,
+function freshBootStatus(): BootStatus {
+  return {
+    camera: 'requesting',
+    cameraResolution: null,
+    model: 'standby',
+    modelPercent: 0,
+    calibration: 'pending',
+    startedAt: performance.now(),
+  };
+}
+
+// The bracketed readout a failed line shows, per error kind.
+const FAILURE_CODES: Record<StartupErrorKind, string> = {
+  'insecure-context': 'Insecure',
+  unsupported: 'Unsupported',
+  'permission-denied': 'Denied',
+  'no-camera': 'Not found',
+  'camera-in-use': 'Busy',
+  'tracking-load-failed': 'Failed',
+  'tracking-timeout': 'Timeout',
+  'engine-load-failed': 'Failed',
+  unknown: 'Fault',
 };
 
-type CalibrationStepKey = keyof CalibrationPointsMap;
+/** Turns the boot status (and any error) into the boot HUD's lines. */
+function buildBootLines(boot: BootStatus, error: StartupError | null): BootLine[] {
+  const failedAt = error?.phase ?? null;
+  const failCode = error ? FAILURE_CODES[error.kind] : '';
 
-const CALIBRATION_STEPS: { key: CalibrationStepKey; title: string; instruction: string; buttonLabel: string }[] = [
-  {
-    key: 'center',
-    title: 'Step 1 of 5 — Neutral Center',
-    instruction:
-      'Hold your hand comfortably in front of the camera, wherever feels natural. This is where "fly straight" will be.',
-    buttonLabel: 'Set Center',
-  },
-  {
-    key: 'topLeft',
-    title: 'Step 2 of 5 — Top-Left Boundary',
-    instruction: 'Move to the top-left edge of your comfortable range, then lock it in.',
-    buttonLabel: 'Set Top-Left',
-  },
-  {
-    key: 'topRight',
-    title: 'Step 3 of 5 — Top-Right Boundary',
-    instruction: 'Move to the top-right edge of your comfortable range, then lock it in.',
-    buttonLabel: 'Set Top-Right',
-  },
-  {
-    key: 'bottomLeft',
-    title: 'Step 4 of 5 — Bottom-Left Boundary',
-    instruction: 'Move to the bottom-left edge of your comfortable range, then lock it in.',
-    buttonLabel: 'Set Bottom-Left',
-  },
-  {
-    key: 'bottomRight',
-    title: 'Step 5 of 5 — Bottom-Right Boundary',
-    instruction: 'Move to the bottom-right edge of your comfortable range, then lock it in.',
-    buttonLabel: 'Set Bottom-Right',
-  },
-];
+  const camera: BootLine =
+    failedAt === 'camera'
+      ? { key: 'camera', label: 'Camera', status: failCode, tone: 'fail', progress: null }
+      : boot.camera === 'online'
+        ? {
+            key: 'camera',
+            label: 'Camera',
+            status: boot.cameraResolution ? `Online · ${boot.cameraResolution}` : 'Online',
+            tone: 'ok',
+            progress: null,
+          }
+        : { key: 'camera', label: 'Camera', status: 'Requesting', tone: 'active', progress: null };
 
-/**
- * Draws the webcam frame + hand skeleton onto a preview canvas, optionally with the
- * in-progress calibration box (center crosshair + up to 4 corner markers) overlaid. Shared by
- * both the small in-flight HUD preview and the larger calibration-screen preview.
- */
-function drawHandPreview(
-  ctx: CanvasRenderingContext2D,
-  video: HTMLVideoElement,
-  landmarks: NormalizedLandmark[] | null,
-  width: number,
-  height: number,
-  calibration?: CalibrationPointsMap | null,
-) {
-  ctx.save();
-  ctx.clearRect(0, 0, width, height);
-  ctx.drawImage(video, 0, 0, width, height);
-
-  if (landmarks) {
-    ctx.strokeStyle = 'rgba(255, 214, 165, 0.9)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (const [start, end] of handConnections) {
-      const a = landmarks[start];
-      const b = landmarks[end];
-      ctx.moveTo(a.x * width, a.y * height);
-      ctx.lineTo(b.x * width, b.y * height);
-    }
-    ctx.stroke();
-
-    ctx.fillStyle = '#ff8a5c';
-    for (const point of landmarks) {
-      ctx.beginPath();
-      ctx.arc(point.x * width, point.y * height, 2.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  const modelProgress = boot.modelPercent / 100;
+  let model: BootLine;
+  if (failedAt === 'model') {
+    model = { key: 'model', label: 'Hand tracking model', status: failCode, tone: 'fail', progress: modelProgress };
+  } else if (boot.model === 'ready') {
+    model = { key: 'model', label: 'Hand tracking model', status: 'Ready', tone: 'ok', progress: 1 };
+  } else if (boot.model === 'warming') {
+    model = { key: 'model', label: 'Hand tracking model', status: 'Warming up', tone: 'active', progress: 1 };
+  } else if (boot.model === 'loading' && !failedAt) {
+    model = {
+      key: 'model',
+      label: 'Hand tracking model',
+      status: `Loading ${String(boot.modelPercent).padStart(2, '0')}%`,
+      tone: 'active',
+      progress: modelProgress,
+    };
+  } else {
+    model = { key: 'model', label: 'Hand tracking model', status: 'Standby', tone: 'idle', progress: null };
   }
 
-  if (calibration) {
-    // Calibration points come from HandTracker in its mirrored-frame coordinate space (X is
-    // already flipped to match the mirrored steering math), but this canvas draws the raw
-    // video and raw landmarks un-mirrored — the whole canvas gets flipped horizontally
-    // afterward via CSS (`scale-x-[-1]`) for display. So every point here must be un-mirrored
-    // back to raw canvas space, or it would land on the wrong side once the CSS flip applies.
-    const toCanvas = (p: CalibrationPoint) => ({ x: (1 - p.x) * width, y: p.y * height });
+  const calibration: BootLine =
+    boot.calibration === 'done'
+      ? { key: 'calibration', label: 'Calibration', status: 'Complete', tone: 'ok', progress: null }
+      : { key: 'calibration', label: 'Calibration', status: 'Pending', tone: 'idle', progress: null };
 
-    const corners = [calibration.topLeft, calibration.topRight, calibration.bottomRight, calibration.bottomLeft];
-    if (corners.every((c): c is CalibrationPoint => c !== null)) {
-      ctx.strokeStyle = 'rgba(94, 234, 212, 0.7)';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      corners.forEach((p, i) => {
-        const c = toCanvas(p);
-        if (i === 0) ctx.moveTo(c.x, c.y);
-        else ctx.lineTo(c.x, c.y);
-      });
-      ctx.closePath();
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    for (const corner of [calibration.topLeft, calibration.topRight, calibration.bottomLeft, calibration.bottomRight]) {
-      if (!corner) continue;
-      const c = toCanvas(corner);
-      ctx.fillStyle = 'rgba(255, 138, 92, 0.95)';
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    if (calibration.center) {
-      const c = toCanvas(calibration.center);
-      ctx.strokeStyle = 'rgba(94, 234, 212, 0.95)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(c.x - 12, c.y);
-      ctx.lineTo(c.x + 12, c.y);
-      ctx.moveTo(c.x, c.y - 12);
-      ctx.lineTo(c.x, c.y + 12);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 16, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+  const lines = [camera, model, calibration];
+  if (failedAt === 'engine') {
+    lines.push({ key: 'engine', label: 'Flight engine', status: failCode, tone: 'fail', progress: null });
   }
-
-  ctx.restore();
+  return lines;
 }
 
-/** Small deadzone-aware label describing the current hand pose, shown under the webcam preview. */
+function optionName(options: { id: string; name: string }[], id: string) {
+  return options.find((option) => option.id === id)?.name.split(' /')[0] ?? id;
+}
+
+/** Small deadzone-aware label describing the current hand pose, shown under the in-flight sensor feed. */
 function describeStatus(state: {
   handDetected: boolean;
   roll: number;
@@ -272,21 +252,15 @@ function describeStatus(state: {
   barrelRolling: boolean;
   backflipping: boolean;
 }) {
-  if (!state.handDetected) return 'Status: No Hand Detected';
-  if (state.boost) return 'Status: Fist (Boost) Active';
-  if (state.barrelRolling) return 'Status: Barrel Roll Detected';
-  if (state.backflipping) return 'Status: Backflip!';
-  if (state.roll > 0) return 'Status: Steering Right';
-  if (state.roll < 0) return 'Status: Steering Left';
-  if (state.pitch > 0) return 'Status: Pitching Up';
-  if (state.pitch < 0) return 'Status: Pitching Down';
-  return 'Status: Flying Straight';
-}
-
-function sensitivityLabel(value: number) {
-  if (value < 0.85) return 'Low';
-  if (value > 1.4) return 'High';
-  return 'Medium';
+  if (!state.handDetected) return 'No Hand Detected';
+  if (state.boost) return 'Fist (Boost) Active';
+  if (state.barrelRolling) return 'Barrel Roll Detected';
+  if (state.backflipping) return 'Backflip!';
+  if (state.roll > 0) return 'Steering Right';
+  if (state.roll < 0) return 'Steering Left';
+  if (state.pitch > 0) return 'Pitching Up';
+  if (state.pitch < 0) return 'Pitching Down';
+  return 'Flying Straight';
 }
 
 function App() {
@@ -311,6 +285,13 @@ function App() {
   const sessionIdRef = useRef(0);
   // True while "Start Flying" is building the engine, so a double click can't build two.
   const startingFlightRef = useRef(false);
+  // The takeoff transition: a veil that covers calibration while the engine is built, then lifts
+  // off the first flight frame. The veil stays mounted (hidden) so its ref is always set.
+  const takeoffVeilRef = useRef<HTMLDivElement | null>(null);
+  const takeoffTimelineRef = useRef<gsap.core.Timeline | null>(null);
+  // Resolves the pending launch animation's promise; called on completion and on reset, so an
+  // interrupted launch (Back, a load failure) never leaves handleStartFlying awaiting forever.
+  const takeoffResolveRef = useRef<(() => void) | null>(null);
 
   const [flightState, setFlightState] = useState<FlightState>('landing');
   const [handDetected, setHandDetected] = useState(false);
@@ -319,8 +300,11 @@ function App() {
   const [backflipping, setBackflipping] = useState(false);
   const [underwater, setUnderwater] = useState(false);
   const [surfaceSplash, setSurfaceSplash] = useState(false);
-  const [statusText, setStatusText] = useState('Status: No Hand Detected');
+  const [statusText, setStatusText] = useState('No Hand Detected');
   const [startupError, setStartupError] = useState<StartupError | null>(null);
+  const [boot, setBoot] = useState<BootStatus>(freshBootStatus);
+  // True from the Start Flying click until the takeoff reveal finishes; locks calibration controls.
+  const [launching, setLaunching] = useState(false);
 
   // The landing page starts from the last choices saved in this browser (or the defaults).
   const [settings, setSettings] = useState<FlightSettings>(() => loadSettings());
@@ -333,9 +317,12 @@ function App() {
   const [sensitivity, setSensitivity] = useState(1);
   const [calibrationStep, setCalibrationStep] = useState(0);
 
-  const calibrationComplete = calibrationStep >= CALIBRATION_STEPS.length;
+  const calibrationStepRef = useRef(calibrationStep);
+  calibrationStepRef.current = calibrationStep;
 
   const reducedMotion = usePrefersReducedMotion();
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
   // The landing intro timeline plays once per page load, not on every return from pre-flight.
   const [introPending, setIntroPending] = useState(true);
   // The landing's WebGL backdrop stays up through the landing and pre-flight screens, and is
@@ -438,18 +425,26 @@ function App() {
   // screen. The GameEngine itself isn't created until "Start Flying" — the tracker's output
   // is what carries the calibration (center + box + sensitivity), so the engine doesn't need
   // it directly.
+  //
+  // Every step also updates `boot`, which the boot HUD renders as its status lines: the camera
+  // line follows getUserMedia + play(), and the model line follows the tracker's real download
+  // progress and warm-up. Nothing here is simulated; the only added time is the short
+  // BOOT_MIN_DURATION_MS / BOOT_READY_HOLD_MS gate before calibration opens.
   const handleContinueToCalibration = useCallback(async () => {
     const showError = (error: StartupError) => {
       setStartupError(error);
       setFlightState('error');
     };
 
+    const bootStartedAt = performance.now();
+    setBoot({ ...freshBootStatus(), startedAt: bootStartedAt });
+
     if (!window.isSecureContext) {
-      showError({ kind: 'insecure-context' });
+      showError({ kind: 'insecure-context', phase: 'camera' });
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia) {
-      showError({ kind: 'unsupported' });
+      showError({ kind: 'unsupported', phase: 'camera' });
       return;
     }
 
@@ -471,6 +466,7 @@ function App() {
 
     let stream: MediaStream | null = null;
     let tracker: HandTracker | null = null;
+    let phase: BootPhase = 'camera';
     // Releases everything this attempt acquired. Safe to call after stopEverything() has already
     // stopped some of it (stopping a track or tracker twice is a no-op).
     const releaseLocal = () => {
@@ -501,6 +497,9 @@ function App() {
         releaseLocal();
         return;
       }
+      phase = 'model';
+      const resolution = video.videoWidth > 0 ? `${video.videoWidth}×${video.videoHeight}` : null;
+      setBoot((current) => ({ ...current, camera: 'online', cameraResolution: resolution, model: 'loading' }));
 
       // MediaPipe's JS is loaded here, on the first pre-flight, not with the landing page.
       const { HandTracker } = await trackingModule;
@@ -532,7 +531,27 @@ function App() {
       // Registered before the (possibly slow) model load, so pressing Back mid-load stops it
       // right away via stopEverything().
       trackerRef.current = tracker;
-      await tracker.start();
+      await tracker.start((fraction) => {
+        if (!isCurrent()) return;
+        const percent = Math.floor(fraction * 100);
+        const model = fraction >= 1 ? 'warming' : 'loading';
+        // Returning the same object when nothing visible changed lets React skip the render, so
+        // this re-renders at most once per whole percent.
+        setBoot((current) =>
+          current.model === model && percent <= current.modelPercent
+            ? current
+            : { ...current, model, modelPercent: Math.max(current.modelPercent, percent) },
+        );
+      });
+      if (!isCurrent()) {
+        releaseLocal();
+        return;
+      }
+
+      setBoot((current) => ({ ...current, model: 'ready', modelPercent: 100 }));
+      const minDuration = reducedMotionRef.current ? 0 : BOOT_MIN_DURATION_MS;
+      const hold = Math.max(BOOT_READY_HOLD_MS, minDuration - (performance.now() - bootStartedAt));
+      await new Promise((resolve) => window.setTimeout(resolve, hold));
       if (!isCurrent()) {
         releaseLocal();
         return;
@@ -544,7 +563,7 @@ function App() {
       // A superseded attempt (the player already went back) must not pop an error screen.
       if (!isCurrent()) return;
       console.error('Failed to start hand tracking', error);
-      showError(classifyStartupError(error));
+      showError({ ...classifyStartupError(error), phase });
     }
   }, []);
 
@@ -565,8 +584,8 @@ function App() {
   const handleQuickStart = useCallback(() => beginPreflight(loadSettings()), [beginPreflight]);
 
   // Draws the live webcam+skeleton preview onto whichever canvas is currently mounted
-  // (the larger calibration one, or the compact in-flight HUD one), including the in-progress
-  // calibration box while calibrating.
+  // (the calibration sensor feed, or the compact in-flight HUD one), including the calibration
+  // reticles, box and current target while calibrating.
   useEffect(() => {
     if (flightState !== 'calibrating' && flightState !== 'flying') return;
     const video = videoRef.current;
@@ -585,9 +604,16 @@ function App() {
           ctx,
           video,
           latestLandmarksRef.current,
+          handConnections,
           width,
           height,
-          showCalibration ? calibrationPointsRef.current : null,
+          showCalibration
+            ? {
+                points: calibrationPointsRef.current,
+                target: CALIBRATION_STEPS[calibrationStepRef.current] ?? null,
+                time: performance.now(),
+              }
+            : null,
         );
       }
       rafId = requestAnimationFrame(drawPreview);
@@ -618,7 +644,7 @@ function App() {
     setCalibrationStep(0);
   }, []);
 
-  // Drag-to-fine-tune: once a corner has been captured, the player can grab its handle
+  // Drag-to-fine-tune: once a corner has been captured, the player can grab its reticle
   // directly on the webcam preview and drag it to a new spot. Because the canvas is displayed
   // mirrored (CSS `scale-x-[-1]`) but draws calibration points un-mirrored (see
   // drawHandPreview), a pointer's fractional position within the element's own bounding box
@@ -690,20 +716,78 @@ function App() {
     trackerRef.current?.setSensitivity(value);
   }, []);
 
+  /** Kills any takeoff animation, hides the veil, and releases a pending launch await. */
+  const resetTakeoff = useCallback(() => {
+    takeoffTimelineRef.current?.kill();
+    takeoffTimelineRef.current = null;
+    if (takeoffVeilRef.current) gsap.set(takeoffVeilRef.current, { autoAlpha: 0 });
+    takeoffResolveRef.current?.();
+    takeoffResolveRef.current = null;
+    setLaunching(false);
+  }, []);
+
+  /**
+   * Takeoff, part 1: the calibration panel lifts away and a pale "cloud" veil closes over the
+   * screen. Resolves once the veil is opaque, so the landing backdrop can be swapped for the
+   * engine unseen. Part 2 (the reveal) runs once flightState is 'flying'.
+   */
+  const playTakeoffLaunch = useCallback(
+    () =>
+      new Promise<void>((resolve) => {
+        const veil = takeoffVeilRef.current;
+        takeoffTimelineRef.current?.kill();
+        takeoffResolveRef.current = resolve;
+        if (!veil) {
+          resolve();
+          return;
+        }
+        const done = () => {
+          if (takeoffResolveRef.current === resolve) takeoffResolveRef.current = null;
+          resolve();
+        };
+        const timeline = gsap.timeline({ onComplete: done });
+        if (reducedMotionRef.current) {
+          timeline.fromTo(veil, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.25, ease: 'none' });
+        } else {
+          const panel = document.querySelector('[data-calibration-panel]');
+          const text = veil.querySelectorAll('[data-takeoff-text]');
+          const line = veil.querySelector('[data-takeoff-line]');
+          if (panel) timeline.to(panel, { y: -28, scale: 0.97, autoAlpha: 0, duration: 0.5, ease: 'power2.in' }, 0);
+          timeline.fromTo(veil, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.6, ease: 'power2.inOut' }, 0.12);
+          if (line) {
+            timeline.fromTo(line, { scaleX: 0, opacity: 1, y: 0 }, { scaleX: 1, duration: 0.6, ease: 'expo.out' }, 0.3);
+          }
+          timeline.fromTo(
+            text,
+            { opacity: 0, y: 10 },
+            { opacity: 1, y: 0, duration: 0.4, stagger: 0.06, ease: 'power2.out' },
+            0.3,
+          );
+        }
+        takeoffTimelineRef.current = timeline;
+      }),
+    [],
+  );
+
   const handleStartFlying = useCallback(async () => {
     if (!canvasContainerRef.current || engineRef.current || startingFlightRef.current) return;
     startingFlightRef.current = true;
+    setLaunching(true);
     const sessionId = sessionIdRef.current;
 
     let GameEngineClass: typeof GameEngine;
     try {
-      ({ GameEngine: GameEngineClass } = await loadGameEngine());
+      // The engine chunk was prefetched at pre-flight, so it's normally ready well before the veil
+      // has closed.
+      [{ GameEngine: GameEngineClass }] = await Promise.all([loadGameEngine(), playTakeoffLaunch()]);
     } catch (error) {
       startingFlightRef.current = false;
       if (sessionId !== sessionIdRef.current) return;
       console.error('Failed to load the game engine', error);
+      resetTakeoff();
       stopEverything();
-      setStartupError(classifyStartupError(error));
+      setBoot((current) => ({ ...current, calibration: 'done', startedAt: performance.now() }));
+      setStartupError({ kind: 'engine-load-failed', detail: classifyStartupError(error).detail, phase: 'engine' });
       setFlightState('error');
       return;
     }
@@ -735,6 +819,10 @@ function App() {
     engineRef.current = engine;
     try {
       await engine.start();
+    } catch (error) {
+      // Don't leave the player under an opaque veil.
+      if (engineRef.current === engine) resetTakeoff();
+      throw error;
     } finally {
       startingFlightRef.current = false;
     }
@@ -742,7 +830,50 @@ function App() {
     // already disposed it in that case.
     if (engineRef.current !== engine) return;
     setFlightState('flying');
-  }, [selectedBird, selectedMap, selectedWeather, ringChallengeEnabled, stopEverything, disposeLandingScene]);
+  }, [
+    selectedBird,
+    selectedMap,
+    selectedWeather,
+    ringChallengeEnabled,
+    stopEverything,
+    disposeLandingScene,
+    playTakeoffLaunch,
+    resetTakeoff,
+  ]);
+
+  // Takeoff, part 2: once the first flight frame is up, the veil lifts off the chase camera's
+  // swoop-in and the HUD blocks stagger in. Explicit from/to values keep this correct even if an
+  // earlier run was killed halfway.
+  useLayoutEffect(() => {
+    if (flightState !== 'flying' || !launching) return;
+    const veil = takeoffVeilRef.current;
+    if (!veil) return;
+    const hud = document.querySelectorAll('[data-flight-hud]');
+    const timeline = gsap.timeline({
+      onComplete: () => {
+        takeoffTimelineRef.current = null;
+        setLaunching(false);
+      },
+    });
+    if (reducedMotionRef.current) {
+      timeline.to(veil, { autoAlpha: 0, duration: 0.4, ease: 'none' });
+    } else {
+      timeline
+        .to(
+          veil.querySelectorAll('[data-takeoff-text], [data-takeoff-line]'),
+          { opacity: 0, y: -8, duration: 0.3, ease: 'power1.in' },
+          0,
+        )
+        .to(veil, { autoAlpha: 0, duration: 1.1, ease: 'power2.out' }, 0.15)
+        .fromTo(
+          hud,
+          { opacity: 0, y: 12 },
+          { opacity: 1, y: 0, duration: 0.7, stagger: 0.07, ease: 'power3.out', clearProps: 'opacity,transform' },
+          0.55,
+        );
+    }
+    takeoffTimelineRef.current = timeline;
+  }, [flightState, launching]);
 
   useEffect(() => {
     if (!barrelRolling) return;
@@ -763,6 +894,7 @@ function App() {
   }, [surfaceSplash]);
 
   const handleBackToMenu = useCallback(() => {
+    resetTakeoff();
     stopEverything();
     setLandingBackdropOn(true);
     setFlightState('landing');
@@ -774,14 +906,17 @@ function App() {
     setSurfaceSplash(false);
     setStartupError(null);
     setCalibrationStep(0);
-    setStatusText('Status: No Hand Detected');
-  }, [stopEverything]);
+    setStatusText('No Hand Detected');
+  }, [stopEverything, resetTakeoff]);
 
   const handleStopFlight = handleBackToMenu;
 
   const flying = flightState === 'flying';
-  const calibrating = flightState === 'calibrating';
-  const currentCalibrationStep = CALIBRATION_STEPS[calibrationStep] ?? null;
+  const takeoffSummary = [
+    optionName(BIRD_OPTIONS, selectedBird),
+    optionName(MAP_OPTIONS, selectedMap),
+    optionName(WEATHER_OPTIONS, selectedWeather),
+  ].join(' · ');
 
   return (
     <div className="relative min-h-svh">
@@ -791,111 +926,24 @@ function App() {
       <div ref={canvasContainerRef} className="fixed inset-0" />
 
       {flying && (
-        <div className="fixed inset-0 z-10 overflow-hidden">
-          {/* CSS-only speed-blur / motion-streak vignette around the screen edges during
-              Boost — a lightweight stand-in for a full post-processing motion-blur pass,
-              since the renderer here doesn't run an EffectComposer pipeline. */}
-          <div
-            className="pointer-events-none absolute inset-0 transition-opacity duration-200"
-            style={{
-              opacity: boosting ? 1 : 0,
-              background:
-                'radial-gradient(ellipse at center, rgba(255,255,255,0) 42%, rgba(255,244,224,0.35) 78%, rgba(255,214,165,0.65) 100%)',
-              boxShadow: 'inset 0 0 140px 40px rgba(255,180,110,0.45)',
-            }}
-          />
-          {/* Brief water-droplet screen flash the moment the bird breaks back into the air
-              after a dive. */}
-          <div
-            className="pointer-events-none absolute inset-0 transition-opacity duration-150"
-            style={{
-              opacity: surfaceSplash ? 1 : 0,
-              background:
-                'radial-gradient(ellipse at center, rgba(255,255,255,0) 30%, rgba(214,244,255,0.5) 75%, rgba(160,220,255,0.75) 100%)',
-            }}
-          />
-          {/* Blue tint overlay while submerged, on top of the underwater fog/lighting already
-              applied inside the 3D scene itself. */}
-          <div
-            className="pointer-events-none absolute inset-0 transition-opacity duration-500"
-            style={{
-              opacity: underwater ? 1 : 0,
-              background: 'linear-gradient(rgba(20,110,150,0.18), rgba(10,60,90,0.32))',
-            }}
-          />
-
-          <div className="pointer-events-none absolute left-1/2 top-6 -translate-x-1/2 text-center">
-            <p className="rounded-full bg-card/70 px-5 py-2 text-sm font-medium tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm">
-              {handDetected ? 'Tilt your palm to glide' : 'Show your hand to the camera to steer'}
-            </p>
-          </div>
-
-          {ringChallengeEnabled && (
-            <div className="pointer-events-none absolute left-6 top-6">
-              <p className="rounded-full bg-card/80 px-5 py-2 text-sm font-semibold tracking-wide text-foreground shadow-sm backdrop-blur-sm">
-                Score: {score}
-              </p>
-            </div>
-          )}
-
-          <div className="absolute right-6 top-6">
-            <button
-              type="button"
-              onClick={handleStopFlight}
-              className="flex items-center gap-1.5 rounded-full bg-card/80 px-4 py-2 text-xs font-semibold tracking-wide text-foreground/80 shadow-sm backdrop-blur-sm transition hover:bg-card"
-            >
-              <X className="h-3.5 w-3.5" />
-              Stop Game
-            </button>
-          </div>
-
-          <div className="pointer-events-none absolute bottom-6 left-6 flex gap-2">
-            <span
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
-                boosting ? 'bg-primary text-primary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
-              }`}
-            >
-              Boost
-            </span>
-            <span
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
-                barrelRolling ? 'bg-secondary text-secondary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
-              }`}
-            >
-              Barrel Roll
-            </span>
-            <span
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
-                backflipping ? 'bg-secondary text-secondary-foreground opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
-              }`}
-            >
-              Backflip
-            </span>
-            {selectedMap === 'ocean' && (
-              <span
-                className={`rounded-full px-4 py-1.5 text-xs font-semibold tracking-wide transition-opacity ${
-                  underwater ? 'bg-sky-500 text-white opacity-100' : 'bg-card/60 text-foreground/50 opacity-70'
-                }`}
-              >
-                Diving
-              </span>
-            )}
-          </div>
-
-          <div className="absolute bottom-6 right-6 flex flex-col items-end gap-1.5">
-            <div className="overflow-hidden rounded-2xl border border-border/60 bg-card/80 shadow-lg backdrop-blur-sm">
-              <canvas
-                ref={hudPreviewCanvasRef}
-                width={HUD_PREVIEW_WIDTH}
-                height={HUD_PREVIEW_HEIGHT}
-                className="block scale-x-[-1]"
-              />
-            </div>
-            <p className="rounded-full bg-card/70 px-3 py-1 text-[11px] font-medium tracking-wide text-foreground/70 shadow-sm backdrop-blur-sm">
-              {statusText}
-            </p>
-          </div>
-        </div>
+        <FlightHud
+          engineRef={engineRef}
+          previewCanvasRef={hudPreviewCanvasRef}
+          previewWidth={HUD_PREVIEW_WIDTH}
+          previewHeight={HUD_PREVIEW_HEIGHT}
+          handDetected={handDetected}
+          boosting={boosting}
+          barrelRolling={barrelRolling}
+          backflipping={backflipping}
+          underwater={underwater}
+          surfaceSplash={surfaceSplash}
+          showDiving={selectedMap === 'ocean'}
+          ringChallenge={ringChallengeEnabled}
+          score={score}
+          bestScore={bestScore}
+          statusText={statusText}
+          onStop={handleStopFlight}
+        />
       )}
 
       <video ref={videoRef} className="hidden" muted playsInline />
@@ -916,186 +964,63 @@ function App() {
         />
       )}
 
+      {/* One boot HUD instance for both states, so a failure (and Try Again) updates the lines in
+          place instead of replaying the typing. */}
       {(flightState === 'requesting' || flightState === 'error') && (
+        <BootSequence
+          lines={buildBootLines(boot, flightState === 'error' ? startupError : null)}
+          errorLineKey={flightState === 'error' && startupError ? startupError.phase : null}
+          errorMessage={startupError ? STARTUP_ERROR_MESSAGES[startupError.kind] : null}
+          errorDetail={startupError?.detail ?? null}
+          startedAt={boot.startedAt}
+          running={flightState === 'requesting'}
+          reducedMotion={reducedMotion}
+          onRetry={handleContinueToCalibration}
+          onBack={handleBackToMenu}
+        />
+      )}
+
+      {flightState === 'calibrating' && (
         <PreflightLayer>
-          <div className="ascent-glass-strong w-full max-w-md rounded-[28px] p-8 text-white shadow-2xl">
-            <p className="ascent-hud mb-4 text-[color:var(--ascent-cyan)]">
-              Pre-flight <span className="mx-1.5 text-white/40">·</span> 01 / 02
-            </p>
-            {flightState === 'requesting' && (
-              <>
-                <h1 className="font-display text-5xl leading-none">Waking up the sky…</h1>
-                <p className="mt-4 text-sm leading-relaxed text-white/80">
-                  Allow camera access, then hand tracking loads (about 13 MB the first time).
-                </p>
-                <div className="relative mt-6 h-px overflow-hidden bg-white/20" aria-hidden="true">
-                  <span className="ascent-loading-bar absolute inset-y-0 w-1/3 bg-white" />
-                </div>
-              </>
-            )}
-            {flightState === 'error' && (
-              <>
-                <h1 className="font-display text-5xl leading-none">Pre-flight halted</h1>
-                {startupError && (
-                  <div className="mt-5 rounded-2xl border border-[#ffb4a2]/40 bg-[#ff6b4a]/15 px-4 py-3 text-sm text-white">
-                    <p>{STARTUP_ERROR_MESSAGES[startupError.kind]}</p>
-                    {startupError.detail && (
-                      <p className="mt-1.5 break-words font-mono text-[11px] text-white/60">{startupError.detail}</p>
-                    )}
-                  </div>
-                )}
-                <button
-                  type="button"
-                  onClick={handleContinueToCalibration}
-                  className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-semibold text-[color:var(--ascent-ink)] transition hover:bg-[color:var(--ascent-warm)]"
-                >
-                  Try Again
-                </button>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={handleBackToMenu}
-              className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-full border border-white/25 px-6 py-3 text-sm font-semibold text-white/90 transition hover:bg-white/10"
-            >
-              <ChevronLeft className="h-4 w-4" />
-              Back
-            </button>
-          </div>
+          <CalibrationPanel
+            canvasRef={calibrationPreviewCanvasRef}
+            canvasWidth={CALIBRATION_PREVIEW_WIDTH}
+            canvasHeight={CALIBRATION_PREVIEW_HEIGHT}
+            handDetected={handDetected}
+            step={calibrationStep}
+            sensitivity={sensitivity}
+            feedResolution={boot.cameraResolution}
+            launching={launching}
+            onCapture={handleCaptureCalibrationStep}
+            onReset={handleResetCalibration}
+            onSensitivityChange={handleSensitivityChange}
+            onStartFlying={handleStartFlying}
+            onBack={handleBackToMenu}
+            onCanvasPointerDown={handleCornerPointerDown}
+            onCanvasPointerMove={handleCornerPointerMove}
+            onCanvasPointerUp={handleCornerPointerUp}
+          />
         </PreflightLayer>
       )}
 
-      {calibrating && (
-        <PreflightLayer>
-          <div className="ascent-glass-strong grid w-full max-w-5xl gap-8 rounded-[28px] p-6 text-white shadow-2xl sm:p-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(0,1fr)]">
-            <div className="min-w-0">
-              <button
-                type="button"
-                onClick={handleBackToMenu}
-                className="ascent-hud mb-4 flex items-center gap-1 text-white/70 transition hover:text-white"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-                Back
-              </button>
-              <div className="overflow-hidden rounded-2xl border border-white/20 bg-black/30 shadow-inner">
-                <canvas
-                  ref={calibrationPreviewCanvasRef}
-                  width={CALIBRATION_PREVIEW_WIDTH}
-                  height={CALIBRATION_PREVIEW_HEIGHT}
-                  className="block w-full cursor-crosshair scale-x-[-1] touch-none"
-                  onPointerDown={handleCornerPointerDown}
-                  onPointerMove={handleCornerPointerMove}
-                  onPointerUp={handleCornerPointerUp}
-                  onPointerCancel={handleCornerPointerUp}
-                />
-              </div>
-              <p className="ascent-hud mt-3 flex items-center gap-2 text-white/85">
-                <span
-                  className={`h-2 w-2 rounded-full ${handDetected ? 'bg-[color:var(--ascent-cyan)]' : 'bg-white/30'}`}
-                  aria-hidden="true"
-                />
-                {handDetected ? 'Hand detected — hold it at the target position.' : 'Show your hand to the camera.'}
-              </p>
-              <p className="mt-1.5 text-xs text-white/65">
-                You can also drag any orange corner dot directly on the preview to fine-tune it.
-              </p>
-            </div>
-
-            <div className="flex min-w-0 flex-col">
-              <p className="ascent-hud mb-3 text-[color:var(--ascent-cyan)]">
-                Pre-flight <span className="mx-1.5 text-white/40">·</span> 02 / 02
-              </p>
-              <h1 className="font-display text-[clamp(2.4rem,4vw,3.4rem)] leading-none">Calibrate your controls</h1>
-
-              <div className="mb-4 mt-5 flex items-center gap-1.5">
-                {CALIBRATION_STEPS.map((step, i) => (
-                  <span
-                    key={step.key}
-                    className={`h-1 flex-1 rounded-full transition-colors ${
-                      i < calibrationStep ? 'bg-white' : i === calibrationStep ? 'bg-white/50' : 'bg-white/15'
-                    }`}
-                  />
-                ))}
-              </div>
-
-              {!calibrationComplete && currentCalibrationStep && (
-                <>
-                  <p className="text-sm font-semibold">{currentCalibrationStep.title}</p>
-                  <p className="mb-5 mt-1 text-sm leading-relaxed text-white/75">{currentCalibrationStep.instruction}</p>
-                </>
-              )}
-              {calibrationComplete && (
-                <p className="mb-5 text-sm leading-relaxed text-white/75">
-                  Your control range is calibrated — flight pitch and roll are now mapped to fit exactly
-                  within the box you just drew.
-                </p>
-              )}
-
-              {!calibrationComplete && (
-                <button
-                  type="button"
-                  onClick={handleCaptureCalibrationStep}
-                  disabled={!handDetected}
-                  className="flex w-full items-center justify-center gap-2 rounded-full border border-white/40 bg-white/10 px-6 py-3 text-sm font-semibold transition hover:bg-white/20 disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  <Crosshair className="h-4 w-4" />
-                  {currentCalibrationStep?.buttonLabel}
-                </button>
-              )}
-              {calibrationComplete && (
-                <p className="ascent-hud text-[color:var(--ascent-cyan)]">Calibrated! Your control range is set.</p>
-              )}
-
-              {calibrationStep > 0 ? (
-                <button
-                  type="button"
-                  onClick={handleResetCalibration}
-                  className="ascent-hud mt-3 flex items-center justify-center gap-1.5 self-center text-white/65 transition hover:text-white"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  Start Over
-                </button>
-              ) : (
-                <div className="mt-3 h-4" />
-              )}
-
-              <div className="mb-6 mt-6">
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="ascent-hud text-white/65">Steering Sensitivity</p>
-                  <p className="ascent-hud text-white">
-                    {sensitivityLabel(sensitivity)} ({sensitivity.toFixed(1)}x)
-                  </p>
-                </div>
-                <input
-                  type="range"
-                  min={MIN_SENSITIVITY}
-                  max={MAX_SENSITIVITY}
-                  step={0.1}
-                  value={sensitivity}
-                  onChange={(event) => handleSensitivityChange(Number(event.target.value))}
-                  className="w-full accent-[color:var(--ascent-warm)]"
-                />
-                <div className="ascent-hud mt-1 flex justify-between text-[10px] text-white/55">
-                  <span>Calm</span>
-                  <span>Twitchy</span>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleStartFlying}
-                disabled={!calibrationComplete}
-                className="group mt-auto flex w-full items-center justify-between rounded-full bg-white py-2 pl-6 pr-2 text-[color:var(--ascent-ink)] transition hover:bg-[color:var(--ascent-warm)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-white"
-              >
-                <span className="text-base font-semibold">Start Flying</span>
-                <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[color:var(--ascent-ink)] text-white">
-                  <ArrowRight className="h-4 w-4" />
-                </span>
-              </button>
-            </div>
-          </div>
-        </PreflightLayer>
-      )}
+      {/* Takeoff veil: the pale sky the landing intro fades in from, closing over calibration and
+          lifting off the first flight frame. Always mounted and hidden, animated only by GSAP. */}
+      <div
+        ref={takeoffVeilRef}
+        className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-gradient-to-b from-[#dff0f6] to-[#fdf3e0] px-6 text-center text-[color:var(--ascent-ink)]"
+        style={{ opacity: 0, visibility: 'hidden' }}
+        aria-hidden="true"
+      >
+        <div>
+          <p data-takeoff-text className="ascent-hud text-[color:var(--ascent-ink)]/70">
+            Pre-flight complete <span className="mx-1.5 opacity-50">·</span> {takeoffSummary}
+          </p>
+          <span data-takeoff-line className="mx-auto my-5 block h-px w-48 origin-center bg-[color:var(--ascent-ink)]/40" />
+          <p data-takeoff-text className="font-display text-[clamp(3rem,7vw,5.5rem)] leading-none tracking-[-0.015em]">
+            Cleared for takeoff
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
