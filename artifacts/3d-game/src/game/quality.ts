@@ -20,6 +20,8 @@ export interface QualityProfile {
   marineSnow: number;
   lightShafts: number;
   caustics: boolean;
+  /** Palms, bushes and rocks are instanced for islands within this distance. */
+  decorRadius: number;
   waterSegments: number;
   shadowMapSize: number;
 }
@@ -33,6 +35,7 @@ export const QUALITY_PROFILES: Record<QualityLevel, QualityProfile> = {
     marineSnow: 700,
     lightShafts: 8,
     caustics: true,
+    decorRadius: 260,
     waterSegments: 128,
     shadowMapSize: 1024,
   },
@@ -44,6 +47,7 @@ export const QUALITY_PROFILES: Record<QualityLevel, QualityProfile> = {
     marineSnow: 260,
     lightShafts: 4,
     caustics: false,
+    decorRadius: 190,
     waterSegments: 80,
     shadowMapSize: 512,
   },

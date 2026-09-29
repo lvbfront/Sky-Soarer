@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { HorizonIslands, IslandDecor } from './oceanDecor';
 import { OceanField, TILE_SIZE, hash2D, type GroundSample } from './oceanField';
 import { createOceanUniforms, patchOceanMaterial, type OceanUniforms } from './oceanShaders';
 import { QUALITY_PROFILES, type QualityProfile } from './quality';
@@ -50,9 +51,9 @@ type BuildJob = { kind: 'mesh'; key: string; tileX: number; tileZ: number } | { 
 
 /**
  * Endless tropical ocean: streamed ground tiles (seabed dunes and rock, reef slopes, sandy
- * beaches, green island tops) under one shader-animated water surface. Shares the `update` /
- * `heightAtWorld` contract with `TerrainManager`, so GameEngine and the landing scene can swap
- * maps freely.
+ * beaches, green island tops) under one shader-animated water surface, instanced island dressing
+ * and a hazy archipelago on the horizon. Shares the `update` / `heightAtWorld` contract with
+ * `TerrainManager`, so GameEngine and the landing scene can swap maps freely.
  */
 export class OceanManager {
   readonly field = new OceanField();
@@ -70,6 +71,8 @@ export class OceanManager {
 
   private depthTexture = new GroundDepthTexture();
   private water: WaterSurface;
+  private decor: IslandDecor;
+  private horizon: HorizonIslands;
   private profile: QualityProfile;
   private sample: GroundSample = { height: 0, rock: 0, reef: 0, shoreDistance: 0 };
   private tmpColor = new THREE.Color();
@@ -84,6 +87,8 @@ export class OceanManager {
       { key: 'ground', caustics: true },
     );
     this.water = new WaterSurface(parent, this.depthTexture.texture, this.uniforms.uTime, profile.waterSegments);
+    this.decor = new IslandDecor(parent, this.field, this.uniforms, profile.decorRadius);
+    this.horizon = new HorizonIslands(parent);
   }
 
   private buildGeometry(geometry: THREE.BufferGeometry, tileX: number, tileZ: number) {
@@ -273,6 +278,8 @@ export class OceanManager {
     this.initialised = true;
 
     this.water.follow(position);
+    this.horizon.follow(position);
+    if (!this.underwaterView) this.decor.update(position);
   }
 
   /** True while streamed tiles are still being built (other background work waits for it). */
@@ -294,21 +301,30 @@ export class OceanManager {
   setUnderwaterView(underwater: boolean) {
     if (underwater === this.underwaterView) return;
     this.underwaterView = underwater;
+    this.decor.setVisible(!underwater);
+    this.horizon.mesh.visible = !underwater;
     for (const tile of this.tiles.values()) this.applyTileVisibility(tile);
   }
 
   setQuality(profile: QualityProfile) {
     this.profile = profile;
     this.water.setSegments(profile.waterSegments);
+    this.decor.setRadius(profile.decorRadius);
   }
 
   getQuality() {
     return this.profile;
   }
 
-  /** Water colours for the current sky. */
-  setSurfaceLook(look: SurfaceLook) {
+  /** Water colours, glint and the horizon tint for the current sky. */
+  setSurfaceLook(look: SurfaceLook, horizonTint: THREE.Color, horizonStrength: number) {
     this.water.applyLook(look);
+    this.horizon.setTint(horizonTint, horizonStrength);
+  }
+
+  /** Direction toward the sun/moon (world space), for the water's glint. */
+  setSunDirection(direction: THREE.Vector3) {
+    this.water.uniforms.uSunDir.value.copy(direction).normalize();
   }
 
   /** Solid ground: seabed, reef slope, beach or island top. */
@@ -342,6 +358,8 @@ export class OceanManager {
     this.queue = [];
     this.material.dispose();
     this.water.dispose();
+    this.decor.dispose();
+    this.horizon.dispose();
     this.depthTexture.dispose();
   }
 }

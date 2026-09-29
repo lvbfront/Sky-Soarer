@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 // Shared sky-backdrop builders used by both GameEngine and LandingScene, so the landing page's
 // sky is literally the same dome, starfield and horizon clouds the player later flies under.
@@ -73,8 +74,9 @@ export function createStarfield() {
 
 /**
  * A handful of soft, distant background cloud puffs for horizon-level atmosphere — separate from
- * CloudManager's nearer, flyable clusters. Returned as one group so the whole backdrop can follow
- * the bird on XZ. All puffs share the single returned material.
+ * CloudManager's nearer, flyable clusters. Every puff is merged into one geometry (one draw call
+ * instead of ~100), returned inside a group so the whole backdrop can follow the bird on XZ. All
+ * puffs share the single returned material.
  */
 export function createSkyClouds(opacity: number) {
   const skyClouds = new THREE.Group();
@@ -85,18 +87,22 @@ export function createSkyClouds(opacity: number) {
     flatShading: true,
     fog: true,
   });
+  const puffs: THREE.BufferGeometry[] = [];
   for (let i = 0; i < SKY_CLOUD_CLUSTERS; i += 1) {
-    const cluster = new THREE.Group();
-    const puffCount = 3 + Math.floor(Math.random() * 3);
-    for (let p = 0; p < puffCount; p += 1) {
-      const puff = new THREE.Mesh(new THREE.IcosahedronGeometry(3 + Math.random() * 2.5, 0), material);
-      puff.position.set((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 8);
-      cluster.add(puff);
-    }
     const angle = Math.random() * Math.PI * 2;
     const radius = 120 + Math.random() * 500;
-    cluster.position.set(Math.cos(angle) * radius, 40 + Math.random() * 60, Math.sin(angle) * radius);
-    skyClouds.add(cluster);
+    const cx = Math.cos(angle) * radius;
+    const cy = 40 + Math.random() * 60;
+    const cz = Math.sin(angle) * radius;
+    const puffCount = 3 + Math.floor(Math.random() * 3);
+    for (let p = 0; p < puffCount; p += 1) {
+      const puff = new THREE.IcosahedronGeometry(3 + Math.random() * 2.5, 0);
+      puff.translate(cx + (Math.random() - 0.5) * 8, cy + (Math.random() - 0.5) * 2, cz + (Math.random() - 0.5) * 8);
+      puffs.push(puff);
+    }
   }
+  const merged = mergeGeometries(puffs, false)!;
+  puffs.forEach((g) => g.dispose());
+  skyClouds.add(new THREE.Mesh(merged, material));
   return { group: skyClouds, material };
 }

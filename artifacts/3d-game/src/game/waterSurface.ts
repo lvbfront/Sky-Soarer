@@ -3,9 +3,10 @@ import { TILE_SIZE, WAVE_SHORE_DAMP_DEPTH, wavesGlsl } from './oceanField';
 import { FOG_CULL_EXPONENT } from './oceanShaders';
 
 // The ocean's water surface: one grid mesh that follows the bird (a single draw call for the whole
-// sea), waves animated entirely in the vertex shader, and a fragment shader that tints the water by
-// the depth of the ground below it. The same mesh, seen from below, is the shimmering underside
-// with its bright Snell's window overhead.
+// sea), waves animated entirely in the vertex shader, and a fragment shader that colours the water
+// by the depth of the ground below it (turquoise shallows, deep blue offshore) with Fresnel sky
+// reflection, sun glint and shore foam. The same mesh, seen from below, is the shimmering
+// underside with its bright Snell's window overhead.
 //
 // The depth comes from a small toroidal "ground height" texture that OceanManager fills in tile
 // by tile as the world streams (see GroundDepthTexture below), so the shader never needs the
@@ -33,6 +34,10 @@ export interface SurfaceLook {
   shallow: THREE.Color;
   mid: THREE.Color;
   deep: THREE.Color;
+  reflect: THREE.Color;
+  foam: THREE.Color;
+  sunColor: THREE.Color;
+  glint: number;
   /** Underside: the colour outside the Snell's window, and inside it. */
   underDeep: THREE.Color;
   window: THREE.Color;
@@ -158,6 +163,11 @@ uniform float uTime;
 uniform vec3 uShallow;
 uniform vec3 uMid;
 uniform vec3 uDeep;
+uniform vec3 uReflect;
+uniform vec3 uFoam;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uGlint;
 uniform vec3 uUnderDeep;
 uniform vec3 uWindow;
 uniform vec3 uFocus;
@@ -174,14 +184,27 @@ void main() {
   #endif
   vec2 p = vWorld.xz;
   float t = uTime;
-  // Fine ripples on top of the vertex waves, for the underside shimmer.
+  // Fine ripples on top of the vertex waves, for the glint and the underside shimmer.
   vec2 ripple = vec2(sin(p.x * 0.93 + p.y * 0.41 + t * 2.1), cos(p.y * 1.07 - p.x * 0.33 - t * 1.7)) * 0.06;
   vec3 n = normalize(vWaveNormal + vec3(ripple.x, 0.0, ripple.y));
+  vec3 toCamera = normalize(cameraPosition - vWorld);
   vec3 col;
   if (gl_FrontFacing) {
     float depth = -oceanGround(p);
     vec3 base = mix(uShallow, uMid, smoothstep(0.2, 4.5, depth));
-    col = mix(base, uDeep, smoothstep(3.5, 13.0, depth));
+    base = mix(base, uDeep, smoothstep(3.5, 13.0, depth));
+    float ndv = clamp(dot(n, toCamera), 0.0, 1.0);
+    float m = 1.0 - ndv;
+    float fresnel = 0.03 + 0.97 * m * m * m * m * m;
+    col = mix(base, uReflect, clamp(fresnel * 0.9, 0.0, 1.0));
+    float spec = pow(max(dot(n, normalize(uSunDir + toCamera)), 0.0), 220.0) * 3.0;
+    col += uSunColor * spec * uGlint;
+    // Shore foam: a band hugging the beach, broken up and slowly washing in and out.
+    float shore = 1.0 - smoothstep(0.0, 1.8, depth + 0.35 * sin(t * 0.9 + p.x * 0.05 + p.y * 0.04));
+    if (shore > 0.0) {
+      float breakup = 0.5 + 0.5 * sin(p.x * 0.57 + t * 1.1) * sin(p.y * 0.63 - t * 0.8);
+      col = mix(col, uFoam, clamp(shore * smoothstep(0.3, 0.7, breakup + shore * 0.45), 0.0, 1.0) * 0.85);
+    }
   } else {
     // From below: total internal reflection outside a ~49° cone (the dark, deep colour), and the
     // bright refracted sky inside it, shimmering with the ripples and brightest overhead.
@@ -208,6 +231,11 @@ export class WaterSurface {
     uShallow: THREE.IUniform<THREE.Color>;
     uMid: THREE.IUniform<THREE.Color>;
     uDeep: THREE.IUniform<THREE.Color>;
+    uReflect: THREE.IUniform<THREE.Color>;
+    uFoam: THREE.IUniform<THREE.Color>;
+    uSunDir: THREE.IUniform<THREE.Vector3>;
+    uSunColor: THREE.IUniform<THREE.Color>;
+    uGlint: THREE.IUniform<number>;
     uUnderDeep: THREE.IUniform<THREE.Color>;
     uWindow: THREE.IUniform<THREE.Color>;
     uFocus: THREE.IUniform<THREE.Vector3>;
@@ -222,6 +250,12 @@ export class WaterSurface {
       uShallow: { value: new THREE.Color('#4fd6cf') },
       uMid: { value: new THREE.Color('#1f9fb8') },
       uDeep: { value: new THREE.Color('#0d4f86') },
+      uReflect: { value: new THREE.Color('#bfe6ef') },
+      uFoam: { value: new THREE.Color('#f4fdff') },
+      // Toward the sun: GameEngine's sun sits at (-55, 85, -38) relative to the bird.
+      uSunDir: { value: new THREE.Vector3(-55, 85, -38).normalize() },
+      uSunColor: { value: new THREE.Color('#fff1d6') },
+      uGlint: { value: 1 },
       uUnderDeep: { value: new THREE.Color('#0f5a7a') },
       uWindow: { value: new THREE.Color('#bff4ff') },
       uFocus: { value: new THREE.Vector3() },
@@ -260,6 +294,10 @@ export class WaterSurface {
     u.uShallow.value.copy(look.shallow);
     u.uMid.value.copy(look.mid);
     u.uDeep.value.copy(look.deep);
+    u.uReflect.value.copy(look.reflect);
+    u.uFoam.value.copy(look.foam);
+    u.uSunColor.value.copy(look.sunColor);
+    u.uGlint.value = look.glint;
     u.uUnderDeep.value.copy(look.underDeep);
     u.uWindow.value.copy(look.window);
   }

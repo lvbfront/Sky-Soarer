@@ -58,6 +58,7 @@ describe('quality levels', () => {
     expect(low.reefRadius).toBeLessThanOrEqual(high.reefRadius);
     expect(low.marineSnow).toBeLessThanOrEqual(high.marineSnow);
     expect(low.lightShafts).toBeLessThanOrEqual(high.lightShafts);
+    expect(low.decorRadius).toBeLessThanOrEqual(high.decorRadius);
     expect(low.waterSegments).toBeLessThanOrEqual(high.waterSegments);
   });
 });

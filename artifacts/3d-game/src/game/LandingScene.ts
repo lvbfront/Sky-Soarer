@@ -143,6 +143,10 @@ interface LookState {
   waterShallow: THREE.Color;
   waterMid: THREE.Color;
   waterDeep: THREE.Color;
+  waterReflect: THREE.Color;
+  glint: number;
+  horizonTint: THREE.Color;
+  horizonStrength: number;
 }
 
 function resolveLook(look: WeatherLook, ocean: OceanLook): LookState {
@@ -163,6 +167,10 @@ function resolveLook(look: WeatherLook, ocean: OceanLook): LookState {
     waterShallow: new THREE.Color(ocean.waterShallow),
     waterMid: new THREE.Color(ocean.waterMid),
     waterDeep: new THREE.Color(ocean.waterDeep),
+    waterReflect: new THREE.Color(ocean.waterReflect),
+    glint: ocean.glint,
+    horizonTint: new THREE.Color(ocean.horizonTint),
+    horizonStrength: ocean.horizonStrength,
   };
 }
 
@@ -183,6 +191,10 @@ function copyLook(out: LookState, from: LookState) {
   out.waterShallow.copy(from.waterShallow);
   out.waterMid.copy(from.waterMid);
   out.waterDeep.copy(from.waterDeep);
+  out.waterReflect.copy(from.waterReflect);
+  out.glint = from.glint;
+  out.horizonTint.copy(from.horizonTint);
+  out.horizonStrength = from.horizonStrength;
 }
 
 function blendLook(out: LookState, a: LookState, b: LookState, t: number) {
@@ -202,6 +214,10 @@ function blendLook(out: LookState, a: LookState, b: LookState, t: number) {
   out.waterShallow.lerpColors(a.waterShallow, b.waterShallow, t);
   out.waterMid.lerpColors(a.waterMid, b.waterMid, t);
   out.waterDeep.lerpColors(a.waterDeep, b.waterDeep, t);
+  out.waterReflect.lerpColors(a.waterReflect, b.waterReflect, t);
+  out.glint = THREE.MathUtils.lerp(a.glint, b.glint, t);
+  out.horizonTint.lerpColors(a.horizonTint, b.horizonTint, t);
+  out.horizonStrength = THREE.MathUtils.lerp(a.horizonStrength, b.horizonStrength, t);
 }
 
 export class LandingScene {
@@ -284,6 +300,10 @@ export class LandingScene {
     shallow: new THREE.Color(),
     mid: new THREE.Color(),
     deep: new THREE.Color(),
+    reflect: new THREE.Color(),
+    foam: new THREE.Color(),
+    sunColor: new THREE.Color(),
+    glint: 1,
     underDeep: new THREE.Color('#1a7ea0'),
     window: new THREE.Color('#d9fbff'),
   };
@@ -729,7 +749,11 @@ export class LandingScene {
     surface.shallow.copy(look.waterShallow);
     surface.mid.copy(look.waterMid);
     surface.deep.copy(look.waterDeep);
-    this.ocean.setSurfaceLook(surface);
+    surface.reflect.copy(look.waterReflect);
+    surface.foam.set('#f4fdff').lerp(look.fogOcean, 0.1 + look.stars * 0.5);
+    surface.sunColor.copy(look.sunColor);
+    surface.glint = look.glint;
+    this.ocean.setSurfaceLook(surface, look.horizonTint, look.horizonStrength);
   }
 
   private applyFog() {

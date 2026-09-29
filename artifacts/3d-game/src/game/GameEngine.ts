@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Bird, type BirdType } from './bird';
 import { TerrainManager } from './terrain';
 import { OceanManager } from './ocean';
+import { OceanLife } from './oceanLife';
 import { RingManager } from './rings';
 import { SplashEffect } from './splash';
 import { CloudManager } from './clouds';
@@ -157,6 +158,7 @@ export class GameEngine {
   private splash: SplashEffect | null;
   private ringBurst: RingBurstEffect | null;
   private underwaterEnv: UnderwaterEnvironment | null;
+  private oceanLife: OceanLife | null;
   private waterBurst: WaterBurstEffect | null;
   private ringGuide: RingGuideArrow | null;
   private score = 0;
@@ -267,12 +269,17 @@ export class GameEngine {
       this.splash = new SplashEffect(this.scene);
       this.waterBurst = new WaterBurstEffect(this.scene);
       this.underwaterEnv = new UnderwaterEnvironment(this.scene, ocean, profile);
+      this.oceanLife = new OceanLife(this.scene, ocean, ocean.uniforms, (position) => {
+        this.waterBurst?.trigger(position);
+        this.sfx.playSplash('surface', 0.12);
+      });
       this.applyOceanLook();
     } else {
       this.environment = new TerrainManager(this.scene);
       this.ocean = null;
       this.splash = null;
       this.underwaterEnv = null;
+      this.oceanLife = null;
       this.waterBurst = null;
     }
     this.clouds = new CloudManager(this.cloudRoot);
@@ -339,18 +346,28 @@ export class GameEngine {
     this.scene.add(fill);
   }
 
-  /** The ocean's water and underwater colours for the chosen sky (set once). */
+  /** The ocean's water, horizon and underwater colours for the chosen sky (set once). */
   private applyOceanLook() {
     const ocean = this.ocean;
     if (!ocean || !this.underwaterEnv) return;
+    const look = this.look;
     const ol = this.oceanLook;
-    ocean.setSurfaceLook({
-      shallow: new THREE.Color(ol.waterShallow),
-      mid: new THREE.Color(ol.waterMid),
-      deep: new THREE.Color(ol.waterDeep),
-      underDeep: new THREE.Color(ol.undersideDeep),
-      window: new THREE.Color(ol.undersideWindow),
-    });
+    ocean.setSurfaceLook(
+      {
+        shallow: new THREE.Color(ol.waterShallow),
+        mid: new THREE.Color(ol.waterMid),
+        deep: new THREE.Color(ol.waterDeep),
+        reflect: new THREE.Color(ol.waterReflect),
+        foam: new THREE.Color('#f4fdff').lerp(new THREE.Color(look.fogOcean), look.stars ? 0.6 : 0.1),
+        sunColor: new THREE.Color(look.sunColor),
+        glint: ol.glint,
+        underDeep: new THREE.Color(ol.undersideDeep),
+        window: new THREE.Color(ol.undersideWindow),
+      },
+      new THREE.Color(ol.horizonTint),
+      ol.horizonStrength,
+    );
+    ocean.setSunDirection(SUN_OFFSET);
     ocean.uniforms.uCausticColor.value.set(ol.causticColor);
     ocean.uniforms.uGlowColor.value.set(ol.glowColor);
     this.underwaterEnv.setLook({
@@ -368,6 +385,7 @@ export class GameEngine {
     this.cloudRoot.visible = !underwater;
     if (this.starfield) this.starfield.visible = !underwater;
     this.ocean?.setUnderwaterView(underwater);
+    this.oceanLife?.setVisible(!underwater);
     this.underwaterEnv?.setActive(underwater, this.bird.group.position);
     this.wind.setUnderwater(underwater);
     // Below the surface nothing receives the sun's shadows, so stop re-rendering the shadow map
@@ -707,6 +725,7 @@ export class GameEngine {
     this.environment.update(bird.position);
     if (!this.underwater) this.clouds.update(dt, bird.position, forward);
     this.underwaterEnv?.update(dt, bird.position, forward);
+    if (!this.underwater) this.oceanLife?.update(dt, bird.position, forward);
 
     if (this.rings) {
       const collectedAt = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
@@ -842,6 +861,7 @@ export class GameEngine {
     this.ringBurst?.dispose();
     this.waterBurst?.dispose();
     this.ringGuide?.dispose();
+    this.oceanLife?.dispose();
     this.underwaterEnv?.dispose();
     this.ocean?.dispose();
     // Free everything else still in the scene (terrain, sky, bird, clouds), then the context

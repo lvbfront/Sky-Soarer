@@ -125,7 +125,7 @@ export const NEXT_RING_HIGHLIGHTS: Record<MapType, Record<WeatherPreset, RingHig
 
 /**
  * Tropical Ocean colours per sky: the water surface (turquoise shallows → deep blue, what it
- * and the look below it. Underwater is always clearly water, blue-teal
+ * reflects, glint strength) and the look below it. Underwater is always clearly water, blue-teal
  * and darker/bluer with depth; the sky only tints it slightly (warmer at sunset, deep navy with
  * bioluminescence at night). One table, read by the engine (and the landing's surface colours).
  */
@@ -133,6 +133,12 @@ export interface OceanLook {
   waterShallow: string;
   waterMid: string;
   waterDeep: string;
+  /** What the water reflects at grazing angles (close to the horizon haze). */
+  waterReflect: string;
+  glint: number;
+  /** Tint the distant horizon silhouettes deepen toward, and how strongly. */
+  horizonTint: string;
+  horizonStrength: number;
   /** Fog/background just below the surface and near the seabed (lerped by camera depth). */
   underwaterShallow: string;
   underwaterDeep: string;
@@ -162,6 +168,10 @@ export const OCEAN_LOOKS: Record<WeatherPreset, OceanLook> = {
     waterShallow: '#5fe0d2',
     waterMid: '#1fa6bf',
     waterDeep: '#0c5a92',
+    waterReflect: '#c9ebf3',
+    glint: 1,
+    horizonTint: '#4f7f86',
+    horizonStrength: 0.5,
     underwaterShallow: '#1f93b5',
     underwaterDeep: '#0b4a7c',
     underwaterDensityShallow: 0.022,
@@ -186,6 +196,10 @@ export const OCEAN_LOOKS: Record<WeatherPreset, OceanLook> = {
     waterShallow: '#58c9bf',
     waterMid: '#2a8fae',
     waterDeep: '#1b4d80',
+    waterReflect: '#ffc49c',
+    glint: 1.25,
+    horizonTint: '#7a5a78',
+    horizonStrength: 0.45,
     // Still blue-teal, only nudged warm.
     underwaterShallow: '#2a8aa6',
     underwaterDeep: '#12426f',
@@ -211,6 +225,10 @@ export const OCEAN_LOOKS: Record<WeatherPreset, OceanLook> = {
     waterShallow: '#1c6a78',
     waterMid: '#0f3f5e',
     waterDeep: '#071d3a',
+    waterReflect: '#1c2c52',
+    glint: 0.7,
+    horizonTint: '#0a1226',
+    horizonStrength: 0.6,
     underwaterShallow: '#0b3358',
     underwaterDeep: '#041532',
     underwaterDensityShallow: 0.026,
