@@ -1,5 +1,6 @@
 import type { BirdType } from './bird';
 import type { MapType, WeatherPreset } from './presets';
+import { QUALITY_SETTINGS, type QualitySetting } from './quality';
 import { clamp, computeBox, validateCalibration } from './trackingMath';
 import {
   MAX_SENSITIVITY,
@@ -16,6 +17,8 @@ const GUIDE_DISMISSED_KEY = 'bird-flight-guide-dismissed';
 // The last hand calibration (center, 4 corners, sensitivity), so returning players can skip it.
 const CALIBRATION_KEY = 'bird-flight-calibration';
 const CALIBRATION_VERSION = 1;
+// Graphics quality (Auto / High / Low), chosen in the pause menu.
+const QUALITY_KEY = 'bird-flight-quality';
 
 /** How the bird is flown: a hand in front of the webcam, or the keyboard (no camera at all). */
 export type ControlMode = 'hand' | 'keyboard';
@@ -83,6 +86,23 @@ export function saveSettings(settings: FlightSettings) {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // Ignore write failures (e.g. storage disabled); the in-memory choice still applies.
+  }
+}
+
+/** The saved graphics quality setting; Auto when none (or an unknown value) is stored. */
+export function loadQuality(): QualitySetting {
+  try {
+    return pick(window.localStorage.getItem(QUALITY_KEY), QUALITY_SETTINGS, 'auto');
+  } catch {
+    return 'auto';
+  }
+}
+
+export function saveQuality(quality: QualitySetting) {
+  try {
+    window.localStorage.setItem(QUALITY_KEY, quality);
+  } catch {
+    // Storage disabled: the choice applies to this session only.
   }
 }
 

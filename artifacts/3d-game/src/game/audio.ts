@@ -11,6 +11,10 @@ export class WindAudio {
   private targetGain = 0;
   private targetFreq = 500;
   private rafId: number | null = null;
+  // Underwater the wind becomes a low, muffled rumble; the switch glides faster than the usual
+  // speed changes so a dive sounds like plunging in.
+  private underwater = false;
+  private fastGlideUntil = 0;
 
   async start() {
     if (this.ctx) return;
@@ -54,8 +58,9 @@ export class WindAudio {
     const tick = () => {
       if (!this.ctx || !this.gain || !this.filter) return;
       const now = this.ctx.currentTime;
-      this.gain.gain.setTargetAtTime(this.targetGain, now, 0.4);
-      this.filter.frequency.setTargetAtTime(this.targetFreq, now, 0.4);
+      const glide = performance.now() < this.fastGlideUntil ? 0.12 : 0.4;
+      this.gain.gain.setTargetAtTime(this.targetGain, now, glide);
+      this.filter.frequency.setTargetAtTime(this.targetFreq, now, glide);
       this.rafId = requestAnimationFrame(tick);
     };
     tick();
@@ -64,8 +69,20 @@ export class WindAudio {
   /** speedRatio: 0 (idle) .. 1 (cruising) .. beyond 1 while boosting */
   setIntensity(speedRatio: number) {
     const clamped = Math.max(0, speedRatio);
+    if (this.underwater) {
+      this.targetGain = Math.min(0.1, 0.05 + clamped * 0.03);
+      this.targetFreq = 170 + clamped * 90;
+      return;
+    }
     this.targetGain = Math.min(0.22, 0.03 + clamped * 0.14);
     this.targetFreq = 350 + clamped * 900;
+  }
+
+  /** Muffles the wind into an underwater rumble (and back), gliding quickly. */
+  setUnderwater(underwater: boolean) {
+    if (underwater === this.underwater) return;
+    this.underwater = underwater;
+    this.fastGlideUntil = performance.now() + 600;
   }
 
   /** Silences the wind while the game is paused (suspending the context), and brings it back. */
@@ -87,11 +104,12 @@ export class WindAudio {
 }
 
 /**
- * One-shot synthesized sound effects (no audio files) — currently just the pleasant
- * ring-collection chime, built from a couple of quick sine "bell" tones.
+ * One-shot synthesized sound effects (no audio files): the ring-collection chime (a couple of
+ * quick sine "bell" tones) and water splashes (swept, filtered noise).
  */
 export class SoundEffects {
   private ctx: AudioContext | null = null;
+  private noise: AudioBuffer | null = null;
 
   private getContext() {
     if (!this.ctx) {
@@ -126,8 +144,41 @@ export class SoundEffects {
     });
   }
 
+  /**
+   * A water splash: filtered noise whose band sweeps down for a dive ("plunk") and up when
+   * surfacing ("whoosh"). `volume` scales it (quieter for distant dolphins).
+   */
+  playSplash(kind: 'dive' | 'surface', volume = 1) {
+    const ctx = this.getContext();
+    if (!this.noise) {
+      const length = Math.floor(ctx.sampleRate * 0.7);
+      this.noise = ctx.createBuffer(1, length, ctx.sampleRate);
+      const data = this.noise.getChannelData(0);
+      for (let i = 0; i < length; i += 1) data[i] = Math.random() * 2 - 1;
+    }
+    const now = ctx.currentTime;
+    const source = ctx.createBufferSource();
+    source.buffer = this.noise;
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.Q.value = 0.9;
+    const dive = kind === 'dive';
+    filter.frequency.setValueAtTime(dive ? 1800 : 450, now);
+    filter.frequency.exponentialRampToValueAtTime(dive ? 280 : 2200, now + 0.4);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.26 * volume, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + (dive ? 0.6 : 0.5));
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(now);
+    source.stop(now + 0.65);
+  }
+
   dispose() {
     void this.ctx?.close();
     this.ctx = null;
+    this.noise = null;
   }
 }

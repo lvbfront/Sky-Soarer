@@ -122,3 +122,113 @@ export const NEXT_RING_HIGHLIGHTS: Record<MapType, Record<WeatherPreset, RingHig
     night: { color: '#ff5cd6', emissive: '#ff2bc0', glow: '#ffd1f3' },
   },
 };
+
+/**
+ * Tropical Ocean colours per sky: the water surface (turquoise shallows → deep blue, what it
+ * and the look below it. Underwater is always clearly water, blue-teal
+ * and darker/bluer with depth; the sky only tints it slightly (warmer at sunset, deep navy with
+ * bioluminescence at night). One table, read by the engine (and the landing's surface colours).
+ */
+export interface OceanLook {
+  waterShallow: string;
+  waterMid: string;
+  waterDeep: string;
+  /** Fog/background just below the surface and near the seabed (lerped by camera depth). */
+  underwaterShallow: string;
+  underwaterDeep: string;
+  underwaterDensityShallow: number;
+  underwaterDensityDeep: number;
+  underwaterHemiSky: string;
+  underwaterHemiGround: string;
+  underwaterHemiIntensity: number;
+  underwaterAmbient: string;
+  underwaterAmbientIntensity: number;
+  underwaterSunIntensity: number;
+  /** The surface seen from below: outside and inside the Snell's window. */
+  undersideDeep: string;
+  undersideWindow: string;
+  caustics: number;
+  causticColor: string;
+  shaftColor: string;
+  shaftIntensity: number;
+  snowColor: string;
+  /** Bioluminescence (0..1): glowing reef tips, jellyfish and plankton. */
+  glow: number;
+  glowColor: string;
+}
+
+export const OCEAN_LOOKS: Record<WeatherPreset, OceanLook> = {
+  sunny: {
+    waterShallow: '#5fe0d2',
+    waterMid: '#1fa6bf',
+    waterDeep: '#0c5a92',
+    underwaterShallow: '#1f93b5',
+    underwaterDeep: '#0b4a7c',
+    underwaterDensityShallow: 0.022,
+    underwaterDensityDeep: 0.03,
+    underwaterHemiSky: '#9fe8f7',
+    underwaterHemiGround: '#0e4262',
+    underwaterHemiIntensity: 1.4,
+    underwaterAmbient: '#a8ecff',
+    underwaterAmbientIntensity: 0.7,
+    underwaterSunIntensity: 0.95,
+    undersideDeep: '#1a7ea0',
+    undersideWindow: '#d9fbff',
+    caustics: 1.1,
+    causticColor: '#e8fdff',
+    shaftColor: '#d8fbff',
+    shaftIntensity: 0.26,
+    snowColor: '#e6fbff',
+    glow: 0,
+    glowColor: '#5ff6ff',
+  },
+  sunset: {
+    waterShallow: '#58c9bf',
+    waterMid: '#2a8fae',
+    waterDeep: '#1b4d80',
+    // Still blue-teal, only nudged warm.
+    underwaterShallow: '#2a8aa6',
+    underwaterDeep: '#12426f',
+    underwaterDensityShallow: 0.023,
+    underwaterDensityDeep: 0.031,
+    underwaterHemiSky: '#c2e2d6',
+    underwaterHemiGround: '#123c58',
+    underwaterHemiIntensity: 1.3,
+    underwaterAmbient: '#bfe2dc',
+    underwaterAmbientIntensity: 0.65,
+    underwaterSunIntensity: 0.8,
+    undersideDeep: '#1f7894',
+    undersideWindow: '#ffe6c8',
+    caustics: 0.9,
+    causticColor: '#ffe7c4',
+    shaftColor: '#ffe9cc',
+    shaftIntensity: 0.22,
+    snowColor: '#f2f4ea',
+    glow: 0.12,
+    glowColor: '#6ff2ff',
+  },
+  night: {
+    waterShallow: '#1c6a78',
+    waterMid: '#0f3f5e',
+    waterDeep: '#071d3a',
+    underwaterShallow: '#0b3358',
+    underwaterDeep: '#041532',
+    underwaterDensityShallow: 0.026,
+    underwaterDensityDeep: 0.034,
+    underwaterHemiSky: '#4d74b8',
+    underwaterHemiGround: '#06142c',
+    underwaterHemiIntensity: 0.85,
+    underwaterAmbient: '#5f7cc4',
+    underwaterAmbientIntensity: 0.42,
+    underwaterSunIntensity: 0.25,
+    undersideDeep: '#0a2a4c',
+    undersideWindow: '#6f8fc8',
+    caustics: 0.35,
+    causticColor: '#b6ccff',
+    shaftColor: '#9fb8ff',
+    shaftIntensity: 0.09,
+    snowColor: '#9fc4ff',
+    glow: 1,
+    glowColor: '#4ff8ff',
+  },
+};

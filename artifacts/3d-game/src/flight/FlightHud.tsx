@@ -208,7 +208,7 @@ export function FlightHud({
         className="pointer-events-none absolute inset-0 transition-opacity duration-500"
         style={{
           opacity: underwater ? 1 : 0,
-          background: 'linear-gradient(rgba(20,110,150,0.18), rgba(10,60,90,0.32))',
+          background: 'linear-gradient(rgba(20,110,150,0.08), rgba(10,60,90,0.2))',
         }}
       />
       {/* Readability scrims behind the corner readouts. */}

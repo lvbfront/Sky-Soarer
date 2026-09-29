@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { loadCalibration, saveCalibration } from './settings';
+import { loadCalibration, loadQuality, saveCalibration, saveQuality } from './settings';
 import type { CalibrationData } from './trackingShared';
 
 // A minimal in-memory localStorage on a stand-in `window` (the tests run in Node).
@@ -53,5 +53,22 @@ describe('saved calibration', () => {
   it('clamps the sensitivity to the slider range', () => {
     saveCalibration({ ...GOOD, sensitivity: 9 });
     expect(loadCalibration()?.sensitivity).toBe(2);
+  });
+});
+
+describe('saved graphics quality', () => {
+  beforeEach(() => store.clear());
+
+  it('defaults to Auto and round-trips a choice', () => {
+    expect(loadQuality()).toBe('auto');
+    saveQuality('low');
+    expect(loadQuality()).toBe('low');
+    saveQuality('high');
+    expect(loadQuality()).toBe('high');
+  });
+
+  it('falls back to Auto for an unknown stored value', () => {
+    store.set('bird-flight-quality', 'ultra');
+    expect(loadQuality()).toBe('auto');
   });
 });
