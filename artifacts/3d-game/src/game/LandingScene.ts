@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import { gsap } from 'gsap';
 import { Bird, type BirdType } from './bird';
 import { TerrainManager } from './terrain';
-import { OceanManager } from './ocean';
+import { OceanManager, type SurfaceLook } from './ocean';
+import { disposeObjectTree } from './dispose';
 import { CloudManager } from './clouds';
-import { WEATHER_LOOKS, type MapType, type WeatherLook, type WeatherPreset } from './presets';
+import { OCEAN_LOOKS, WEATHER_LOOKS, type MapType, type OceanLook, type WeatherLook, type WeatherPreset } from './presets';
 import { createSkyClouds, createSkyDome, createStarfield, paintSkyGradient } from './sky';
 
 /**
@@ -138,9 +139,17 @@ interface LookState {
   ambientColor: THREE.Color;
   ambientIntensity: number;
   stars: number;
+  // Tropical Ocean surface colours (OCEAN_LOOKS), blended with the sky.
+  waterShallow: THREE.Color;
+  waterMid: THREE.Color;
+  waterDeep: THREE.Color;
+  waterReflect: THREE.Color;
+  glint: number;
+  horizonTint: THREE.Color;
+  horizonStrength: number;
 }
 
-function resolveLook(look: WeatherLook): LookState {
+function resolveLook(look: WeatherLook, ocean: OceanLook): LookState {
   return {
     skyTop: new THREE.Color(look.skyTop),
     skyBottom: new THREE.Color(look.skyBottom),
@@ -155,6 +164,13 @@ function resolveLook(look: WeatherLook): LookState {
     ambientColor: new THREE.Color(look.ambientColor),
     ambientIntensity: look.ambientIntensity,
     stars: look.stars ? 1 : 0,
+    waterShallow: new THREE.Color(ocean.waterShallow),
+    waterMid: new THREE.Color(ocean.waterMid),
+    waterDeep: new THREE.Color(ocean.waterDeep),
+    waterReflect: new THREE.Color(ocean.waterReflect),
+    glint: ocean.glint,
+    horizonTint: new THREE.Color(ocean.horizonTint),
+    horizonStrength: ocean.horizonStrength,
   };
 }
 
@@ -172,6 +188,13 @@ function copyLook(out: LookState, from: LookState) {
   out.ambientColor.copy(from.ambientColor);
   out.ambientIntensity = from.ambientIntensity;
   out.stars = from.stars;
+  out.waterShallow.copy(from.waterShallow);
+  out.waterMid.copy(from.waterMid);
+  out.waterDeep.copy(from.waterDeep);
+  out.waterReflect.copy(from.waterReflect);
+  out.glint = from.glint;
+  out.horizonTint.copy(from.horizonTint);
+  out.horizonStrength = from.horizonStrength;
 }
 
 function blendLook(out: LookState, a: LookState, b: LookState, t: number) {
@@ -188,26 +211,13 @@ function blendLook(out: LookState, a: LookState, b: LookState, t: number) {
   out.ambientColor.lerpColors(a.ambientColor, b.ambientColor, t);
   out.ambientIntensity = THREE.MathUtils.lerp(a.ambientIntensity, b.ambientIntensity, t);
   out.stars = THREE.MathUtils.lerp(a.stars, b.stars, t);
-}
-
-/** Frees every geometry, material and material texture under `root`, each exactly once. */
-function disposeObjectTree(root: THREE.Object3D) {
-  const geometries = new Set<THREE.BufferGeometry>();
-  const materials = new Set<THREE.Material>();
-  root.traverse((child) => {
-    const renderable = child as THREE.Mesh | THREE.Points;
-    if (renderable.geometry) geometries.add(renderable.geometry);
-    const material = (renderable as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
-    if (Array.isArray(material)) material.forEach((m) => materials.add(m));
-    else if (material) materials.add(material);
-  });
-  geometries.forEach((g) => g.dispose());
-  materials.forEach((m) => {
-    for (const value of Object.values(m)) {
-      if (value instanceof THREE.Texture) value.dispose();
-    }
-    m.dispose();
-  });
+  out.waterShallow.lerpColors(a.waterShallow, b.waterShallow, t);
+  out.waterMid.lerpColors(a.waterMid, b.waterMid, t);
+  out.waterDeep.lerpColors(a.waterDeep, b.waterDeep, t);
+  out.waterReflect.lerpColors(a.waterReflect, b.waterReflect, t);
+  out.glint = THREE.MathUtils.lerp(a.glint, b.glint, t);
+  out.horizonTint.lerpColors(a.horizonTint, b.horizonTint, t);
+  out.horizonStrength = THREE.MathUtils.lerp(a.horizonStrength, b.horizonStrength, t);
 }
 
 export class LandingScene {
@@ -286,6 +296,17 @@ export class LandingScene {
   private readonly instanceScale = new THREE.Vector3();
   private readonly tmpColor = new THREE.Color();
   private readonly whiteout = new THREE.Color('#f4f7fb');
+  private readonly oceanSurface: SurfaceLook = {
+    shallow: new THREE.Color(),
+    mid: new THREE.Color(),
+    deep: new THREE.Color(),
+    reflect: new THREE.Color(),
+    foam: new THREE.Color(),
+    sunColor: new THREE.Color(),
+    glint: 1,
+    underDeep: new THREE.Color('#1a7ea0'),
+    window: new THREE.Color('#d9fbff'),
+  };
 
   constructor(container: HTMLElement, options: LandingSceneOptions) {
     this.container = container;
@@ -310,10 +331,10 @@ export class LandingScene {
 
     this.camera = new THREE.PerspectiveCamera(SHOTS[0].fov, container.clientWidth / container.clientHeight, 0.1, 1400);
 
-    const look = resolveLook(WEATHER_LOOKS[options.weather]);
+    const look = resolveLook(WEATHER_LOOKS[options.weather], OCEAN_LOOKS[options.weather]);
     this.look = look;
-    this.lookFrom = resolveLook(WEATHER_LOOKS[options.weather]);
-    this.lookTo = resolveLook(WEATHER_LOOKS[options.weather]);
+    this.lookFrom = resolveLook(WEATHER_LOOKS[options.weather], OCEAN_LOOKS[options.weather]);
+    this.lookTo = resolveLook(WEATHER_LOOKS[options.weather], OCEAN_LOOKS[options.weather]);
 
     this.fog = new THREE.FogExp2(look.fogMountain.getHex(), FOG_DENSITY_LOW);
     this.scene.fog = this.fog;
@@ -398,7 +419,10 @@ export class LandingScene {
 
   private ensureMap(map: MapType) {
     if (map === 'mountain' && !this.terrain) this.terrain = new TerrainManager(this.terrainRoot);
-    if (map === 'ocean' && !this.ocean) this.ocean = new OceanManager(this.oceanRoot);
+    if (map === 'ocean' && !this.ocean) {
+      this.ocean = new OceanManager(this.oceanRoot);
+      this.applyOceanSurface();
+    }
   }
 
   private get environment() {
@@ -540,7 +564,7 @@ export class LandingScene {
     if (weather === this.weather) return;
     this.weather = weather;
     copyLook(this.lookFrom, this.look);
-    this.lookTo = resolveLook(WEATHER_LOOKS[weather]);
+    this.lookTo = resolveLook(WEATHER_LOOKS[weather], OCEAN_LOOKS[weather]);
     gsap.killTweensOf(this.lookTween);
     this.lookTween.t = 0;
     if (this.options.reducedMotion) {
@@ -712,8 +736,24 @@ export class LandingScene {
     this.skyCloudMaterial.opacity = THREE.MathUtils.lerp(0.85, 0.18, look.stars);
     this.cloudDeckMaterial.emissive.copy(look.hemiSky).lerp(look.skyBottom, 0.5);
     this.cloudDeckMaterial.emissiveIntensity = THREE.MathUtils.lerp(0.4, 0.12, look.stars);
+    this.applyOceanSurface();
     // Keep blending until the tween finishes, then stop repainting.
     this.lookDirty = this.lookTween.t < 1;
+  }
+
+  /** The ocean's water colours follow the (possibly blending) sky. */
+  private applyOceanSurface() {
+    if (!this.ocean) return;
+    const look = this.look;
+    const surface = this.oceanSurface;
+    surface.shallow.copy(look.waterShallow);
+    surface.mid.copy(look.waterMid);
+    surface.deep.copy(look.waterDeep);
+    surface.reflect.copy(look.waterReflect);
+    surface.foam.set('#f4fdff').lerp(look.fogOcean, 0.1 + look.stars * 0.5);
+    surface.sunColor.copy(look.sunColor);
+    surface.glint = look.glint;
+    this.ocean.setSurfaceLook(surface, look.horizonTint, look.horizonStrength);
   }
 
   private applyFog() {
@@ -753,6 +793,7 @@ export class LandingScene {
 
     // Everything (terrain/ocean tiles and their pools, clouds, deck, birds, sky) hangs off the
     // scene, so one traversal frees it all.
+    this.ocean?.dispose();
     disposeObjectTree(this.scene);
     this.clouds.dispose();
     this.scene.clear();

@@ -43,8 +43,9 @@ How a session plays:
    - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll. Closing or opening the fist doesn't nudge the steering.
    - **Flick your hand up fast**, about half the height of your calibrated box in under 0.2 s (keyboard: **F**), for a 0.9 s backflip. The flick doesn't pitch the bird up. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
    - Both tricks are cosmetic only. They never change heading or momentum.
-   - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Recalibrate** (hand mode) **/ Back to landing**), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
-   - On the ocean map you can dive under open water into a reef world with fish, a shark, caustics and bubbles. Surfacing sprays a water burst.
+   - **Esc** or the HUD's **Pause** button opens the pause menu (**Resume / How to fly / Recalibrate** (hand mode) **/ Back to landing**, plus a **Graphics: Auto / High / Low** switch, §6.13), and the game loop freezes. The HUD's **?** button (or the `?` key) opens the guide mid-flight, paused. Switching tabs pauses too.
+   - **The Tropical Ocean** (§6.6): a shader-animated sea, turquoise over the shallows and deep blue offshore, with Fresnel sky reflection, sun glint and shore foam. Islands have sandy beaches, palms, bushes and shore rocks. Dolphins leap now and then, seabirds circle in the distance, and hazy island silhouettes line the horizon.
+   - **Dive** under open water into a streamed seabed (sand dunes, rock patches, reef slopes that carry every island down to the sea floor) covered in instanced coral, kelp, anemones, rocks, starfish and shells, with animated caustics, light shafts, marine snow and round bubbles. Fish schools flock (four species), and a sea turtle, a manta ray, jellyfish (glowing at night) and a shark swim around the bird, keeping their distance. Looking up shows the shimmering underside of the surface. Diving and surfacing blend the fog and light over ~0.4 s, with a splash sound and the wind muffling into an underwater rumble.
    - In Ring Challenge, fly through glowing rings to score. The **next ring** (the earliest-spawned ring still ahead that you haven't collected or missed) glows in a highlight color picked for the map + sky, a floating arrow in the same color points at it, and the HUD shows its distance (`NEXT RING 84 m`). The best score is saved in `localStorage`.
    - The HUD (§6.11) shows a heading tape, speed and altitude readouts, the ring score, best and next-ring distance, Boost/Barrel Roll/Backflip/Diving annunciator badges, a boost HUD effect (edge speed streaks and tightening frame brackets), a small mirrored sensor feed with the hand skeleton (keyboard mode: a live pitch/roll input indicator instead), a status line, and **?**, **Pause** and **Stop Game** buttons.
 
@@ -116,6 +117,10 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
   - `pnpm test`: 80 Vitest tests pass (tracking math, flick detector at 30/60 Hz plus sparse 15–60 Hz tracks, rings, damping, saved calibration).
   - **Ring Challenge, keyboard mode, dev server:** screenshots of the arrow pointing at the highlighted next ring on both maps × all three skies. A missed ring (crossed 13 m outside the hoop) moved the target to the following ring on that frame, with the arrow's aim error easing 50° → 10° over ~0.25 s. A hard left bank from heading 000 to 195 stepped the target 3 → 4 → 5 → 6 → 7 as rings fell behind. The highlight was on exactly one ring on every frame.
   - **Simulated hand** (fake camera + stubbed `@mediapipe/hands`; tracker ~15 Hz in flight at 640×360): 5 of 5 half-box flicks fired, and the bird's pitch peaked at 0.02 during a flick. A brisk climb didn't fire and wasn't held (pitch reached 1.0). A fist close/hold/open changed pitch by 0.0000 (the palm shift is ~0.07 of pitch). A slow flick showed "Flick faster ↑". Calibration validation, drag-to-fix, saving, the saved-calibration skip (`CALIBRATION [SAVED]`), Recalibrate from the landing and from the pause menu (one WebGL context throughout), and the guide's Back to calibration all worked, with no console errors.
+- The ocean overhaul PR re-ran this headlessly (SwiftShader, keyboard mode, 960×540, quality pinned; harness notes in §11):
+  - `pnpm test`: 99 tests (adds the ocean height field and waves, the quality monitor and levels, and the saved quality).
+  - Fixed spots above water, just below the surface looking up, on the seabed by an island and in open water, on all three skies, before vs after (High / Low). Sunset: draw calls 63 → 52 / 51 above water and 95–185 → 35–39 / 44–47 underwater; triangles 23k → 87k / 46k above and 19–28k → 78–92k / 35–42k below; worst `update()` in a 20 s boosted flight 17.3 ms → 5.3 ms (sunny 22.6 → 8.6, night 21.6 → 7.1): the old synchronous 7-tile rebuilds are gone. SwiftShader frame times went up (air 123 → 137 / 97 ms, underwater ~60 → 120–200 / 87–141 ms): it rasterises on the CPU, and the old underwater view was mostly an unlit, fogged sky dome, while now a lit seabed and reef fill the screen. Real-GPU frame rates are still to be checked (PR checklist).
+  - Functional: dive and surface with real keys (sky/clouds hidden, fog, camera below the waves, night glow), the pause menu's Graphics switch (applies live and persists), Auto dropping to Low under SwiftShader and the menu showing "Auto · Low", Ring Challenge on the ocean, the landing's ocean chapter, two mountain sessions back to back (one live WebGL context after each), no console errors.
 - The lockfile now includes native binaries for every OS and CPU (esbuild, rollup, lightningcss, the tailwind oxide engine). Actual installs on macOS or Windows haven't been tested yet.
 
 ### Environment variables (all optional)
@@ -179,7 +184,7 @@ The game needs **no secrets, no backend and no database**.
 │           ├── flight/
 │           │   ├── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed or
 │           │   │                  #   keyboard input indicator, near-miss flick hint, NEXT RING distance, ? / Pause / Stop buttons
-│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Recalibrate (hand) / Back to landing
+│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Recalibrate (hand) / Back to landing, Graphics quality
 │           │   ├── FlightGuide.tsx # "How to fly" guide: per-move cards for hand or keyboard, tips built from real constants
 │           │   └── guideArt.tsx   # procedural SVG hand illustrations + animated keycaps (CSS keyframes in index.css)
 │           ├── ui/
@@ -190,10 +195,10 @@ The game needs **no secrets, no backend and no database**.
 │           └── game/          # ★ framework-free Three.js game code
 │               ├── GameEngine.ts   # renderer, scene, loop, flight physics, camera, lighting/weather, underwater state machine
 │               ├── LandingScene.ts # landing backdrop: scroll-progress-driven bird/camera/altitude, cloud deck, live swaps, dispose
-│               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS (shared by engine + landing); speeds and
+│               ├── presets.ts      # MAP_OPTIONS, WEATHER_OPTIONS, WEATHER_LOOKS, OCEAN_LOOKS (shared by engine + landing); speeds and
 │               │                   #   trick durations (shared by engine + guide); NEXT_RING_HIGHLIGHTS (engine + HUD)
 │               ├── damping.ts      # damp(rate, dt) + perFrameRate(alpha, fps): frame-rate independent smoothing
-│               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing)
+│               ├── sky.ts          # sky dome / starfield / horizon-cloud builders (shared by engine + landing; clouds merged)
 │               ├── settings.ts     # localStorage last-used settings ("bird-flight-settings", incl. control mode), validated
 │               │                   #   on read; guide "Don't show again" per mode ("bird-flight-guide-dismissed"); the saved
 │               │                   #   hand calibration ("bird-flight-calibration", validated on read)
@@ -209,8 +214,23 @@ The game needs **no secrets, no backend and no database**.
 │               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
-│               ├── ocean.ts        # Ocean: streamed tiles, hashed islands, animated water verts, foam band
-│               ├── underwater.ts   # reef/fish/shark/caustics/bubbles (lazy-built)
+│               ├── oceanField.ts   # pure ocean height field: hashed islands, seabed dunes/rock, reef slopes, waves (CPU mirror
+│               │                   #   of the water shader), seeded RNG (unit-tested)
+│               ├── ocean.ts        # OceanManager: incremental tile streaming (ground mesh + depth-texture jobs), the water
+│               │                   #   surface, island decor, horizon; land-first index ranges; underwater view switch
+│               ├── waterSurface.ts # the single bird-following water mesh + shader (depth colour, Fresnel, glint, foam,
+│               │                   #   underside/Snell's window) and the toroidal ground-height texture it reads
+│               ├── oceanShaders.ts # shared ocean uniforms, caustics GLSL, patchOceanMaterial (caustics, sway/swim vertex
+│               │                   #   code, night glow, fog early-out) for built-in Lambert materials
+│               ├── oceanDecor.ts   # instanced palms/bushes/shore rocks per island; horizon silhouettes + fog apron
+│               ├── oceanLife.ts    # dolphins (pooled leaps) and circling seabirds, one InstancedMesh each
+│               ├── underwater.ts   # UnderwaterEnvironment: composes reef + sea life + fx, reef prefetch, dive seeding
+│               ├── reef.ts         # 9 instanced reef species scattered per tile on the real ground (seeded, clustered)
+│               ├── seaLife.ts      # fish schools (boids, 4 species), turtle, manta, shark, jellyfish; shader swim animation
+│               ├── underwaterFx.ts # light shafts, marine snow (camera-wrapped in the vertex shader), round bubbles
+│               ├── lowPoly.ts      # bake/merge helpers for vertex-coloured low-poly geometry (one draw per species)
+│               ├── quality.ts      # Auto/High/Low quality profiles + AutoQualityMonitor (pure, unit-tested)
+│               ├── dispose.ts      # disposeObjectTree (engine + landing teardown)
 │               ├── clouds.ts       # flyable cloud clusters in the flight corridor
 │               ├── rings.ts        # Ring Challenge spawning, hit test, next-ring selection + highlight
 │               ├── ringGuide.ts    # arrow pointing (smoothly) at the next ring
@@ -301,12 +321,15 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 ## 6. How each system works
 
 ### 6.1 Rendering (`GameEngine.ts`)
-- `WebGLRenderer({antialias, powerPreference:'high-performance'})`, with pixel ratio capped at 2, sRGB output, and shadow maps on.
+- `WebGLRenderer({antialias, powerPreference:'high-performance'})`, with pixel ratio capped by the quality level (2 on High, 1 on Low, §6.13), sRGB output, and shadow maps on (`PCFShadowMap`: `PCFSoftShadowMap` is deprecated in r185 and fell back to it anyway).
 - `PerspectiveCamera` with FOV 58, rising to 72 on boost (50 and 60 underwater), near 0.1, far 1200.
 - **Sky.** An inverted sphere of radius 900 with vertex-color gradient from the `WEATHER_LOOKS` preset, plus 24 decorative cloud clusters. On Starry Night there's also a 900-point starfield that follows the bird on XZ. The sky sphere, the decorative cloud group (`skyClouds`) and the starfield all **follow the bird on XZ** every frame, so the world never flies out of the backdrop.
-- **Fog.** `FogExp2`, density 0.0068 above water and 0.022 underwater.
+- **Fog.** One `FogExp2` object, mutated in place (never replaced): density 0.0068 above water. Underwater (ocean map) its colour and density come from `OCEAN_LOOKS` (§6.6), and the scene background becomes the fog colour.
 - **Lights.** Hemisphere + ambient + a shadow-casting sun (1024² map, 180×180 frustum) that is **re-centered on the bird every frame**, plus an unshadowed fill light.
-- **Weather.** `WEATHER_LOOKS` is one table holding sky colors, fog colors, and light colors and intensities. `enterUnderwaterLook()` and `exitUnderwaterLook()` swap between it and the fixed cyan underwater palette.
+- **Weather.** `WEATHER_LOOKS` is one table holding sky colors, fog colors, and light colors and intensities. `OCEAN_LOOKS` (per sky) holds the water surface colours and the whole underwater look. On the ocean map `updateAtmosphere()` blends fog, background, hemisphere/ambient/sun between the two every frame (`underwaterBlend`, ~0.4 s), allocation-free.
+- **Sky clouds** (`createSkyClouds`) are merged into one geometry: one draw call instead of ~100.
+- **Teardown.** `dispose()` frees every geometry/material/texture (`disposeObjectTree`) and calls `renderer.forceContextLoss()`.
+- **Shader precompile.** `start()` runs `renderer.compileAsync` (capped at 1.5 s) with the underwater scene made visible for that pass, under the takeoff veil, so the first dive doesn't hitch on shader compiles.
 - **Screen effects.** The boost motion blur, the surfacing flash and the underwater tint are **CSS overlays in `App.tsx`**, not post-processing. There is no `EffectComposer`.
 
 ### 6.2 Flight physics and camera (`GameEngine.update`)
@@ -321,10 +344,12 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Altitude.**
   - Over solid ground (mountains or islands) the floor is `height + 3.5`.
   - **Islands are solid underwater.** While submerged, a move that would enter an island's footprint (`!isOverWater`) slides along the edge: it keeps only the X or only the Z part of the move, or blocks the horizontal move entirely. Before this, the solid-ground floor snapped the bird up through the surface.
-  - Over open water the only floor is `SEABED_FLOOR_Y = -15`.
+  - Over open water the floor is the real seabed: `ocean.groundHeightAt(x, z) + SEABED_CLEARANCE` (1.2), so it follows the dunes, rocks and the reef slopes rising toward islands (the bird is eased up a slope near the shore, never snapped).
   - The ceiling is y = 140.
   - The bird starts at (0, 26, 0) heading +Z.
 - **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, chasing at `CAMERA_RATE` (0.05 per frame at 60 FPS; 0.03 underwater). FOV chases at `FOV_RATE` (0.06).
+  - **Ocean: the camera stays on the bird's side of the water** (`keepCameraOnBirdSide`): underwater it's kept 0.35 below the animated surface (`waterHeightAt`, the same waves the shader draws) and 0.6 above the seabed; above water it's kept 0.35 above the waves. The water is opaque, so without this a shallow-swimming bird would be hidden under it. The underwater look (fog, sky hidden, reef shown) therefore always matches the bird's `underwater` state.
+  - The underwater switch uses the calm water level (0) ±0.4 hysteresis, not the waves, so skimming never flickers.
 - **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` to false, so the bird eases back to level cruise instead of latching the last input.
 - **Timing.** A `THREE.Timer` (not the deprecated `Clock`), connected to the document so a hidden tab yields a zero delta; `loop` calls `timer.update().getDelta()`. `dt` is still clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
 - **Pause.** `setPaused(true)` cancels the rAF loop, so there's no update and no render and the canvas holds the last frame. It also suspends the wind `AudioContext`, and `applyControls` returns early (input can't steer, boost or start a trick behind the menu). `setPaused(false)` discards the paused time with `timer.reset()` and restarts the loop. A resize while paused re-renders the held frame once. Before `start()` has finished, `setPaused` only records the flag, and `start()` honors it (so two loops are never scheduled).
@@ -427,21 +452,35 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Height is two octaves of simplex noise × 16, with vertex colors banded by height.
   - Tiles are pooled and rebuilt only when the bird crosses a tile boundary.
   - The noise seed is random per session.
-- **Tropical Ocean** (`ocean.ts`):
-  - The same tiling, with 24 segments.
-  - Water sits at y = 0, with a static noise ripple of ±0.18.
-  - Islands are smoothstep domes on a 55-unit lattice, chosen by a deterministic `sin` hash with a 40% chance per cell.
-  - Vertex colors band from deep water through shallow water, foam, sand and foliage.
-  - `animateWater()` animates open-water vertices (base height ≤ 0.24) only in the 3×3 tiles nearest the bird, and recomputes normals every 4th frame.
-  - `isOverWater()` decides whether the altitude floor or diving applies.
-- **The shared map contract** is duck-typed rather than an interface or base class: `update(pos)` and `heightAtWorld(x, z)`. `OceanManager` adds `isOverWater` and `animateWater`.
-- **Underwater** (`underwater.ts`):
-  - **Lazy build.** Everything is built on the first `setActive(true)`.
-  - **Reef.** Items are coral, flora, anemones and shells, pooled up to 32. They spawn ahead of the bird, and on every dive a full ring of them is seeded around it.
-  - **Fish and shark.** Three fish schools of 6 lerp toward offsets from the bird. The shark follows a sine patrol around the bird.
-  - **Light.** 7 additive vertical caustic planes and 12 caustic floor rings.
-  - **Bubbles.** A 200-particle bubble stream.
-  - **Entry and exit.** The switch happens when the bird's depth below `heightAtWorld` crosses ±0.4 (hysteresis).
+- **Tropical Ocean: the height field** (`oceanField.ts`, pure, unit-tested in `oceanField.test.ts`):
+  - Islands: smoothstep domes on a 55-unit lattice, chosen by a deterministic `sin` hash (40% per cell), unchanged, so `isOverWater()` (the island footprint) is unchanged too.
+  - Each island continues below the waterline as a **reef slope** (`ISLAND_SKIRT` 30 units): a shallow shelf, then a drop to the seabed, with rocky lumps mid-slope. So nothing floats: every island reaches the sea floor.
+  - The **seabed** sits around y = −15 (two octaves of dunes ±1.5, fine ripples, lumpy rock patches from a thresholded noise).
+  - `sample(x, z, out)` returns height, rockiness, "reef" context (1 on the slopes, 0 offshore) and shoreline distance, allocation-free. `groundHeight` is the solid ground; `surfaceHeight` = max(ground, water level) (the `heightAtWorld` contract); `waterHeight(x, z, t)` adds the waves.
+  - **Waves** are a table of four directional sines (`WAVES`). `wavesGlsl()` generates the vertex shader's `oceanWaves()` from the same table, so the CPU mirror (skim spray, camera clamp) matches what's drawn. They're damped over the last 2.5 units of depth, so the water lies still on the beach.
+  - The island cache is bounded (4096 cells).
+- **Tropical Ocean: streaming and meshes** (`ocean.ts`, `waterSurface.ts`, `oceanDecor.ts`):
+  - **Ground tiles** (7×7 around the bird, 120 units, 24 segments): the height field with vertex colours (green tops, dry and wet sand, pale seabed sand, rock, and pink coralline / green turf on the reef slopes). One patched Lambert material with caustics.
+  - **Incremental streaming.** Crossing a tile boundary only queues work: per tile, a mesh job plus six ground-height-texture row jobs, nearest tiles first. Each frame runs jobs for at most `BUILD_BUDGET_MS` (1.5 ms), always at least one; the very first update builds everything synchronously (under the veil / landing intro). Pooled tile meshes stay hidden until rebuilt (`built`).
+  - **Land-first index ranges.** Each tile's index buffer is rewritten with the triangles that reach above −0.9 first. Above water only that range is drawn (the seabed under the opaque sea costs nothing, and tiles with no land aren't drawn at all); underwater the full range is drawn, but only for the 3×3 tiles around the bird (visibility is ~60 units).
+  - **The water surface** is **one** grid mesh (128 segments on High, 80 on Low; dense near the centre, ~1.5 units, sparse at the fogged rim) that follows the bird in 12-unit snaps, drawn first (`renderOrder −1`). Waves in the vertex shader (the old CPU `animateWater` vertex loop is gone; `animateWater(dt)` now only advances the shared `uTime`).
+  - Its fragment shader colours by the **depth of the ground below**, read from a toroidal **ground-height texture** (512² R8, 2 units/texel, 1/8-unit steps; filled row by row by the streaming jobs): shallow turquoise → mid teal → deep blue, Fresnel toward the sky's reflect colour, a sharp sun glint, and broken, washing shore foam. **Seen from below** (`!gl_FrontFacing`): dark total-internal-reflection colour outside a ~49° Snell's window and a bright, shimmering window inside it, brightest directly above the bird.
+  - **Fog early-out.** Fragments that are ≥ 99.6% fog (`(density·depth)² > FOG_CULL_EXPONENT` 5.5) write the fog colour and return, in the water shader and in every material patched by `patchOceanMaterial` (the horizon and the far reef cost almost nothing).
+  - **Island decor** (`IslandDecor`): palms (curved trunk, drooping fronds that sway in the vertex shader), bushes and shore rocks, placed per island from a seeded RNG and cached per island (bounded). Three InstancedMeshes for every island within `decorRadius` (260 High / 190 Low), rebuilt every 30 units of travel. No shadow casting (the shadow pass would draw every instance again).
+  - **Horizon** (`HorizonIslands`): 22 hazy silhouettes at 620–780 units plus a fog-coloured apron from 440 to 890 units, one mesh following the bird, so the horizon is one seamless haze. Hidden underwater.
+  - `setSurfaceLook()` takes the water colours per sky (GameEngine from `OCEAN_LOOKS`; the landing blends them with its weather crossfade).
+- **Above-water life** (`oceanLife.ts`): a pod of up to 3 dolphins leaps (3 arcs each, splashing via `WaterBurstEffect` and a quiet splash sound) every 7–15 s, 45–85 units ahead over water ≥ 6 deep, swimming across the bird's path; 8 seabirds circle 70–160 units away, gliding with bursts of wing beats (vertex shader). One InstancedMesh each; hidden and not updated underwater.
+- **The shared map contract** is duck-typed rather than an interface or base class: `update(pos)` and `heightAtWorld(x, z)`. `OceanManager` adds `isOverWater`, `groundHeightAt`, `waterHeightAt`, `animateWater`, `setUnderwaterView`, `setQuality`, `setSurfaceLook`, `dispose`.
+- **Underwater** (`underwater.ts` → `reef.ts`, `seaLife.ts`, `underwaterFx.ts`):
+  - **Built with the engine** on the ocean map (hidden until a dive), so its shaders are precompiled at takeoff.
+  - **Reef.** Nine species (branching, brain and fan coral, kelp, seaweed, anemones, rocks, starfish, shells), **one InstancedMesh each**, with a per-instance colour from a harmonious palette. Items are scattered per 120-unit tile on a jittered 2.7-unit candidate grid from a seeded RNG (the same reef every visit), sitting on the real ground height, clustered by a low-frequency noise, far denser on reef slopes (corals, anemones, fans) than offshore (kelp groves, seaweed, rocks on rock patches, sand life). Kelp is capped 1.6 below the surface. Only items within `reefRadius` (62 High / 50 Low) and under `reefDensity` (each item has a fixed random rank) are copied into the instance buffers, every 5 units of travel. Kelp, seaweed, fans and anemone tentacles sway in the vertex shader.
+  - **Reef generation is prefetched**: whenever the bird is below 30 over the ocean, the 3×3 reef tiles around it are generated in half-tile jobs (~1 ms, 1.2 ms budget), only in frames where the ocean streamer is idle. A dive then only runs ≤ 6 ms of leftover work once.
+  - **Creatures** (`seaLife.ts`): four fish species (sardines, yellow/blue tangs, clownfish, parrotfish; seven schools, 67 fish) flock with simple boids (cohesion toward a wandering school target, alignment, separation, a 6-unit flee from the bird, seabed/surface limits); school anchors lag behind the bird and re-form ahead when left > 60 units behind. A turtle, a manta and a shark are single merged meshes steered by `Cruiser` (orbiting the bird at their own distance and depth, keeping 9 units away). Nine jellyfish drift and pulse. **All body motion (tail wag, flippers, wing beats, bell pulse, tentacles) is in the vertex shader**; instance index comes from `gl_InstanceID`.
+  - **Light** (`underwaterFx.ts`): animated **caustics** projected onto the ground and every reef/creature material (`oceanCaustic`: two layers of domain-warped sine ridges, bright at their zero crossings; upward-facing surfaces, below the water line, fading with depth), replacing the old floating hexagon rings. **Light shafts**: up to 8 soft open cones in one mesh, leaning away from the sun, swaying and pulsing, wrapped around the camera in the vertex shader and faded at the box edge. Replacing the old flat white strips.
+  - **Particles**: 700 (High) / 260 (Low) marine-snow specks wrapped around the camera entirely in the vertex shader (some glow at night); 220 round, rim-lit bubbles (custom `ShaderMaterial`; the old `PointsMaterial` drew white squares), with a 46-bubble burst on each dive.
+  - **The look** (`OCEAN_LOOKS`): always blue-teal water, darker and bluer with camera depth (16 units), the sky only tinting it (warmer at sunset; deep navy with bioluminescence at night: `uGlow` lights reef tips, fan rims, anemone tentacles, jellyfish and plankton). The sky dome, stars, sky clouds, flyable clouds, horizon, island decor and above-water life are hidden underwater (this was the source of the old purple/pink underwater colour and the floating teal shapes: the sunset sky dome and clouds fogged teal).
+  - **Cheaper below the surface:** ground tiles stop receiving shadows (`receiveShadow` is a uniform, no recompile) and the shadow map isn't re-rendered (`shadowMap.autoUpdate = false`; refreshed on surfacing).
+  - **Entry and exit.** The switch happens when the bird's depth below the calm water level crosses ±0.4 (hysteresis).
 
 ### 6.7 Ring Challenge (`rings.ts`, `ringGuide.ts`, `ringBurst.ts`, `highscore.ts`)
 - **Spawning.**
@@ -455,7 +494,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Highlight.** The target's torus and glow disc swap to their own materials in the `NEXT_RING_HIGHLIGHTS[map][weather]` color (one table in `presets.ts` for all 6 combinations: magenta, cyan, mint, violet or pink, chosen to contrast with that palette and with the gold of the other rings). Its emissive intensity breathes 1.0–1.7, its scale pulses ±7%, and a shared additive halo torus is re-parented onto it. Other rings keep the gold, dimmed (emissive 0.55, glow opacity 0.2).
 - **Despawn.** A missed ring is recycled once it is 40 units *past* along its own normal (`axialDist > 40`; `delta` points from the ring to the bird), **or** once it is more than 120 units from the bird in any direction. The distance check covers turns and U-turns.
   - Before this fix the sign was inverted (`< -40`), so every ring spawned 42+ units ahead was recycled in the frame it spawned. Ring Challenge never showed a ring.
-  - Clouds use the same two-part rule: past 60 axially, or more than 240 away. Reef items do too: past 42 axially, or more than 80 away horizontally.
+  - Clouds use the same two-part rule: past 60 axially, or more than 240 away. (The reef no longer spawns ahead of the bird; it's scattered per streamed tile, §6.6.)
 - **On collect:**
   - score +1
   - a speed pulse
@@ -466,11 +505,13 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **HUD readout.** `GameEngine.getNextRingDistance()` (straight-line, world units = meters) is written by the HUD's telemetry rAF under the ring score as `NEXT RING 84 m`, next to a marker in the highlight color; `—` when there's no target.
 
 ### 6.8 Audio (`audio.ts`)
-- `WindAudio` plays 2 s of looping white noise through a lowpass filter and a gain node. Filter cutoff and gain follow a speed ratio that its own rAF feeds in with `setTargetAtTime`. It is muted underwater.
+- `WindAudio` plays 2 s of looping white noise through a lowpass filter and a gain node. Filter cutoff and gain follow a speed ratio that its own rAF feeds in with `setTargetAtTime`. Underwater (`setUnderwater`) it becomes a low muffled rumble (170–260 Hz), gliding faster (0.12 s time constant) for 0.6 s after the switch.
+- `SoundEffects.playSplash('dive' | 'surface', volume)` plays swept band-passed noise (down for a dive, up when surfacing; dolphins use it at 0.12).
 - `SoundEffects.playChime()` plays two sine tones, C6 then G6, with a quick attack and exponential decay.
 - Two separate `AudioContext`s are created. The wind one starts in `engine.start()`, which runs from the **Start Flying** click and so satisfies the autoplay policy. `replit.md` says audio starts on "Continue", but that's outdated.
 
 ### 6.9 Particles
+- **Bubbles and marine snow** live in `underwaterFx.ts` (§6.6), both custom `ShaderMaterial`s.
 - **`ringBurst.ts` and `waterBurst.ts`:**
   - Near-identical classes.
   - Pooled `THREE.Points` with a custom `ShaderMaterial` that reads per-particle `aOpacity` and `aSize`, and a canvas-generated sprite texture.
@@ -527,7 +568,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - **F** = a one-shot `backflip` (key repeat ignored).
   - Handled keys `preventDefault` on keydown *and* keyup (Space activates a focused button on keyup), unless paused.
   - Window `blur` releases every key, and `setPaused` releases them and rests the axes at 0.
-- **Pause menu** (`PauseMenu`): dark glass in the HUD style, with a flight summary (and ring score) and **Resume** (autofocused, shows `Esc`) / **How to fly** / **Back to landing**. GSAP fades it in unless reduced motion.
+- **Pause menu** (`PauseMenu`): dark glass in the HUD style, with a flight summary (and ring score) and **Resume** (autofocused, shows `Esc`) / **How to fly** / **Back to landing**, then a **Graphics** radio group (Auto / High / Low; with Auto it shows the level in use, "Auto · Low"). GSAP fades it in unless reduced motion.
 - **Guide** (`FlightGuide`):
   - Hand mode has 4 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick). Keyboard mode has 4: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Pause (Esc / ?).
   - Each card has an illustration, the input, one precise tip, and a small mono line with the exact numbers.
@@ -541,6 +582,13 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Illustrations** (`guideArt.tsx`) are inline SVG (a procedural hand glyph: finger rects that fold with `scaleY`, a thumb that rotates, a cyan palm-center dot) and HTML keycaps. They're animated only by the `ascent-guide-*` / `ascent-key-press` keyframes in `index.css`, with `transform-box: fill-box`. Under reduced motion every animation is paused on its telling pose: a per-illustration `--pose` negative delay.
 
 ---
+
+### 6.13 Performance budget and the quality setting (`quality.ts`)
+- **Budget.** Target 60 FPS on a mid-range laptop. Smoothness wins over visuals: a new effect must not raise draw calls noticeably (the ocean overhaul cut them: ~60 → ~45 above water, 97–192 → ~40–47 underwater) and must not add per-frame CPU work that scales with content.
+- **Techniques in use** (follow them for new ocean content): InstancedMesh per repeated species/prop; merged static geometry (`lowPoly.ts`, `sky.ts`); all animation of shapes in vertex shaders from the shared `uTime`; per-instance distance culling by rebuilding instance lists every few units of travel; fog early-outs; land-first index ranges; incremental, time-budgeted streaming (`BUILD_BUDGET_MS`); prefetching the reef in idle frames; no allocations in hot loops (scratch vectors/matrices); shader precompile at takeoff.
+- **Quality setting.** `QualitySetting` is `'auto' | 'high' | 'low'` (saved in `bird-flight-quality`, `settings.ts`); the rendered `QualityLevel` is `'high' | 'low'`. `QUALITY_PROFILES` sets: pixel ratio cap (2 / 1), reef density (1 / 0.5) and radius (62 / 50), fish density (1 / 0.55), marine snow (700 / 260), light shafts (8 / 4), caustics (on / off), decor radius (260 / 190), water grid (128 / 80) and shadow map size (1024 / 512).
+- **Auto** starts at High. `AutoQualityMonitor` (pure, unit-tested) ignores the first 3 s and any frame over 0.25 s (hitches), then averages the real (unclamped) frame time over 4-second windows; the first window under 50 FPS drops the flight to Low for good (it never goes back up, to avoid oscillating). Pausing resets the window. The engine reports the drop through `onQualityChange`, and the pause menu shows it.
+- `GameEngine.setQuality(setting)` applies a change live (pixel ratio, shadow map size, ocean and underwater profiles, caustics) and re-renders a held frame when paused. App keeps the setting in state + `qualityRef` and passes it at engine construction.
 
 ## 7. Coding conventions and patterns
 
@@ -621,7 +669,7 @@ These come from code reading plus headless runs.
 ### Gameplay and control bugs
 1. ~~**Frame-rate-dependent feel.**~~ Every lerp is now `damp(rate, dt)`, tuned to match the old per-frame factors at 60 FPS (the tracker EMA at 30). Still open: `dt` is clamped to 0.05, so below 20 FPS everything runs in slow motion.
 2. ~~**Gestures that interfere with steering.**~~ Fixed: the fist steering guard, flick pitch suppression, calibration validation, and the sensitivity response curve (§6.3). Remaining edge: the fist guard's closed-fist offset is capped at 0.06 of the frame, so a hand with a much bigger knuckle shift would still nudge steering by the excess. The flick hold lets the first ~50 ms of a flick's climb through (≈ 0.02 of pitch at the bird).
-3. **Reef items float mid-water.** Reef items spawn at a random depth between -13 and -4, not on the seabed, and there is no visible seabed mesh, only caustic rings at y = -14. Coral heights use `geometry.boundingSphere`, which is always null because it's never computed, so the offset is always 0.8. Pooled reef items keep their original `kind`.
+3. ~~**Reef items float mid-water.**~~ Fixed in the ocean overhaul: a streamed seabed, reef slopes under every island, and the reef scattered on the real ground height (§6.6). Remaining: reef items stand upright on slopes (not tilted to the ground normal), and the creatures' `Cruiser`s don't avoid islands (they're kept above the ground only).
 4. The skimming splash particles don't fade (the `PointsMaterial` issue in §6.9).
 5. **Surface-level island pop.** A bird skimming *above* the water that flies into an island is still lifted to `height + 3.5` in one frame. Near the shore that's about 3.5 units. Only the underwater case was fixed.
 
@@ -635,15 +683,15 @@ These come from code reading plus headless runs.
 
 ### Performance
 10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole `App` during flight. React bails out of identical values, but any change re-renders App and the HUD. The flight telemetry avoids this (refs plus rAF), and boot progress re-renders at most once per whole percent.
-11. **Per-frame allocations.** `GameEngine.update`, rings, clouds, underwater, splash and the ring guide create `new THREE.Vector3()` and `.clone()` in hot loops, which causes GC churn. `ocean.animateWater` also does a `key.split(',')` for every tile on every frame.
-12. **Leaky disposal.** `GameEngine.dispose()` removes objects but doesn't dispose most geometries and materials: terrain, ocean tiles, sky, bird, clouds, rings and the underwater scene. It also never calls `renderer.forceContextLoss()`. Repeated play sessions leak GPU memory, and browsers cap live WebGL contexts at about 16.
-13. **Unbounded cache.** `OceanManager.islandCache` grows forever during long flights.
-14. **Main-thread stutter.** Tile generation is synchronous: crossing a tile boundary builds 7 tiles of noise on the main thread. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
-15. **Large downloads.** The entry chunk is 908 kB (264 kB gzip: React, three, GSAP). MediaPipe's JS and the engine are now split out and only loaded at pre-flight, but each session still downloads about 13 MB of MediaPipe files.
+11. **Per-frame allocations.** `GameEngine.update`, the ocean, reef, sea life and underwater effects are now allocation-free in their per-frame paths. Rings, clouds, splash and the ring guide still create `new THREE.Vector3()` / `.clone()` in hot loops.
+12. ~~**Leaky disposal.**~~ `GameEngine.dispose()` now frees every geometry, material and texture in the scene and calls `renderer.forceContextLoss()`.
+13. ~~**Unbounded cache.**~~ The island cache (4096 cells), the island decor cache and the reef tile cache (30 tiles) are all bounded.
+14. **Main-thread stutter.** The ocean now streams incrementally (≤ 1.5 ms of tile work per frame, §6.6), but the **mountain map's** `TerrainManager` still builds a whole row of 7 tiles in one frame. MediaPipe also runs on the main thread, alongside a WebGL render with PCF shadows.
+15. **Large downloads.** The entry chunk is ~995 kB (290 kB gzip: React, three, GSAP, and the ocean surface/decor the landing scene uses). MediaPipe's JS and the engine are now split out and only loaded at pre-flight, but each session still downloads about 13 MB of MediaPipe files.
 
 ### three.js deprecations (seen in the console on r185)
 16. ~~`THREE.Clock` is deprecated in favor of `THREE.Timer`.~~ `GameEngine` uses `THREE.Timer`.
-17. `PCFSoftShadowMap` is deprecated and **silently falls back to `PCFShadowMap`**, so the "soft shadows" aren't soft.
+17. `PCFSoftShadowMap` is deprecated in r185; both scenes now ask for `PCFShadowMap` directly (what it fell back to), so shadows are hard-edged PCF.
 
 ### Tech debt
 18. **A god component and a god class.** The screens now live in `preflight/` and `flight/`, and canvas drawing in `handPreview.ts`. `App.tsx` still owns the tracker lifecycle, the calibration state machine, boot status and the takeoff timelines. `GameEngine.update` is a roughly 190-line function.
@@ -678,13 +726,13 @@ These come from code reading plus headless runs.
 8. Throttle React updates from the tracker, sending only changed values, or move HUD status into a ref plus a small subscribed component.
 9. Remove per-frame `Vector3` allocations by using scratch vectors.
 10. Dispose geometries, materials and textures properly, and call `forceContextLoss()` on engine teardown.
-11. Generate tiles incrementally (one per frame) or in a worker. Bound `islandCache`.
+11. ~~Generate tiles incrementally and bound `islandCache`.~~ Done for the ocean (time-budgeted jobs). Still open: the mountain terrain, and moving generation to a worker.
 12. ~~Code-split: lazy-load MediaPipe and the engine.~~ Done (both load at pre-flight). Still open: consider dropping the unused `hand_landmark_full.tflite` from the build, since `modelComplexity` is 0.
 
 **P3: visuals and gameplay**
 
 13. Fix the splash fade by reusing the burst `ShaderMaterial`, and deduplicate the burst classes into one configurable `ParticleBurst`.
-14. Add a real seabed mesh, anchor reef items to it, and add a double-sided or underside water surface with a Snell's-window look from below.
+14. ~~Add a real seabed mesh, anchor reef items to it, and add an underside water surface with a Snell's-window look.~~ Done in the ocean overhaul. Still open: let the terrain streamer use the same incremental job queue as the ocean.
 15. Use real soft shadows (VSM, or PCF with a larger radius), and optionally postprocessing (bloom for rings and emissive reef, real motion blur).
 16. Gameplay: timed ring runs, a combo multiplier, trick scoring, collectibles underwater, day and night that changes over time, and live weather switching.
 17. Allow switching bird, map or weather without re-calibrating: keep the tracker and rebuild only the engine.
@@ -724,12 +772,17 @@ These come from code reading plus headless runs.
 - Don't "fix" the mirrored overlay or drag math without reading the two canvas-mirror memory notes. The un-mirror at draw time and the *absence* of a flip in pointer handling are both intentional.
 - To flip a bird's facing direction, change the yaw offset on the outer group, never the mesh (see `three-js-mesh-orientation-fix.md`).
 - When adding a map, implement `update(position)` and `heightAtWorld(x, z)`. Add `isOverWater` if it has water, and wire it in the `GameEngine` constructor.
+- **Ocean shaders.** New ocean materials go through `patchOceanMaterial` (built-in `MeshLambertMaterial`: flat-shaded low poly doesn't need PBR, and Lambert is much cheaper per pixel). Give each distinct vertex snippet its own `key` (it's the program cache key); materials that share a key must share the snippet, with differences only in uniforms. Transparent materials need `fogCull: false`. GLSL `smoothstep` with `edge0 > edge1` is undefined (SwiftShader and some GPUs disagree): write `1.0 - smoothstep(lo, hi, x)`.
+- **Waves live in one table** (`WAVES` in `oceanField.ts`), turned into GLSL by `wavesGlsl()`. Change them there so the CPU `waterHeight` (camera clamp, skim spray) keeps matching the drawn surface.
+- **The water is opaque.** Keep the chase-camera surface clamp (`keepCameraOnBirdSide`), and keep underwater-only objects in `UnderwaterEnvironment`'s root and above-water-only ones out of the underwater view (`setUnderwaterWorld`), or they'll show through / fog into odd teal shapes.
+- **Quality changes must go through the profile.** New density or cost knobs belong in `QUALITY_PROFILES` (and the Low ≤ High test), applied in `GameEngine.applyQualityLevel`.
 - The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3. In this repo's cloud sandbox, headless Chromium can't reach Google Fonts through the TLS proxy. For screenshots, route `fonts.googleapis.com`/`fonts.gstatic.com` through `curl` with Playwright's `page.route` rather than disabling certificate checks.
 - **Driving calibration and flight headlessly** (no real hand available):
   - Override `navigator.mediaDevices.getUserMedia` with an init script that returns a `canvas.captureStream()`.
   - On the **dev server**, `page.route` the pre-bundled `/node_modules/.vite/deps/@mediapipe_hands.js` to a stub module. It must export `Hands` and `HAND_CONNECTIONS` both as named and default exports, because Vite's CJS interop reads them off the default export. The stub's `send()` reports synthetic landmarks you control.
   - Everything else (HandTracker math, App, engine) stays real.
   - Use the production preview with the real files to check the loading percentage.
+- **Measuring the ocean headlessly:** pin the quality with `localStorage['bird-flight-quality'] = 'high'` (or `'low'`) before the page loads. Under SwiftShader's ~5–10 FPS **Auto drops to Low within seconds** (correctly), which silently turns caustics off and halves the reef. Run the harness against a Vite server started with `server: { hmr: false, watch: null }` (merge it over `vite.config.ts` in a throwaway config), so editing files mid-run can't give modules new `?t=` instances; restart that server after edits. Read `renderer.info.render` (calls/triangles, shadow pass included) inside a wrapped `GameEngine.prototype.update`. SwiftShader frame times are CPU rasterisation: they scale with shaded pixels (a lit seabed filling the screen costs far more than the old empty sky dome did) and overstate fragment cost versus a GPU, so compare draw calls, triangles and `update()` ms too, and verify the feel on a real GPU.
 - **Flying headlessly in keyboard mode:**
   - Press real keys with `page.keyboard.down/up`.
   - To read the bird's state without adding debug code to the product, patch the engine from the page on the dev server. `import('/src/game/GameEngine.ts')` is the same module instance the app lazy-loads, so wrapping `GameEngine.prototype.update` to stash `this` on `window` exposes `bird.group.position`, `headingYaw`, `rings.getNextRingPosition()` and the `is*`/`get*` getters. A ring autopilot works from those.

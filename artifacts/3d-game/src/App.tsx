@@ -18,12 +18,15 @@ import { computeBox, validateCalibration } from '@/game/trackingMath';
 import type { HandTracker, HandControlState, CalibrationPoint, CalibrationCorner } from '@/game/handControls';
 import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 import { KeyboardControls } from '@/game/keyboardControls';
+import type { QualityLevel, QualitySetting } from '@/game/quality';
 import {
   dismissGuide,
   hasSavedSettings,
   loadCalibration,
+  loadQuality,
   loadSettings,
   saveCalibration,
+  saveQuality,
   saveSettings,
   shouldAutoShowGuide,
   type ControlMode,
@@ -373,6 +376,10 @@ function App() {
   // In flight, either one pauses the game (see `paused`).
   const [guide, setGuide] = useState<GuideOrigin | null>(null);
   const [pauseOpen, setPauseOpen] = useState(false);
+  // Graphics quality: the player's setting (saved) and the level the engine is rendering at.
+  const [quality, setQuality] = useState<QualitySetting>(() => loadQuality());
+  const qualityRef = useRef(quality);
+  const [renderedQuality, setRenderedQuality] = useState<QualityLevel | null>(null);
   const [flickHint, setFlickHint] = useState<FlickHint | null>(null);
 
   // The landing page starts from the last choices saved in this browser (or the defaults).
@@ -999,6 +1006,8 @@ function App() {
       mapType: chosen.map,
       weather: chosen.weather,
       ringChallenge: chosen.ringChallenge,
+      quality: qualityRef.current,
+      onQualityChange: (level) => setRenderedQuality(level),
       onScoreChange: (total) => {
         setScore(total);
         setBestScore(saveBestScoreIfHigher(total));
@@ -1011,6 +1020,7 @@ function App() {
       },
     });
     engineRef.current = engine;
+    setRenderedQuality(engine.getQualityLevel());
     try {
       await engine.start();
     } catch (error) {
@@ -1213,6 +1223,16 @@ function App() {
   }, [guide, flying, pauseOpen, handleGuideBack]);
 
   const handleResume = useCallback(() => setPauseOpen(false), []);
+  const handleQualityChange = useCallback((next: QualitySetting) => {
+    setQuality(next);
+    qualityRef.current = next;
+    saveQuality(next);
+    const engine = engineRef.current;
+    if (engine) {
+      engine.setQuality(next);
+      setRenderedQuality(engine.getQualityLevel());
+    }
+  }, []);
   const handleOpenPause = useCallback(() => setPauseOpen(true), []);
   const handleOpenGuideFromHud = useCallback(() => setGuide('hud'), []);
   const handleOpenGuideFromPause = useCallback(() => setGuide('pause'), []);
@@ -1268,6 +1288,9 @@ function App() {
           summary={takeoffSummary}
           score={ringChallengeEnabled ? score : null}
           reducedMotion={reducedMotion}
+          quality={quality}
+          renderedQuality={renderedQuality}
+          onQualityChange={handleQualityChange}
           onResume={handleResume}
           onGuide={handleOpenGuideFromPause}
           onRecalibrate={controlMode === 'hand' ? handleRecalibrate : undefined}

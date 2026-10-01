@@ -27,13 +27,13 @@ interface ActiveCloud {
  * straight through them.
  */
 export class CloudManager {
-  private scene: THREE.Scene;
+  private scene: THREE.Object3D;
   private active: ActiveCloud[] = [];
   private pool: THREE.Group[] = [];
   private spawnTimer = 0;
   private material: THREE.MeshStandardMaterial;
 
-  constructor(scene: THREE.Scene) {
+  constructor(scene: THREE.Object3D) {
     this.scene = scene;
     this.material = new THREE.MeshStandardMaterial({
       color: '#ffffff',

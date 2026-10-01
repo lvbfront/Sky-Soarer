@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { Bird, type BirdType } from './bird';
 import { TerrainManager } from './terrain';
 import { OceanManager } from './ocean';
+import { OceanLife } from './oceanLife';
 import { RingManager } from './rings';
 import { SplashEffect } from './splash';
 import { CloudManager } from './clouds';
@@ -11,6 +12,9 @@ import { WaterBurstEffect } from './waterBurst';
 import { RingGuideArrow } from './ringGuide';
 import { WindAudio, SoundEffects } from './audio';
 import { damp, perFrameRate } from './damping';
+import { disposeObjectTree } from './dispose';
+import { WATER_LEVEL } from './oceanField';
+import { AutoQualityMonitor, QUALITY_PROFILES, levelFor, type QualityLevel, type QualitySetting } from './quality';
 import type { HandControlState } from './handControls';
 
 import {
@@ -19,8 +23,10 @@ import {
   BASE_SPEED,
   BOOST_SPEED,
   NEXT_RING_HIGHLIGHTS,
+  OCEAN_LOOKS,
   WEATHER_LOOKS,
   type MapType,
+  type OceanLook,
   type WeatherLook,
   type WeatherPreset,
 } from './presets';
@@ -28,30 +34,28 @@ import { createSkyClouds, createSkyDome, createStarfield } from './sky';
 
 export { MAP_OPTIONS, WEATHER_OPTIONS, type MapType, type WeatherPreset } from './presets';
 
-// Underwater look — a fixed cyan/blue palette independent of the surface weather preset,
-// since sunlight/moonlight above doesn't meaningfully change how it looks a few meters down.
-// Brighter and less foggy than a "deep ocean" look, since the reef now sits in a shallow band
-// just below the surface and should read as vibrant, not murky.
-const UNDERWATER_BACKGROUND = '#0f7a9c';
-// Lighter fog + brighter hemi/ambient than the original pass — the reef sits close to the
-// surface and needs to stay visible out to its full spawn distance instead of fogging out
-// to near-black well before items are close enough to read clearly.
-const UNDERWATER_FOG_DENSITY = 0.022;
-const UNDERWATER_HEMI_SKY = '#4fc0dd';
-const UNDERWATER_HEMI_GROUND = '#063049';
-const UNDERWATER_HEMI_INTENSITY = 0.9;
-const UNDERWATER_AMBIENT_COLOR = '#a0ecff';
-const UNDERWATER_AMBIENT_INTENSITY = 0.7;
+// Surface fog density (both maps). Underwater densities live in OCEAN_LOOKS, per sky.
+const SURFACE_FOG_DENSITY = 0.0068;
+// How quickly fog, light and background blend across the surface when diving or surfacing
+// (per second; ~0.4 s to settle). The sky and the above-water world switch at the crossing itself.
+const UNDERWATER_BLEND_RATE = 7;
+// Camera depth over which the underwater colour goes from its "just below the surface" shade to
+// its seabed shade.
+const UNDERWATER_COLOR_DEPTH = 16;
 
 export interface GameEngineOptions {
   birdType: BirdType;
   mapType: MapType;
   weather: WeatherPreset;
   ringChallenge: boolean;
+  /** Graphics quality (Auto / High / Low); defaults to Auto. */
+  quality?: QualitySetting;
   onScoreChange?: (score: number) => void;
   onBarrelRoll?: () => void;
   onBackflip?: () => void;
   onWaterTransition?: (state: 'submerged' | 'surfaced') => void;
+  /** Auto quality changed the rendered level (it only ever drops, to 'low'). */
+  onQualityChange?: (level: QualityLevel) => void;
 }
 
 // Every smoothing rate below is per second, applied with damp(rate, dt) so the feel is the same at
@@ -82,6 +86,10 @@ const UNDERWATER_CAMERA_RATE = perFrameRate(0.03, 60);
 const CAMERA_BACK_DISTANCE = 6.5;
 const CAMERA_HEIGHT = 2.2;
 const LOOK_AHEAD_DISTANCE = 8;
+// The chase camera always stays on the bird's side of the water surface (by this margin), so a
+// swimming bird is never hidden under the opaque sea and the view crosses the surface with it.
+const CAMERA_SURFACE_MARGIN = 0.35;
+const CAMERA_SEABED_CLEARANCE = 0.6;
 
 const MAX_PITCH_ANGLE = THREE.MathUtils.degToRad(38);
 const MAX_ROLL_ANGLE = THREE.MathUtils.degToRad(48);
@@ -94,24 +102,43 @@ const MAX_FLAP_SPEED = 17;
 const GLIDE_PITCH_THRESHOLD = -0.15; // diving hard enough (while not boosting) reads as a glide
 const GLIDE_FLAP_MULTIPLIER = 0.55;
 
-// Over open water there is no altitude floor except the seabed itself, so the bird can dive
-// to (and below) true sea level. Over solid ground (terrain map, or an island on the ocean
-// map) the old hard floor above the surface is kept unchanged. The seabed sits close to the
-// surface — a shallow, densely-populated reef band rather than a deep empty ocean.
-const SEABED_FLOOR_Y = -15;
+// Over open water the only floor is the seabed itself (dunes, rocks and reef slopes from
+// OceanManager's ground), kept this far below the bird. Over solid ground (terrain map, or an
+// island on the ocean map) the old hard floor above the surface is kept unchanged.
+const SEABED_CLEARANCE = 1.2;
 // Small hysteresis band around the water surface so skimming exactly at sea level doesn't
 // rapidly flicker between airborne/underwater state.
 const UNDERWATER_HYSTERESIS = 0.4;
+// Where the sun/moon sits relative to the bird (its shadow frustum follows the bird).
+const SUN_OFFSET = new THREE.Vector3(-55, 85, -38);
+// Precompiling every shader at takeoff, so the first dive doesn't hitch; capped so a slow
+// driver never holds the takeoff veil for long.
+const PRECOMPILE_TIMEOUT_MS = 1500;
 
 /** Smoothly ease in/out — used for the barrel roll and backflip sweeps. */
 function easeInOutCubic(t: number) {
   return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
 }
 
+/** Resolved colours for the ocean map's above/below-water blend (no per-frame allocation). */
+interface AtmosphereColors {
+  surfaceFog: THREE.Color;
+  surfaceBackground: THREE.Color;
+  underShallow: THREE.Color;
+  underDeep: THREE.Color;
+  hemiSky: THREE.Color;
+  hemiGround: THREE.Color;
+  ambient: THREE.Color;
+  underHemiSky: THREE.Color;
+  underHemiGround: THREE.Color;
+  underAmbient: THREE.Color;
+}
+
 export class GameEngine {
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
+  private fog: THREE.FogExp2;
   private environment: TerrainManager | OceanManager;
   private ocean: OceanManager | null;
   private bird: Bird;
@@ -125,16 +152,27 @@ export class GameEngine {
   private ambient!: THREE.AmbientLight;
   private starfield: THREE.Points | null = null;
 
+  private cloudRoot = new THREE.Group();
   private clouds: CloudManager;
   private rings: RingManager | null;
   private splash: SplashEffect | null;
   private ringBurst: RingBurstEffect | null;
   private underwaterEnv: UnderwaterEnvironment | null;
+  private oceanLife: OceanLife | null;
   private waterBurst: WaterBurstEffect | null;
   private ringGuide: RingGuideArrow | null;
   private score = 0;
 
   private options: GameEngineOptions;
+  private look: WeatherLook;
+  private oceanLook: OceanLook;
+  private atmosphere: AtmosphereColors;
+  private underwaterBlend = 0;
+
+  private qualitySetting: QualitySetting;
+  private autoLevel: QualityLevel = 'high';
+  private qualityLevel: QualityLevel;
+  private autoQuality = new AutoQualityMonitor();
 
   // THREE.Timer (THREE.Clock is deprecated), connected to the Page Visibility API so a hidden tab
   // doesn't produce one huge delta on return.
@@ -162,6 +200,12 @@ export class GameEngine {
   private cameraTarget = new THREE.Vector3();
   private cameraLookAt = new THREE.Vector3();
 
+  // Scratch vectors, reused every frame (the hot loop allocates nothing).
+  private readonly forward = new THREE.Vector3();
+  private readonly desiredCamera = new THREE.Vector3();
+  private readonly desiredLookAt = new THREE.Vector3();
+  private readonly tmpColor = new THREE.Color();
+
   private disposed = false;
   // While paused the loop stops entirely (no update, no render): the canvas holds the last frame.
   private paused = false;
@@ -171,11 +215,31 @@ export class GameEngine {
   constructor(private container: HTMLDivElement, options: GameEngineOptions) {
     this.options = options;
     const look = WEATHER_LOOKS[options.weather];
+    this.look = look;
+    this.oceanLook = OCEAN_LOOKS[options.weather];
     const isOcean = options.mapType === 'ocean';
+    this.qualitySetting = options.quality ?? 'auto';
+    this.qualityLevel = levelFor(this.qualitySetting, this.autoLevel);
+    const profile = QUALITY_PROFILES[this.qualityLevel];
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(look.skyTop);
-    this.scene.fog = new THREE.FogExp2(isOcean ? look.fogOcean : look.fogMountain, 0.0068);
+    this.fog = new THREE.FogExp2(isOcean ? look.fogOcean : look.fogMountain, SURFACE_FOG_DENSITY);
+    this.scene.fog = this.fog;
+
+    const ol = this.oceanLook;
+    this.atmosphere = {
+      surfaceFog: new THREE.Color(isOcean ? look.fogOcean : look.fogMountain),
+      surfaceBackground: new THREE.Color(look.skyTop),
+      underShallow: new THREE.Color(ol.underwaterShallow),
+      underDeep: new THREE.Color(ol.underwaterDeep),
+      hemiSky: new THREE.Color(look.hemiSky),
+      hemiGround: new THREE.Color(look.hemiGround),
+      ambient: new THREE.Color(look.ambientColor),
+      underHemiSky: new THREE.Color(ol.underwaterHemiSky),
+      underHemiGround: new THREE.Color(ol.underwaterHemiGround),
+      underAmbient: new THREE.Color(ol.underwaterAmbient),
+    };
 
     this.camera = new THREE.PerspectiveCamera(
       BASE_FOV,
@@ -186,31 +250,39 @@ export class GameEngine {
     this.camera.position.set(0, 6, -12);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, profile.pixelRatioCap));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // PCFSoftShadowMap is deprecated in r185 and falls back to this anyway (CLAUDE.md §9 #17).
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
 
     this.buildSky(look);
-    this.buildLighting(look);
+    this.buildLighting(look, profile.shadowMapSize);
+    this.scene.add(this.cloudRoot);
 
     if (isOcean) {
-      const ocean = new OceanManager(this.scene);
+      const ocean = new OceanManager(this.scene, profile);
       this.environment = ocean;
       this.ocean = ocean;
       this.splash = new SplashEffect(this.scene);
-      this.underwaterEnv = new UnderwaterEnvironment(this.scene);
       this.waterBurst = new WaterBurstEffect(this.scene);
+      this.underwaterEnv = new UnderwaterEnvironment(this.scene, ocean, profile);
+      this.oceanLife = new OceanLife(this.scene, ocean, ocean.uniforms, (position) => {
+        this.waterBurst?.trigger(position);
+        this.sfx.playSplash('surface', 0.12);
+      });
+      this.applyOceanLook();
     } else {
       this.environment = new TerrainManager(this.scene);
       this.ocean = null;
       this.splash = null;
       this.underwaterEnv = null;
+      this.oceanLife = null;
       this.waterBurst = null;
     }
-    this.clouds = new CloudManager(this.scene);
+    this.clouds = new CloudManager(this.cloudRoot);
     // The next ring and the guide arrow share one highlight color, picked for this map + sky.
     const highlight = NEXT_RING_HIGHLIGHTS[options.mapType][options.weather];
     this.rings = options.ringChallenge ? new RingManager(this.scene, highlight) : null;
@@ -243,7 +315,7 @@ export class GameEngine {
     this.scene.add(this.skyClouds);
   }
 
-  private buildLighting(look: WeatherLook) {
+  private buildLighting(look: WeatherLook, shadowMapSize: number) {
     const hemi = new THREE.HemisphereLight(look.hemiSky, look.hemiGround, look.hemiIntensity);
     this.scene.add(hemi);
     this.hemi = hemi;
@@ -255,9 +327,9 @@ export class GameEngine {
     // Dynamic directional sun/moon light — casts soft low-poly shadows and follows the
     // bird each frame (see `update`) so its shadow camera frustum stays centered nearby.
     const sun = new THREE.DirectionalLight(look.sunColor, look.sunIntensity);
-    sun.position.set(-60, 90, -40);
+    sun.position.copy(SUN_OFFSET);
     sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 260;
     sun.shadow.camera.left = -90;
@@ -274,28 +346,123 @@ export class GameEngine {
     this.scene.add(fill);
   }
 
-  /** Swaps the scene's fog/background/lighting to the fixed cyan underwater look. */
-  private enterUnderwaterLook() {
-    this.scene.background = new THREE.Color(UNDERWATER_BACKGROUND);
-    this.scene.fog = new THREE.FogExp2(UNDERWATER_BACKGROUND, UNDERWATER_FOG_DENSITY);
-    this.hemi.color.set(UNDERWATER_HEMI_SKY);
-    this.hemi.groundColor.set(UNDERWATER_HEMI_GROUND);
-    this.hemi.intensity = UNDERWATER_HEMI_INTENSITY;
-    this.ambient.color.set(UNDERWATER_AMBIENT_COLOR);
-    this.ambient.intensity = UNDERWATER_AMBIENT_INTENSITY;
+  /** The ocean's water, horizon and underwater colours for the chosen sky (set once). */
+  private applyOceanLook() {
+    const ocean = this.ocean;
+    if (!ocean || !this.underwaterEnv) return;
+    const look = this.look;
+    const ol = this.oceanLook;
+    ocean.setSurfaceLook(
+      {
+        shallow: new THREE.Color(ol.waterShallow),
+        mid: new THREE.Color(ol.waterMid),
+        deep: new THREE.Color(ol.waterDeep),
+        reflect: new THREE.Color(ol.waterReflect),
+        foam: new THREE.Color('#f4fdff').lerp(new THREE.Color(look.fogOcean), look.stars ? 0.6 : 0.1),
+        sunColor: new THREE.Color(look.sunColor),
+        glint: ol.glint,
+        underDeep: new THREE.Color(ol.undersideDeep),
+        window: new THREE.Color(ol.undersideWindow),
+      },
+      new THREE.Color(ol.horizonTint),
+      ol.horizonStrength,
+    );
+    ocean.setSunDirection(SUN_OFFSET);
+    ocean.uniforms.uCausticColor.value.set(ol.causticColor);
+    ocean.uniforms.uGlowColor.value.set(ol.glowColor);
+    this.underwaterEnv.setLook({
+      shaftColor: new THREE.Color(ol.shaftColor),
+      shaftIntensity: ol.shaftIntensity,
+      snowColor: new THREE.Color(ol.snowColor),
+    });
+    this.underwaterEnv.setSunLean(SUN_OFFSET.x, SUN_OFFSET.z);
   }
 
-  /** Restores the surface fog/background/lighting for the currently selected weather preset. */
-  private exitUnderwaterLook() {
-    const look = WEATHER_LOOKS[this.options.weather];
-    const isOcean = this.options.mapType === 'ocean';
-    this.scene.background = new THREE.Color(look.skyTop);
-    this.scene.fog = new THREE.FogExp2(isOcean ? look.fogOcean : look.fogMountain, 0.0068);
-    this.hemi.color.set(look.hemiSky);
-    this.hemi.groundColor.set(look.hemiGround);
-    this.hemi.intensity = look.hemiIntensity;
-    this.ambient.color.set(look.ambientColor);
-    this.ambient.intensity = look.ambientIntensity;
+  /** Switches everything that only exists on one side of the water surface. */
+  private setUnderwaterWorld(underwater: boolean) {
+    this.sky.visible = !underwater;
+    this.skyClouds.visible = !underwater;
+    this.cloudRoot.visible = !underwater;
+    if (this.starfield) this.starfield.visible = !underwater;
+    this.ocean?.setUnderwaterView(underwater);
+    this.oceanLife?.setVisible(!underwater);
+    this.underwaterEnv?.setActive(underwater, this.bird.group.position);
+    this.wind.setUnderwater(underwater);
+    // Below the surface nothing receives the sun's shadows, so stop re-rendering the shadow map
+    // (the bird is the only caster); it's refreshed on the first frame back above water.
+    this.renderer.shadowMap.autoUpdate = !underwater;
+    if (!underwater) this.renderer.shadowMap.needsUpdate = true;
+    this.applyCaustics();
+  }
+
+  private applyCaustics() {
+    if (!this.ocean) return;
+    const u = this.ocean.uniforms;
+    const profile = QUALITY_PROFILES[this.qualityLevel];
+    u.uCaustics.value = this.underwater && profile.caustics ? this.oceanLook.caustics : 0;
+    u.uGlow.value = this.underwater ? this.oceanLook.glow : 0;
+  }
+
+  /**
+   * Ocean map: blends fog, background and light between the sky's look and the underwater look
+   * (which itself darkens and blues with the camera's depth). Runs every frame; allocation-free.
+   */
+  private updateAtmosphere(dt: number) {
+    const target = this.underwater ? 1 : 0;
+    this.underwaterBlend += (target - this.underwaterBlend) * damp(UNDERWATER_BLEND_RATE, dt);
+    if (Math.abs(this.underwaterBlend - target) < 0.001) this.underwaterBlend = target;
+    const t = this.underwaterBlend;
+    const a = this.atmosphere;
+    const ol = this.oceanLook;
+    const look = this.look;
+    const depthT = THREE.MathUtils.clamp((WATER_LEVEL - this.camera.position.y) / UNDERWATER_COLOR_DEPTH, 0, 1);
+
+    const under = this.tmpColor.copy(a.underShallow).lerp(a.underDeep, Math.pow(depthT, 0.8));
+    this.fog.color.copy(a.surfaceFog).lerp(under, t);
+    const underDensity = THREE.MathUtils.lerp(ol.underwaterDensityShallow, ol.underwaterDensityDeep, depthT);
+    this.fog.density = THREE.MathUtils.lerp(SURFACE_FOG_DENSITY, underDensity, t);
+    const background = this.scene.background as THREE.Color;
+    // Below the surface the background is the fog itself, so the far distance is just water.
+    if (this.underwater) background.copy(this.fog.color);
+    else background.copy(a.surfaceBackground);
+
+    const light = 1 - depthT * 0.35;
+    this.hemi.color.copy(a.hemiSky).lerp(a.underHemiSky, t);
+    this.hemi.groundColor.copy(a.hemiGround).lerp(a.underHemiGround, t);
+    this.hemi.intensity = THREE.MathUtils.lerp(look.hemiIntensity, ol.underwaterHemiIntensity * light, t);
+    this.ambient.color.copy(a.ambient).lerp(a.underAmbient, t);
+    this.ambient.intensity = THREE.MathUtils.lerp(look.ambientIntensity, ol.underwaterAmbientIntensity * light, t);
+    this.sun.intensity = THREE.MathUtils.lerp(look.sunIntensity, ol.underwaterSunIntensity * light, t);
+  }
+
+  private applyQualityLevel(level: QualityLevel) {
+    this.qualityLevel = level;
+    const profile = QUALITY_PROFILES[level];
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, profile.pixelRatioCap));
+    if (this.sun.shadow.mapSize.x !== profile.shadowMapSize) {
+      this.sun.shadow.mapSize.set(profile.shadowMapSize, profile.shadowMapSize);
+      // The shadow map is reallocated at its new size on the next render.
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
+    }
+    this.ocean?.setQuality(profile);
+    this.underwaterEnv?.setQuality(profile);
+    this.applyCaustics();
+    this.autoQuality.reset(1);
+    if (this.paused && this.started && !this.disposed) this.renderer.render(this.scene, this.camera);
+  }
+
+  /** The player's quality setting (from the pause menu). */
+  setQuality(setting: QualitySetting) {
+    if (this.disposed) return;
+    this.qualitySetting = setting;
+    const level = levelFor(setting, this.autoLevel);
+    if (level !== this.qualityLevel) this.applyQualityLevel(level);
+  }
+
+  /** The level actually being rendered (Auto resolves to High or Low). */
+  getQualityLevel() {
+    return this.qualityLevel;
   }
 
   private handleResize = () => {
@@ -311,6 +478,19 @@ export class GameEngine {
   async start() {
     await this.wind.start();
     if (this.disposed) return;
+    // Compile every shader now, under the takeoff veil, including the underwater scene's (made
+    // visible just for this pass), so neither the first frames nor the first dive hitch.
+    this.underwaterEnv?.setVisibleForCompile(true);
+    try {
+      await Promise.race([
+        this.renderer.compileAsync(this.scene, this.camera),
+        new Promise((resolve) => window.setTimeout(resolve, PRECOMPILE_TIMEOUT_MS)),
+      ]);
+    } catch (error) {
+      console.warn('Shader precompile failed; shaders will compile on first use', error);
+    }
+    this.underwaterEnv?.setVisibleForCompile(false);
+    if (this.disposed) return;
     this.timer.reset();
     this.started = true;
     if (this.paused) {
@@ -322,9 +502,16 @@ export class GameEngine {
 
   private loop = () => {
     if (this.disposed || this.paused) return;
-    const dt = Math.min(this.timer.update().getDelta(), 0.05);
+    const rawDt = this.timer.update().getDelta();
+    const dt = Math.min(rawDt, 0.05);
     this.update(dt);
     this.renderer.render(this.scene, this.camera);
+    // Auto quality watches the real frame time (before the 0.05 s clamp).
+    if (this.qualitySetting === 'auto' && this.autoQuality.sample(rawDt)) {
+      this.autoLevel = 'low';
+      if (this.qualityLevel !== 'low') this.applyQualityLevel('low');
+      this.options.onQualityChange?.('low');
+    }
     this.animationHandle = requestAnimationFrame(this.loop);
   };
 
@@ -345,6 +532,7 @@ export class GameEngine {
     }
     // Discard the paused time: the next update() measures from now.
     this.timer.reset();
+    this.autoQuality.reset(1);
     this.animationHandle = requestAnimationFrame(this.loop);
   }
 
@@ -450,11 +638,13 @@ export class GameEngine {
 
     // The actual flight path uses only the steering pitch (never the trick sweep above), so
     // a backflip never alters where the bird is actually heading.
-    const forward = new THREE.Vector3(
-      Math.sin(this.headingYaw) * Math.cos(steeringPitchAngle),
-      Math.sin(steeringPitchAngle),
-      Math.cos(this.headingYaw) * Math.cos(steeringPitchAngle),
-    ).normalize();
+    const forward = this.forward
+      .set(
+        Math.sin(this.headingYaw) * Math.cos(steeringPitchAngle),
+        Math.sin(steeringPitchAngle),
+        Math.cos(this.headingYaw) * Math.cos(steeringPitchAngle),
+      )
+      .normalize();
 
     const bird = this.bird.group;
     const prevX = bird.position.x;
@@ -478,12 +668,13 @@ export class GameEngine {
       }
     }
 
-    // Altitude clamp: over open water there is no floor except the seabed itself, letting
-    // the bird dive to (and below) true sea level. Over solid ground — the mountain map, or
-    // an island on the ocean map — the old hard floor just above the surface is unchanged.
+    // Altitude clamp: over open water the floor is the seabed itself (with its dunes, rocks and
+    // the reef slopes rising toward islands). Over solid ground — the mountain map, or an island
+    // on the ocean map — the old hard floor just above the surface is unchanged.
     const overWater = this.ocean !== null && this.ocean.isOverWater(bird.position.x, bird.position.z);
-    if (overWater) {
-      if (bird.position.y < SEABED_FLOOR_Y) bird.position.y = SEABED_FLOOR_Y;
+    if (overWater && this.ocean) {
+      const floor = this.ocean.groundHeightAt(bird.position.x, bird.position.z) + SEABED_CLEARANCE;
+      if (bird.position.y < floor) bird.position.y = floor;
     } else {
       const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
       if (bird.position.y < minAltitude) bird.position.y = minAltitude;
@@ -491,23 +682,22 @@ export class GameEngine {
     if (bird.position.y > 140) bird.position.y = 140;
 
     // Underwater state, recomputed from the bird's post-movement position, with a small
-    // hysteresis band around the surface so skimming right at sea level doesn't flicker.
+    // hysteresis band around the calm water level so skimming the waves doesn't flicker.
     let targetUnderwater = false;
-    if (overWater && this.ocean) {
-      const waterSurfaceY = this.ocean.heightAtWorld(bird.position.x, bird.position.z);
-      const depthBelowSurface = waterSurfaceY - bird.position.y;
+    if (overWater) {
+      const depthBelowSurface = WATER_LEVEL - bird.position.y;
       const threshold = this.underwater ? -UNDERWATER_HYSTERESIS : UNDERWATER_HYSTERESIS;
       targetUnderwater = depthBelowSurface > threshold;
     }
     if (targetUnderwater !== this.underwater) {
       this.underwater = targetUnderwater;
-      this.underwaterEnv?.setActive(this.underwater);
+      this.setUnderwaterWorld(this.underwater);
       if (this.underwater) {
-        this.enterUnderwaterLook();
+        this.sfx.playSplash('dive');
         this.options.onWaterTransition?.('submerged');
       } else {
-        this.exitUnderwaterLook();
         this.waterBurst?.trigger(bird.position.clone());
+        this.sfx.playSplash('surface');
         this.options.onWaterTransition?.('surfaced');
       }
     }
@@ -531,9 +721,11 @@ export class GameEngine {
     flapSpeed = THREE.MathUtils.clamp(flapSpeed, MIN_FLAP_SPEED, MAX_FLAP_SPEED);
     this.bird.update(dt, flapSpeed, this.underwater);
 
+    this.ocean?.animateWater(dt);
     this.environment.update(bird.position);
-    this.clouds.update(dt, bird.position, forward);
+    if (!this.underwater) this.clouds.update(dt, bird.position, forward);
     this.underwaterEnv?.update(dt, bird.position, forward);
+    if (!this.underwater) this.oceanLife?.update(dt, bird.position, forward);
 
     if (this.rings) {
       const collectedAt = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
@@ -550,20 +742,20 @@ export class GameEngine {
     this.waterBurst?.update(dt);
 
     if (this.splash && this.ocean) {
-      const waterSurfaceY = this.ocean.heightAtWorld(bird.position.x, bird.position.z);
+      const waterSurfaceY = this.ocean.waterHeightAt(bird.position.x, bird.position.z);
       this.splash.update(dt, bird.position, forward, waterSurfaceY, overWater);
     }
-    this.ocean?.animateWater(dt);
 
     // Camera follow: heavy lerp for a floaty, relaxed feel — even heavier underwater so the
     // chase camera reads as swimming through water rather than flying through air.
     const cameraLerp = damp(this.underwater ? UNDERWATER_CAMERA_RATE : CAMERA_RATE, dt);
-    const behind = forward.clone().multiplyScalar(-CAMERA_BACK_DISTANCE);
-    const desiredCameraPos = bird.position.clone().add(behind).add(new THREE.Vector3(0, CAMERA_HEIGHT, 0));
+    const desiredCameraPos = this.desiredCamera.copy(bird.position).addScaledVector(forward, -CAMERA_BACK_DISTANCE);
+    desiredCameraPos.y += CAMERA_HEIGHT;
     this.cameraTarget.lerp(desiredCameraPos, cameraLerp);
+    if (this.ocean) this.keepCameraOnBirdSide(this.cameraTarget);
     this.camera.position.copy(this.cameraTarget);
 
-    const desiredLookAt = bird.position.clone().addScaledVector(forward, LOOK_AHEAD_DISTANCE);
+    const desiredLookAt = this.desiredLookAt.copy(bird.position).addScaledVector(forward, LOOK_AHEAD_DISTANCE);
     this.cameraLookAt.lerp(desiredLookAt, cameraLerp);
     this.camera.lookAt(this.cameraLookAt);
 
@@ -574,7 +766,7 @@ export class GameEngine {
     this.camera.updateProjectionMatrix();
 
     // Keep the sun's shadow frustum centered near the bird as it travels the endless map.
-    this.sun.position.set(bird.position.x - 55, bird.position.y + 85, bird.position.z - 38);
+    this.sun.position.copy(bird.position).add(SUN_OFFSET);
     this.sun.target.position.copy(bird.position);
     this.sun.target.updateMatrixWorld();
 
@@ -586,8 +778,23 @@ export class GameEngine {
       this.starfield.position.set(bird.position.x, 0, bird.position.z);
     }
 
+    if (this.ocean) this.updateAtmosphere(dt);
+
     const speedRatio = (this.speed - baseSpeed) / (boostSpeed - baseSpeed);
-    this.wind.setIntensity(this.underwater ? 0 : 0.3 + speedRatio);
+    this.wind.setIntensity(0.3 + speedRatio);
+  }
+
+  /** The chase camera stays on the bird's side of the waves (and above the seabed). */
+  private keepCameraOnBirdSide(camera: THREE.Vector3) {
+    const ocean = this.ocean!;
+    const surface = ocean.waterHeightAt(camera.x, camera.z);
+    if (this.underwater) {
+      if (camera.y > surface - CAMERA_SURFACE_MARGIN) camera.y = surface - CAMERA_SURFACE_MARGIN;
+      const floor = ocean.groundHeightAt(camera.x, camera.z) + CAMERA_SEABED_CLEARANCE;
+      if (camera.y < floor) camera.y = floor;
+    } else if (ocean.isOverWater(camera.x, camera.z) && camera.y < surface + CAMERA_SURFACE_MARGIN) {
+      camera.y = surface + CAMERA_SURFACE_MARGIN;
+    }
   }
 
   /** Current airspeed in world units per second (treated as m/s by the HUD). */
@@ -652,10 +859,17 @@ export class GameEngine {
     this.rings?.dispose();
     this.splash?.dispose();
     this.ringBurst?.dispose();
-    this.underwaterEnv?.dispose();
     this.waterBurst?.dispose();
     this.ringGuide?.dispose();
+    this.oceanLife?.dispose();
+    this.underwaterEnv?.dispose();
+    this.ocean?.dispose();
+    // Free everything else still in the scene (terrain, sky, bird, clouds), then the context
+    // itself, so repeated sessions don't pile up GPU memory or live WebGL contexts.
+    disposeObjectTree(this.scene);
+    this.scene.clear();
     this.renderer.dispose();
+    this.renderer.forceContextLoss();
     if (this.renderer.domElement.parentElement === this.container) {
       this.container.removeChild(this.renderer.domElement);
     }

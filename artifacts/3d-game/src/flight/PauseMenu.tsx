@@ -2,6 +2,9 @@ import { useId, useLayoutEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { BookOpen, ChevronLeft, Crosshair, Play } from 'lucide-react';
 import { CornerBrackets } from '@/ui/hud';
+import { QUALITY_SETTINGS, type QualityLevel, type QualitySetting } from '@/game/quality';
+
+const QUALITY_LABELS: Record<QualitySetting, string> = { auto: 'Auto', high: 'High', low: 'Low' };
 
 interface PauseMenuProps {
   /** "Pigeon · Mountain Valley · Sunny Morning" */
@@ -9,6 +12,10 @@ interface PauseMenuProps {
   /** Ring Challenge score, or null when rings are off. */
   score: number | null;
   reducedMotion: boolean;
+  /** Graphics quality setting, and the level actually rendered (Auto resolves to one). */
+  quality: QualitySetting;
+  renderedQuality: QualityLevel | null;
+  onQualityChange: (quality: QualitySetting) => void;
   onResume: () => void;
   onGuide: () => void;
   /** Hand mode: back to the calibration screen (keeps the camera), then take off again. */
@@ -20,10 +27,22 @@ interface PauseMenuProps {
  * The pause menu, in the flight HUD's instrument style. The game loop is frozen while it's open
  * (App pauses the engine and the keyboard input). Esc is handled by App.
  */
-export function PauseMenu({ summary, score, reducedMotion, onResume, onGuide, onRecalibrate, onExit }: PauseMenuProps) {
+export function PauseMenu({
+  summary,
+  score,
+  reducedMotion,
+  quality,
+  renderedQuality,
+  onQualityChange,
+  onResume,
+  onGuide,
+  onRecalibrate,
+  onExit,
+}: PauseMenuProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const resumeRef = useRef<HTMLButtonElement | null>(null);
   const titleId = useId();
+  const qualityId = useId();
 
   useLayoutEffect(() => {
     resumeRef.current?.focus({ preventScroll: true });
@@ -98,6 +117,39 @@ export function PauseMenu({ summary, score, reducedMotion, onResume, onGuide, on
             <ChevronLeft className="h-4 w-4 text-white/70" />
             Back to landing
           </button>
+        </div>
+
+        {/* Graphics quality: Auto drops to Low by itself when the frame rate stays under ~50 FPS. */}
+        <div className="mt-6">
+          <div className="flex items-baseline justify-between">
+            <p id={qualityId} className="ascent-hud text-white/60">
+              Graphics
+            </p>
+            {quality === 'auto' && renderedQuality && (
+              <p className="ascent-hud text-white/45" style={{ fontSize: 10 }}>
+                Auto · {QUALITY_LABELS[renderedQuality]}
+              </p>
+            )}
+          </div>
+          <div role="radiogroup" aria-labelledby={qualityId} className="ascent-glass mt-2 grid grid-cols-3 gap-1 rounded-full p-1">
+            {QUALITY_SETTINGS.map((option) => {
+              const selected = option === quality;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => onQualityChange(option)}
+                  className={`ascent-hud rounded-full py-2 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white ${
+                    selected ? 'bg-white text-[color:var(--ascent-ink)]' : 'text-white/80 hover:bg-white/15'
+                  }`}
+                >
+                  {QUALITY_LABELS[option]}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </section>
     </div>

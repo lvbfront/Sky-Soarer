@@ -35,7 +35,7 @@ export const MAP_DETAILS: Record<MapType, { blurb: string; meta: string[] }> = {
   },
   ocean: {
     blurb: 'Turquoise water and palm islands. Dive in to find a reef below.',
-    meta: ['Sea level · 0 m', 'Dive · reef, fish, a shark'],
+    meta: ['Sea level · 0 m', 'Dive · reef, turtles, mantas'],
   },
 };
 
