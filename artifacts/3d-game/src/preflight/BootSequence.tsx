@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
 import { gsap } from 'gsap';
 import { ChevronLeft, RotateCcw } from 'lucide-react';
 import { CornerBrackets, Wordmark } from '@/ui/hud';
+import { PrivacyNote } from '@/ui/privacy';
 
 export type BootTone = 'idle' | 'active' | 'ok' | 'fail';
 
@@ -34,6 +35,8 @@ interface BootSequenceProps {
   retryLabel: string;
   onRetry: () => void;
   onBack: () => void;
+  /** Opens the Privacy panel from the camera step's privacy note. */
+  onOpenPrivacy: () => void;
 }
 
 // Typing speed and the stagger between lines. With three lines this finishes in about a second,
@@ -65,6 +68,7 @@ export function BootSequence({
   retryLabel,
   onRetry,
   onBack,
+  onOpenPrivacy,
 }: BootSequenceProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const clockRef = useRef<HTMLSpanElement | null>(null);
@@ -177,6 +181,8 @@ export function BootSequence({
                 ? 'Keyboard controls: no camera, no hand tracking, nothing big to download.'
                 : 'Allow camera access, then hand tracking loads (about 13 MB the first time).'}
           </p>
+          {/* The camera permission step: say what happens to the feed while the browser asks for it. */}
+          {!keyboard && <PrivacyNote onOpenPrivacy={onOpenPrivacy} className="ascent-shadow mt-4 max-w-md" />}
 
           <ol className="mt-10 space-y-5 font-mono text-[13px] uppercase tracking-[0.1em] sm:text-sm">
             {lines.map((line, index) => (
@@ -241,10 +247,8 @@ export function BootSequence({
               <ChevronLeft className="h-3.5 w-3.5" />
               Back
             </button>
-            {!failed && (
-              <p className="ascent-hud text-[10px] text-white/50">
-                {keyboard ? 'Steer with WASD or the arrow keys · Esc pauses' : 'Your camera feed never leaves this page.'}
-              </p>
+            {!failed && keyboard && (
+              <p className="ascent-hud text-[10px] text-white/50">Steer with WASD or the arrow keys · Esc pauses</p>
             )}
           </div>
         </div>

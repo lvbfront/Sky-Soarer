@@ -7,6 +7,7 @@ import { MAP_OPTIONS, WEATHER_LOOKS, WEATHER_OPTIONS } from '@/game/presets';
 import { WindAudio } from '@/game/audio';
 import type { LandingScene, LandingTelemetry } from '@/game/LandingScene';
 import type { FlightSettings } from '@/game/settings';
+import { PrivacyNote } from '@/ui/privacy';
 import {
   BIRD_PERSONALITY,
   CHAPTERS,
@@ -44,6 +45,8 @@ interface LandingProps {
   /** Begin pre-flight, but show the calibration screen even though one is saved. */
   onRecalibrate: () => void;
   onQuickStart: () => void;
+  /** Opens the Privacy panel (what's stored locally, Clear my data). */
+  onOpenPrivacy: () => void;
   subscribeTelemetry: (listener: ((telemetry: LandingTelemetry) => void) | null) => void;
 }
 
@@ -83,6 +86,7 @@ export function Landing({
   onBegin,
   onRecalibrate,
   onQuickStart,
+  onOpenPrivacy,
   subscribeTelemetry,
 }: LandingProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -834,11 +838,10 @@ export function Landing({
                   <ArrowRight className="h-5 w-5" />
                 </span>
               </button>
-              <p className="mt-3 text-xs text-white/70">
-                {keyboardMode
-                  ? 'No camera or download needed. Esc pauses the flight at any time.'
-                  : 'Your camera feed stays on this page and is only used to read your hand position.'}
-              </p>
+              {keyboardMode && (
+                <p className="mt-3 text-xs text-white/70">No camera or download needed. Esc pauses the flight at any time.</p>
+              )}
+              <PrivacyNote onOpenPrivacy={onOpenPrivacy} camera={!keyboardMode} className="mt-3" />
               {!keyboardMode && calibrationSaved && (
                 <button
                   type="button"

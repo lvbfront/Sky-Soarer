@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -40,6 +41,18 @@ const replitPlugins = isReplit
     ]
   : [];
 
+// The production security headers (CSP, Permissions-Policy, …) live in vercel.json. `vite preview`
+// serves the same ones, so the policy can be checked locally against the real build.
+function productionHeaders(): Record<string, string> {
+  const file = path.resolve(import.meta.dirname, '../../vercel.json');
+  if (!fs.existsSync(file)) return {};
+  const vercel = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+    headers?: { source: string; headers: { key: string; value: string }[] }[];
+  };
+  const all = vercel.headers?.find((rule) => rule.source === '/(.*)')?.headers ?? [];
+  return Object.fromEntries(all.map(({ key, value }) => [key, value]));
+}
+
 export default defineConfig({
   base: basePath,
   plugins: [react(), tailwindcss(), mediapipeAssets(), ...replitPlugins],
@@ -53,6 +66,9 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true,
+    // Fonts are always emitted as files, never inlined as data: URIs, so the CSP's font-src can stay
+    // 'self' (and the CSS doesn't carry base64 font subsets).
+    assetsInlineLimit: (filePath) => (/\.woff2?$/.test(filePath) ? false : undefined),
   },
   server: {
     port: envPort ?? DEFAULT_PORT,
@@ -67,5 +83,6 @@ export default defineConfig({
     port: envPort ?? DEFAULT_PREVIEW_PORT,
     host: '0.0.0.0',
     allowedHosts: true,
+    headers: productionHeaders(),
   },
 });

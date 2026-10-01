@@ -1,9 +1,9 @@
-const STORAGE_KEY = 'bird-flight-best-score';
+export const BEST_SCORE_KEY = 'bird-flight-best-score';
 
 /** Highest Ring Challenge score achieved so far, persisted in this browser via localStorage. */
 export function getBestScore(): number {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(BEST_SCORE_KEY);
     const parsed = raw ? parseInt(raw, 10) : 0;
     return Number.isFinite(parsed) ? parsed : 0;
   } catch {
@@ -17,7 +17,7 @@ export function saveBestScoreIfHigher(score: number): number {
   const current = getBestScore();
   if (score <= current) return current;
   try {
-    window.localStorage.setItem(STORAGE_KEY, String(score));
+    window.localStorage.setItem(BEST_SCORE_KEY, String(score));
   } catch {
     // Ignore write failures (e.g. storage disabled) — the in-memory value still updates below.
   }

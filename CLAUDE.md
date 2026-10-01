@@ -11,6 +11,8 @@ Guidance for Claude Code (and humans) working in this repository. The repo is na
 
 Bird Flight is a relaxing, endless 3D flight game. You steer a low-poly bird **with your bare hand in front of a webcam** (MediaPipe Hands tracks it), or, in **Keyboard** mode, with WASD / the arrow keys. Both inputs produce the same `HandControlState`, so the engine never knows which one is driving. There is **no touch or gamepad input**; the mouse is only for menus and HUD buttons.
 
+**Privacy is a public promise** (§12): camera frames and hand landmarks never leave the browser, the game makes zero third-party requests (fonts and MediaPipe are self-hosted), nothing but a few small `localStorage` settings is stored, and a **Privacy** panel (landing + camera step) lists them with **Clear my data**.
+
 How a session plays:
 
 1. **Landing page, "The Ascent" (Screen 1).** A scroll-driven page over a live 3D backdrop. Scrolling climbs the bird from the ground to above the clouds, and each full-viewport chapter is one setup step (see §6.10):
@@ -18,7 +20,7 @@ How a session plays:
    - **1 · Choose your bird (300 m):** Pigeon, Falcon, Greater Flamingo, or Duck/Seabird. Prev/next buttons, ←/→ keys, or the name chips.
    - **2 · Choose your world (1,200 m):** Mountain Valley, or Tropical Ocean & Islands. The 3D world switches live.
    - **3 · Choose the sky (3,000 m):** Sunny Morning, Sunset Gold, or Starry Night. Sky and lighting crossfade live.
-   - **4 · Above the clouds (5,000 m):** a summary of the choices, the **Input** switch (**Hand (webcam)** or **Keyboard**), the Ring Challenge switch (with best score), a controls briefing for the chosen input, and **Begin pre-flight**, which saves the settings (input included) and starts the pre-flight for that input.
+   - **4 · Above the clouds (5,000 m):** a summary of the choices, the **Input** switch (**Hand (webcam)** or **Keyboard**), the Ring Challenge switch (with best score), a controls briefing for the chosen input, and **Begin pre-flight**, which saves the settings (input included) and starts the pre-flight for that input. Under it, the camera privacy note with a **Privacy** link (§12).
 
    Fixed instrument chrome: an altimeter rail (clickable chapter ticks), telemetry (speed, heading, V/S, lat/lon), a big altitude counter, and a **Sound** toggle for ambient wind (off by default).
 2. **Pre-flight 01: boot sequence.** A full-screen HUD over the frozen backdrop types monospace status lines that follow the **real** startup events (see §6.11). In hand mode there are three:
@@ -68,6 +70,7 @@ There is no win or lose state, no timer, and no collision damage. Terrain acts o
 | Hand tracking | `@mediapipe/hands` (legacy "Solutions" API), assets self-hosted | **0.4.1675469240**, pinned exactly; this `package.json` entry is the only place the version lives |
 | Landing animation | GSAP + ScrollTrigger (`gsap` package, plugins are free) | ^3.15.0 |
 | Noise | simplex-noise (v4 `createNoise2D`) | ^4.0.3 |
+| Web fonts | `@fontsource/inter`, `@fontsource/instrument-serif`, `@fontsource/jetbrains-mono`, imported in `main.tsx` and bundled (self-hosted, no Google Fonts) | ^5.3.0 |
 | Audio | Web Audio API, fully synthesized (no audio files) | — |
 | Unit tests | Vitest (`vitest.config.ts`, Node environment, `src/**/*.test.ts`) | ^4.1.11. v5 needs Node 22.12+, and the repo supports Node 20.19. |
 | Replit-only dev plugins | `@replit/vite-plugin-runtime-error-modal`, `-cartographer`, `-dev-banner` | loaded only when `REPL_ID` is set |
@@ -97,7 +100,7 @@ Results of a verification run (Linux x64, Node 22.22.2, pnpm 10.33.0, no `PORT`/
 
 - `pnpm install --frozen-lockfile` succeeds.
 - `pnpm run typecheck` passes.
-- `pnpm run build` succeeds from the root. It emits a 1.9 kB `index.html`, 49 kB of CSS, a 930 kB entry chunk (269 kB gzip: React, three, GSAP, the landing and the pre-flight/HUD UI), two lazy chunks (`handControls` 52 kB with the MediaPipe JS and the download meter, `GameEngine` 33 kB), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
+- `pnpm run build` succeeds from the root. It emits a 1.6 kB `index.html`, 72 kB of CSS (13 kB gzip; the `@font-face` rules), the self-hosted font files (woff2 + woff fallbacks; a page fetches only the ~6 latin woff2 it uses, ~140 kB), a 930 kB entry chunk (269 kB gzip: React, three, GSAP, the landing and the pre-flight/HUD UI), two lazy chunks (`handControls` 52 kB with the MediaPipe JS and the download meter, `GameEngine` 33 kB), and about 24 MB of MediaPipe files under `mediapipe/hands/`. Vite prints its "chunk larger than 500 kB" warning.
 - The Vercel commands (`npx --yes pnpm@10.33.0 install --frozen-lockfile` and `… run build`) also succeed in a shell with **no global pnpm**. The nested `pnpm` calls in the root scripts resolve to the npx-provided pnpm.
 - The dev server starts on 5173 with defaults. It also starts with Replit's env (`PORT=24982 BASE_PATH=/ REPL_ID=…`), and then the Replit plugins load.
 - Headless Chromium with a fake camera, and **every non-localhost request blocked**, reached the calibration screen on the production preview. The landing redesign PR re-ran this with SwiftShader WebGL: every chapter, live bird/world/sky switching, snapping, reduced motion, Quick start, Back, and the error screen. It also confirmed that no `handControls`/MediaPipe/`GameEngine` request happens before **Begin pre-flight**. Deep links such as `/some/route` return `index.html`. The startup error paths were also exercised in headless runs; see the P0 PR's test notes.
@@ -141,7 +144,7 @@ The game needs **no secrets, no backend and no database**.
 - **No third-party network access is needed at runtime.**
   - The MediaPipe wasm, packed graph `.data` and `.tflite` files are **self-hosted**. `vite-plugin-mediapipe-assets.ts` serves them from `node_modules/@mediapipe/hands` in dev and emits them into `dist/public/mediapipe/hands/` at build time. `locateFile` in `handControls.ts` points at `${BASE_URL}mediapipe/hands/`.
   - This adds about 24 MB to the deploy. A session downloads about 13 MB: `hands_solution_simd_wasm_bin.wasm` (6 MB), `hands_solution_packed_assets.data` (4.3 MB) and `hand_landmark_lite.tflite` (2 MB). The non-SIMD wasm and the `full` model are shipped as fallbacks and are only fetched if needed.
-  - Google Fonts (Inter, Instrument Serif for display type, JetBrains Mono for HUD readouts) is the only external request, and the UI falls back to system fonts without it.
+  - The fonts (Inter, Instrument Serif for display type, JetBrains Mono for HUD readouts) are **self-hosted** from `@fontsource` packages, so the game makes **no third-party request at all** (§12). Vite emits them as files (`assetsInlineLimit` never inlines `.woff`/`.woff2`, so the CSP's `font-src 'self'` holds).
   - If the files can't load, or the load (including the first frame through the graph) takes more than **30 s**, the startup screen shows a specific error with **Try Again**.
 - A desktop Chromium, Edge or Firefox with a decent GPU is the target. Mobile isn't designed for: there's no touch fallback, and the layout assumes a large screen.
 - In headless screenshot tools, WebGL often fails with no GPU. Launch Chromium with `--use-angle=swiftshader --enable-unsafe-swiftshader` to render, and expect very low FPS.
@@ -153,10 +156,11 @@ The game needs **no secrets, no backend and no database**.
   - install and build use a pinned pnpm through `npx`
   - `outputDirectory` is `artifacts/3d-game/dist/public`
   - there's an SPA rewrite to `/index.html`; Vercel serves real files first, so assets are unaffected
+  - the security headers on every response: Content-Security-Policy, Permissions-Policy, Referrer-Policy, X-Content-Type-Options, X-Frame-Options, Cross-Origin-Opener-Policy (§12). `vite preview` reads and serves the same headers from `vercel.json`, so `pnpm preview` runs under the production policy.
 
   Leave the project's Root Directory as the repo root.
-- **Replit:** `.replit` plus `artifacts/3d-game/.replit-artifact/artifact.toml` handle dev on port 24982 and a static production deploy from the same `dist/public`.
-- **Any other static host:** run `pnpm run build`, publish `artifacts/3d-game/dist/public`, and add a catch-all rewrite to `/index.html`. The rewrite is optional, because there's no client router.
+- **Replit:** `.replit` plus `artifacts/3d-game/.replit-artifact/artifact.toml` handle dev on port 24982 and a static production deploy from the same `dist/public`. That deploy does **not** send the security headers (§9 #30).
+- **Any other static host:** run `pnpm run build`, publish `artifacts/3d-game/dist/public`, and add a catch-all rewrite to `/index.html`. The rewrite is optional, because there's no client router. Copy the headers from `vercel.json` into the host's config.
 
 ---
 
@@ -167,7 +171,7 @@ The game needs **no secrets, no backend and no database**.
 ├── artifacts/
 │   └── 3d-game/               # ★ THE GAME (@workspace/3d-game) — the only workspace package
 │       ├── .replit-artifact/artifact.toml   # Replit service config (port 24982, static deploy, SPA rewrite)
-│       ├── index.html         # <title>Bird Flight</title>, meta/OG description, Google Fonts Inter, favicon
+│       ├── index.html         # <title>, meta/OG description, favicon (no external links: fonts are bundled from main.tsx)
 │       ├── vite.config.ts     # PORT/BASE_PATH defaults; Replit plugins only when REPL_ID is set; @ -> src
 │       ├── vitest.config.ts   # unit tests only (no React/Tailwind/MediaPipe/Replit plugins); @ -> src
 │       ├── vite-plugin-mediapipe-assets.ts # serves/emits the MediaPipe runtime files under mediapipe/hands/, plus the
@@ -188,7 +192,8 @@ The game needs **no secrets, no backend and no database**.
 │           │   ├── FlightGuide.tsx # "How to fly" guide: per-move cards for hand or keyboard, tips built from real constants
 │           │   └── guideArt.tsx   # procedural SVG hand illustrations + animated keycaps (CSS keyframes in index.css)
 │           ├── ui/
-│           │   └── hud.tsx        # CornerBrackets, Wordmark (shared instrument-frame pieces)
+│           │   ├── hud.tsx        # CornerBrackets, Wordmark (shared instrument-frame pieces)
+│           │   └── privacy.tsx    # CAMERA_PRIVACY_NOTE, PrivacyNote (note + "Privacy" link), PrivacyPanel (stored data, Clear my data)
 │           ├── landing/       # ★ the scroll-driven landing page ("The Ascent")
 │           │   ├── Landing.tsx     # chapters, GSAP ScrollTrigger (scrub + snap), intro timeline, HUD, keys, sound toggle
 │           │   └── content.ts      # chapter list, copy (bird personalities, world/sky details), formatters
@@ -238,11 +243,12 @@ The game needs **no secrets, no backend and no database**.
 │               ├── waterBurst.ts   # surfacing droplet particles (copy of ringBurst, retuned)
 │               ├── splash.ts       # skimming spray particles (PointsMaterial – fade is broken)
 │               ├── audio.ts        # WindAudio (filtered noise) + SoundEffects (ring chime)
-│               └── highscore.ts    # localStorage best score ("bird-flight-best-score")
+│               ├── highscore.ts    # localStorage best score ("bird-flight-best-score")
+│               └── storedData.ts   # registry of every localStorage key (Privacy panel), readStoredData, clearStoredData
 ├── attached_assets/           # the two feature-request prompts the user pasted into Replit Agent (history only)
 ├── .agents/memory/            # Replit Agent's lessons-learned notes (read these!)
 ├── .replit, .replitignore     # Replit workspace config
-├── vercel.json                # Vercel static deploy config
+├── vercel.json                # Vercel static deploy config + security headers (also served by `vite preview`)
 ├── package.json               # root scripts (dev/build/preview/typecheck), packageManager pnpm@10.33.0
 ├── pnpm-workspace.yaml        # workspace glob, version catalog, minimumReleaseAge, security overrides
 ├── pnpm-lock.yaml
@@ -304,6 +310,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   | `TrackingStartError` | `tracking-load-failed` / `tracking-timeout` |
   | anything else | `unknown` |
   | (engine chunk import failed, set directly in `handleStartFlying`) | `engine-load-failed` |
+  | (engine constructor or `start()` threw, e.g. no WebGL, set directly in `handleStartFlying`) | `engine-start-failed` |
 
   Each kind has its own text in `STARTUP_ERROR_MESSAGES`. `needsReload` is set when a code chunk import failed (the engine, or the tracking module while `chunkImport` is true). Chromium caches a failed dynamic `import()` for the page's lifetime, so retrying in place can't work, and the boot HUD's button becomes **Reload page**.
 - **Takeoff request.** Start Flying (through `handleCalibratedTakeoff`, which re-validates and `saveCalibration()`s the points and sensitivity first), the end of the keyboard boot, and the end of a hand boot with a saved calibration all call `requestTakeoff()`. It opens the guide (`guide = 'preflight'`) if `shouldAutoShowGuide(mode)`, otherwise calls `handleStartFlying()`. The guide's **Take off** stores "Don't show again" if ticked, then calls `handleStartFlying()`. Its **Back** in hand mode closes the guide and, if a saved calibration skipped the calibration screen (`flightState` still `'requesting'`), opens it (`'calibrating'`, with the saved box loaded). `startKeyboardPreflight` reaches `requestTakeoff` through `requestTakeoffRef`, since it's created first. `handleStartFlying` reads the bird/map/weather/rings/controls from `settingsRef.current`, never from its closure (a Quick start may have changed them). In keyboard mode it creates and starts `KeyboardControls` once `engine.start()` resolves.
@@ -313,7 +320,7 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Session ids guard async startup.** Each attempt takes `++sessionIdRef.current`, and `stopEverything()` also increments it. After every `await`, a superseded attempt (for example, the player pressed Back while the permission prompt was open) releases its own stream and tracker and returns without touching UI state.
 - **One `HandTracker` per session.** It is created on the user click and reused through calibration and flight. Calibration state (center, box, sensitivity) lives **inside the tracker**. The engine only ever sees normalized `pitch`/`roll` in `-1..1`.
 - **Engine options are fixed at construction.** Bird, map, weather and ring mode can't change mid-flight. Changing them means stopping and restarting.
-- **Teardown.** `stopEverything()` bumps the session id, stops the tracker and the keyboard controls, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also calls `resetTakeoff()` and turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It awaits the engine chunk **and** the takeoff launch animation together, checks the session id afterwards, and bails out if Back disposed the engine while `engine.start()` was awaiting. `resetTakeoff()` kills the takeoff timeline, hides the veil, and resolves the pending launch promise, so an interrupted launch never leaves `handleStartFlying` awaiting forever.
+- **Teardown.** A `pagehide` listener (registered whenever the state isn't `'landing'`) runs `handleBackToMenu()`, so closing or leaving the tab stops the camera explicitly and a back/forward-cache restore lands on the landing. An engine that can't be built or started (no WebGL) is caught in `handleStartFlying`: `resetTakeoff()` + `stopEverything()` and the `engine-start-failed` error (Reload page). `resetTakeoff()` also clears the GSAP lift on `[data-takeoff-lift]`, so a boot screen that stays mounted shows its error. `stopEverything()` bumps the session id, stops the tracker and the keyboard controls, disposes the engine, cancels the preview rAF, and stops the MediaStream tracks. Back and Stop Game both call it (`handleBackToMenu`, which also calls `resetTakeoff()` and turns the landing backdrop back on). `handleStartFlying` is guarded by `startingFlightRef`/`engineRef`, so a double click builds only one engine. It awaits the engine chunk **and** the takeoff launch animation together, checks the session id afterwards, and bails out if Back disposed the engine while `engine.start()` was awaiting. `resetTakeoff()` kills the takeoff timeline, hides the veil, and resolves the pending launch promise, so an interrupted launch never leaves `handleStartFlying` awaiting forever.
 - **The landing backdrop (`LandingScene`)** is created by an effect in `App` while `landingBackdropOn` is true, and it stays alive behind the landing *and* the pre-flight screens (holding the "above the clouds" shot). In hand mode, while `flightState` is `'requesting'` (tracking loading) or `'calibrating'` it is **paused** (`setPaused(true)`): no update and no render, so it doesn't compete with MediaPipe on the main thread. Keyboard mode has no MediaPipe, so its short boot keeps the backdrop moving. Before freezing it cuts to the pre-flight shot and renders that one frame, which the canvas then holds. That matters for Quick start, which is pressed from the hero. It resumes on Back or on the error screen. `handleStartFlying` calls `disposeLandingScene()` **before** constructing `GameEngine`, so only one WebGL context is ever live. Returning from flight rebuilds it. If WebGL can't start, the constructor throws, the error is logged, and the page runs over the CSS sky gradient on `<html>`. App also keeps the backdrop's bird/world/sky in sync with `settings`, so a Quick start swap shows behind pre-flight.
 
 ---
@@ -680,6 +687,7 @@ These come from code reading plus headless runs.
 9. **The SPA rewrite hides missing MediaPipe files.** The SPA rewrites on Vercel and Replit return `index.html` for any missing file. If the `mediapipe/hands/` files were ever missing from a deploy, MediaPipe would receive HTML and fail. The startup error screen now reports this.
 28. **A failed chunk import can't be retried in place.** Chromium caches a failed dynamic `import()` for the page's lifetime. So when the engine or tracking chunk fails to download, the boot HUD offers **Reload page** instead of Try Again. Other failures (camera, MediaPipe wasm/model loads) keep Try Again. Recovery after a denied camera is verified; recovery after a MediaPipe asset failure is not.
 29. **Flick detection at low tracker rates.** The flick is reliable from 15 Hz up (unit-tested with ±10% frame jitter). Around 10 Hz a 0.15 s flick fires only about half the time, because a single 100 ms step averages away its peak speed, and slower (0.2 s) flicks need ≥ 30 Hz to be dependable. Headless SwiftShader in flight runs the tracker at ~15 Hz at 640×360, and at less at larger viewports.
+30. **Security headers are Vercel-only.** `vercel.json` (and `vite preview`) send the CSP and the other headers; the Replit static deploy and the dev server don't. The game still makes no third-party requests there, but there's no CSP backstop.
 
 ### Performance
 10. **The React app re-renders at the tracker rate.** `onUpdate` calls `setHandDetected`, `setBoosting` and `setStatusText` on every MediaPipe frame (about 30/s). Each call re-renders the whole `App` during flight. React bails out of identical values, but any change re-renders App and the HUD. The flight telemetry avoids this (refs plus rAF), and boot progress re-renders at most once per whole percent.
@@ -747,6 +755,9 @@ These come from code reading plus headless runs.
 
 ## 11. Gotchas for future changes
 
+- **Privacy is a public claim; keep every part of §12 true.** No third-party URL anywhere (scripts, styles, fonts, images, analytics, CDNs); no `fetch`/XHR/WebSocket/beacon carrying camera frames, canvases or landmarks; a new `localStorage` key goes in `STORED_DATA` (`storedData.ts`, pinned by its test) with the `bird-flight-` prefix; never store an image or landmarks.
+- **The CSP is strict** (`vercel.json`, §12): no inline `<script>`/`<style>` elements, no `eval`/`new Function`, no `data:` fonts, nothing cross-origin. Inline `style` *props* are fine (React and GSAP write them through the CSSOM). Run `pnpm build && pnpm preview` and watch the console for `Refused to …` after adding a dependency.
+
 - Don't start the camera or audio before a user gesture. Camera and tracking start on **Begin pre-flight** / **Quick start**. In-game wind audio starts on **Start Flying** (or **Take off**, or the keyboard boot's automatic takeoff, which relies on the page's sticky activation from the Quick start / Begin click), and the landing's ambient wind starts only from its **Sound** toggle click.
 - New inputs must emit `HandControlState` through App's `handleControlState`; don't give the engine input-specific code. Keyboard mode must never import `handControls` at runtime (type imports only). The production build check is that keyboard mode never requests `handControls-*.js` or `mediapipe/hands/`.
 - Anything that can run while a menu is open must respect the pause: the engine ignores `applyControls` while paused, `KeyboardControls.setPaused` stops listening, and flick hints are gated on `flickHintsOnRef`. A new overlay over the flight should set `paused` (through `guide`/`pauseOpen`) and leave the HUD `inert`.
@@ -776,7 +787,7 @@ These come from code reading plus headless runs.
 - **Waves live in one table** (`WAVES` in `oceanField.ts`), turned into GLSL by `wavesGlsl()`. Change them there so the CPU `waterHeight` (camera clamp, skim spray) keeps matching the drawn surface.
 - **The water is opaque.** Keep the chase-camera surface clamp (`keepCameraOnBirdSide`), and keep underwater-only objects in `UnderwaterEnvironment`'s root and above-water-only ones out of the underwater view (`setUnderwaterWorld`), or they'll show through / fog into odd teal shapes.
 - **Quality changes must go through the profile.** New density or cost knobs belong in `QUALITY_PROFILES` (and the Low ≤ High test), applied in `GameEngine.applyQualityLevel`.
-- The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3. In this repo's cloud sandbox, headless Chromium can't reach Google Fonts through the TLS proxy. For screenshots, route `fonts.googleapis.com`/`fonts.gstatic.com` through `curl` with Playwright's `page.route` rather than disabling certificate checks.
+- The WebGL scene can't be verified in most headless screenshot sandboxes. Use a real browser, or SwiftShader flags as described in §3. The fonts are self-hosted, so screenshots need no network beyond the local server.
 - **Driving calibration and flight headlessly** (no real hand available):
   - Override `navigator.mediaDevices.getUserMedia` with an init script that returns a `canvas.captureStream()`.
   - On the **dev server**, `page.route` the pre-bundled `/node_modules/.vite/deps/@mediapipe_hands.js` to a stub module. It must export `Hands` and `HAND_CONNECTIONS` both as named and default exports, because Vite's CJS interop reads them off the default export. The stub's `send()` reports synthetic landmarks you control.
@@ -791,3 +802,42 @@ These come from code reading plus headless runs.
   - Playwright's role queries don't honor `inert`, so scope locators to the open dialog.
   - Near-miss and flick thresholds are best checked deterministically: `FlickDetector` is pure, so extend `flickDetector.test.ts` (synthetic tracks at any frame rate, with jitter). The fist guard still lives in `HandTracker`: to check it outside a browser, bundle `handControls.ts` with esbuild (`--alias:@mediapipe/hands=<stub>`, `--alias:virtual:mediapipe-hands-assets=<stub>`, `--define:import.meta.env.BASE_URL='"/"'`), stub `performance.now`, and call `handleResults` with synthetic landmarks.
   - In a browser, a simulated hand is easiest with Chromium's `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream` plus the stubbed `@mediapipe/hands` deps module, whose `send()` evaluates a scripted `window.__handPose(now)` → `{x, y, closure}` and builds 21 landmarks from it (curl the fingertips toward the palm for a fist, and drop the MCPs slightly to reproduce the real palm-center shift). Wrap `HandTracker.prototype.handleResults` and `FlickDetector.prototype.update` from `import('/src/game/…')` to record outputs. After editing a module, restart the dev server before such runs: HMR gives edited modules `?t=` URLs, so a plain `import('/src/game/X.ts')` then gets a *second* module instance and the patches don't reach the app.
+
+---
+
+## 12. Privacy
+
+The game is going public with privacy claims. This section is what the code guarantees, how it was verified, and what to keep true.
+
+**The claims** (shown in the UI as `CAMERA_PRIVACY_NOTE`, `src/ui/privacy.tsx`): "Your camera never leaves your device. Hand tracking runs entirely in your browser, nothing is recorded or uploaded."
+
+**Camera data stays in the page.**
+- `App.handleContinueToCalibration` makes the only `getUserMedia` call (`{ video: 480×360, facingMode: 'user' }, audio: false`) and puts the stream on a hidden `<video>`.
+- Frames go to `HandTracker.processFrame` → `hands.send({ image: video })`, i.e. the MediaPipe wasm in this tab. Landmarks come back through `onResults` and only ever reach `HandControlState` (engine steering, the preview canvas, HUD state).
+- The two preview canvases (`drawHandPreview`) are drawn and never read back: no `toDataURL`, `toBlob`, `getImageData`, `captureStream` or `MediaRecorder` anywhere in `src/`.
+- The only network code is `downloadMeter.ts`, which *observes* MediaPipe's own GET downloads under `mediapipe/hands/` while the model loads. There is no `WebSocket`, `sendBeacon`, `EventSource`, `RTCPeerConnection` or POST anywhere.
+
+**Network.** Every request is a same-origin GET. Hand mode: `/`, the entry JS + CSS, ~6 woff2 font files, `handControls-*.js`, `damping-*.js`, `GameEngine-*.js`, and from `/mediapipe/hands/`: `hands_solution_packed_assets_loader.js`, `hands_solution_simd_wasm_bin.js`, `hands.binarypb`, `hands_solution_packed_assets.data`, `hands_solution_simd_wasm_bin.wasm`, `hand_landmark_lite.tflite`. Keyboard mode: the same minus `handControls` and everything under `mediapipe/`. No analytics, tracking, ads, CDNs or third-party scripts.
+
+**Storage.** Only `localStorage`, all keys prefixed `bird-flight-` and listed in `STORED_DATA` (`src/game/storedData.ts`): `settings` (bird/map/sky/rings/input), `calibration` (5 points in 0..1 + a sensitivity), `best-score`, `guide-dismissed`, `quality`. No cookies, sessionStorage, IndexedDB, Cache Storage or service worker. The **Privacy** panel shows each key with its raw value; **Clear my data** (`clearStoredData`) removes every `bird-flight-*` key and App resets its in-memory copies (`handlePrivacyCleared`).
+
+**Camera lifecycle.**
+- Requested only from the **Begin pre-flight** / **Quick start** / **Recalibrate hand controls** click (hand mode). Keyboard mode never calls `getUserMedia`.
+- Stopped (`track.stop()` on every track) by: Back (boot, calibration, guide), Stop Game, Back to landing (pause menu), every startup error (`releaseLocal`), an engine load or start failure (`stopEverything`), a superseded attempt, unmount, and `pagehide` (tab close / navigation). Pause-menu **Recalibrate** keeps it on, deliberately (it goes straight back to the live calibration feed).
+
+**Where the note and the panel appear.** `PrivacyNote` sits under **Begin pre-flight** on the landing's last chapter (hand mode: the camera sentence; keyboard mode: a no-camera sentence) and in the boot HUD while the browser asks for the camera (hand mode). Both have the **Privacy** link to `PrivacyPanel` (rendered by App, `privacyOpen`; Esc closes it, captured before App's own Esc handling; a takeoff closes it).
+
+**Security headers** (`vercel.json`, every path; also served by `vite preview`):
+
+| Header | Value | Why |
+|---|---|---|
+| Content-Security-Policy | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; media-src 'self' blob: mediastream:; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'` | Nothing can load from, or send to, another origin. `'wasm-unsafe-eval'` is the one relaxation: MediaPipe compiles its wasm (it needs no `unsafe-eval`; its loaders are same-origin `<script>` tags). `data:` images: the grain overlay's inline SVG. |
+| Permissions-Policy | `camera=(self), microphone=(), geolocation=(), display-capture=(), payment=(), usb=(), serial=(), hid=(), bluetooth=(), browsing-topics=()` | Camera for this origin only (no iframe can use it); everything else off. |
+| Referrer-Policy | `no-referrer` | No URL leaks to anyone. |
+| X-Content-Type-Options | `nosniff` | |
+| X-Frame-Options | `DENY` | Legacy twin of `frame-ancestors 'none'` (no clickjacking around the camera prompt). |
+| Cross-Origin-Opener-Policy | `same-origin` | |
+
+Vercel adds HSTS itself. Vercel *preview* deployments inject the Vercel toolbar (`vercel.live`), which this CSP blocks; that only affects previews.
+
+**Verified** (privacy PR, headless Chromium + SwiftShader, fake camera, `pnpm preview` with the real headers and real MediaPipe files): 41 scripted checks, all passing. Landing, hand calibration, hand flight (saved calibration, three flights in one page), a blocked `.tflite`, WebGL refused at takeoff, keyboard flight and the Privacy panel: zero third-party requests, only GETs, no WebSocket/beacon/RTC, no CSP violations, no console errors; exactly one `getUserMedia` (video only, with user activation) per hand session and none in keyboard mode; zero live tracks after Back, Stop Game, Back to landing, the tracking error, the engine-start error and `pagehide`; storage holds only the listed keys; Clear my data empties them. `storedData.test.ts` pins the key list and that values stay small and image-free.
