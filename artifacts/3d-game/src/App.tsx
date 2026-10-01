@@ -20,6 +20,7 @@ import { getBestScore, saveBestScoreIfHigher } from '@/game/highscore';
 import { KeyboardControls } from '@/game/keyboardControls';
 import type { QualityLevel, QualitySetting } from '@/game/quality';
 import {
+  DEFAULT_SETTINGS,
   dismissGuide,
   hasSavedSettings,
   loadCalibration,
@@ -44,6 +45,7 @@ import {
 import { FlightHud, type FlickHint } from '@/flight/FlightHud';
 import { FlightGuide, type GuideOrigin } from '@/flight/FlightGuide';
 import { PauseMenu } from '@/flight/PauseMenu';
+import { PrivacyPanel } from '@/ui/privacy';
 
 // Hand tracking (handControls + the @mediapipe/hands runtime) and the full game engine are split
 // out of the first-load bundle: the landing page only needs the bird/terrain/ocean/sky modules.
@@ -99,6 +101,7 @@ type StartupErrorKind =
   | 'tracking-load-failed'
   | 'tracking-timeout'
   | 'engine-load-failed'
+  | 'engine-start-failed'
   | 'unknown';
 
 /** The startup step a failure happened in; the boot HUD reports the error under that step's line. */
@@ -131,6 +134,8 @@ const STARTUP_ERROR_MESSAGES: Record<StartupErrorKind, string> = {
   'tracking-timeout':
     'Hand tracking took too long to load. Check your internet connection and try again.',
   'engine-load-failed': 'The flight engine failed to load. Check your internet connection, then reload the page.',
+  'engine-start-failed':
+    'The 3D view could not start. Make sure WebGL (hardware acceleration) is enabled in your browser, then reload the page.',
   unknown: 'Something went wrong while starting the camera. Please try again.',
 };
 
@@ -222,6 +227,7 @@ const FAILURE_CODES: Record<StartupErrorKind, string> = {
   'tracking-load-failed': 'Failed',
   'tracking-timeout': 'Timeout',
   'engine-load-failed': 'Failed',
+  'engine-start-failed': 'Failed',
   unknown: 'Fault',
 };
 
@@ -376,6 +382,8 @@ function App() {
   // In flight, either one pauses the game (see `paused`).
   const [guide, setGuide] = useState<GuideOrigin | null>(null);
   const [pauseOpen, setPauseOpen] = useState(false);
+  // The Privacy panel (landing and boot screens): what's stored locally, and Clear my data.
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   // Graphics quality: the player's setting (saved) and the level the engine is rendering at.
   const [quality, setQuality] = useState<QualitySetting>(() => loadQuality());
   const qualityRef = useRef(quality);
@@ -913,6 +921,10 @@ function App() {
     takeoffTimelineRef.current?.kill();
     takeoffTimelineRef.current = null;
     if (takeoffVeilRef.current) gsap.set(takeoffVeilRef.current, { autoAlpha: 0 });
+    // The launch lifts the pre-flight panel away. When the boot screen stays mounted (an engine
+    // failure turns 'requesting' into 'error' in place), it must come back to show the error.
+    const lifted = document.querySelectorAll('[data-takeoff-lift]');
+    if (lifted.length > 0) gsap.set(lifted, { clearProps: 'opacity,visibility,transform' });
     takeoffResolveRef.current?.();
     takeoffResolveRef.current = null;
     setLaunching(false);
@@ -1001,35 +1013,52 @@ function App() {
     // Read through the ref: in keyboard mode this runs from the async boot, whose closure may
     // predate a Quick start's settings.
     const chosen = settingsRef.current;
-    const engine = new GameEngineClass(canvasContainerRef.current, {
-      birdType: chosen.bird,
-      mapType: chosen.map,
-      weather: chosen.weather,
-      ringChallenge: chosen.ringChallenge,
-      quality: qualityRef.current,
-      onQualityChange: (level) => setRenderedQuality(level),
-      onScoreChange: (total) => {
-        setScore(total);
-        setBestScore(saveBestScoreIfHigher(total));
-      },
-      onBarrelRoll: () => setBarrelRolling(true),
-      onBackflip: () => setBackflipping(true),
-      onWaterTransition: (state) => {
-        setUnderwater(state === 'submerged');
-        if (state === 'surfaced') setSurfaceSplash(true);
-      },
-    });
-    engineRef.current = engine;
-    setRenderedQuality(engine.getQualityLevel());
+    const container = canvasContainerRef.current;
+    let engine: GameEngine;
     try {
+      engine = new GameEngineClass(container, {
+        birdType: chosen.bird,
+        mapType: chosen.map,
+        weather: chosen.weather,
+        ringChallenge: chosen.ringChallenge,
+        quality: qualityRef.current,
+        onQualityChange: (level) => setRenderedQuality(level),
+        onScoreChange: (total) => {
+          setScore(total);
+          setBestScore(saveBestScoreIfHigher(total));
+        },
+        onBarrelRoll: () => setBarrelRolling(true),
+        onBackflip: () => setBackflipping(true),
+        onWaterTransition: (state) => {
+          setUnderwater(state === 'submerged');
+          if (state === 'surfaced') setSurfaceSplash(true);
+        },
+      });
+      engineRef.current = engine;
+      setRenderedQuality(engine.getQualityLevel());
       await engine.start();
     } catch (error) {
-      // Don't leave the player under an opaque veil.
-      if (engineRef.current === engine) resetTakeoff();
-      throw error;
-    } finally {
       startingFlightRef.current = false;
+      // Back already tore this attempt down (and disposed the engine).
+      if (sessionId !== sessionIdRef.current) return;
+      // The engine couldn't be built or started (typically no WebGL). Don't leave the player under
+      // an opaque veil, and don't leave the camera running behind an error: stopEverything() stops
+      // the tracker, disposes whatever engine exists and stops every camera track.
+      console.error('Failed to start the game engine', error);
+      resetTakeoff();
+      stopEverything();
+      setLandingBackdropOn(true);
+      setBoot((current) => ({ ...current, calibration: 'done', startedAt: performance.now() }));
+      setStartupError({
+        kind: 'engine-start-failed',
+        detail: classifyStartupError(error).detail,
+        phase: 'engine',
+        needsReload: true,
+      });
+      setFlightState('error');
+      return;
     }
+    startingFlightRef.current = false;
     // The player may have pressed Back while the engine was starting; stopEverything() has
     // already disposed it in that case.
     if (engineRef.current !== engine) return;
@@ -1161,6 +1190,35 @@ function App() {
   }, [resetTakeoff]);
 
   const handleStopFlight = handleBackToMenu;
+
+  // Leaving or closing the tab: stop the camera (and everything else) right away instead of relying
+  // on the browser's own teardown. If the page is later restored from the back/forward cache, it
+  // comes back on the landing with the camera off, not on a screen whose feed is dead.
+  useEffect(() => {
+    if (flightState === 'landing') return;
+    const onPageHide = () => handleBackToMenu();
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, [flightState, handleBackToMenu]);
+
+  // ---- Privacy panel -----------------------------------------------------------------------
+
+  const handleOpenPrivacy = useCallback(() => setPrivacyOpen(true), []);
+  const handleClosePrivacy = useCallback(() => setPrivacyOpen(false), []);
+  // "Clear my data" removed every stored key: drop the in-memory copies that mirror them, so the
+  // landing stops offering the saved calibration, Quick start's saved choices and the best score.
+  const handlePrivacyCleared = useCallback(() => {
+    setHasSaved(false);
+    setQuickStartSettings({ ...DEFAULT_SETTINGS });
+    setCalibrationSaved(false);
+    setBestScore(0);
+    setQuality('auto');
+    qualityRef.current = 'auto';
+  }, []);
+  // The panel is opened from the landing and the boot screen; a takeoff closes it.
+  useEffect(() => {
+    if (flightState === 'flying') setPrivacyOpen(false);
+  }, [flightState]);
 
   // ---- Pause and the "How to fly" guide ----------------------------------------------------
 
@@ -1325,6 +1383,7 @@ function App() {
           onBegin={handleBeginPreflight}
           onRecalibrate={handleBeginRecalibration}
           onQuickStart={handleQuickStart}
+          onOpenPrivacy={handleOpenPrivacy}
           subscribeTelemetry={subscribeTelemetry}
         />
       )}
@@ -1345,7 +1404,12 @@ function App() {
           retryLabel={startupError?.needsReload ? 'Reload page' : 'Try Again'}
           onRetry={startupError?.needsReload ? reloadPage : startPreflight}
           onBack={handleBackToMenu}
+          onOpenPrivacy={handleOpenPrivacy}
         />
+      )}
+
+      {privacyOpen && (
+        <PrivacyPanel reducedMotion={reducedMotion} onClose={handleClosePrivacy} onCleared={handlePrivacyCleared} />
       )}
 
       {flightState === 'calibrating' && (

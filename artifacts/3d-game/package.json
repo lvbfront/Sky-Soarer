@@ -11,6 +11,9 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@fontsource/instrument-serif": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@mediapipe/hands": "0.4.1675469240",
     "gsap": "^3.15.0",
     "lucide-react": "catalog:",

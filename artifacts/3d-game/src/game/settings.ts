@@ -11,14 +11,14 @@ import {
 } from './trackingShared';
 
 // Same "bird-flight-" prefix as the best-score key in highscore.ts.
-const STORAGE_KEY = 'bird-flight-settings';
+export const SETTINGS_KEY = 'bird-flight-settings';
 // Which control modes the player has ticked "Don't show again" for on the "How to fly" guide.
-const GUIDE_DISMISSED_KEY = 'bird-flight-guide-dismissed';
+export const GUIDE_DISMISSED_KEY = 'bird-flight-guide-dismissed';
 // The last hand calibration (center, 4 corners, sensitivity), so returning players can skip it.
-const CALIBRATION_KEY = 'bird-flight-calibration';
+export const CALIBRATION_KEY = 'bird-flight-calibration';
 const CALIBRATION_VERSION = 1;
 // Graphics quality (Auto / High / Low), chosen in the pause menu.
-const QUALITY_KEY = 'bird-flight-quality';
+export const QUALITY_KEY = 'bird-flight-quality';
 
 /** How the bird is flown: a hand in front of the webcam, or the keyboard (no camera at all). */
 export type ControlMode = 'hand' | 'keyboard';
@@ -55,7 +55,7 @@ function pick<T extends string>(value: unknown, allowed: readonly T[], fallback:
  */
 export function loadSettings(): FlightSettings {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(SETTINGS_KEY);
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<Record<keyof FlightSettings, unknown>>;
     return {
@@ -75,7 +75,7 @@ export function loadSettings(): FlightSettings {
 /** True once the player has saved settings at least once (the Quick start label uses it). */
 export function hasSavedSettings(): boolean {
   try {
-    return window.localStorage.getItem(STORAGE_KEY) !== null;
+    return window.localStorage.getItem(SETTINGS_KEY) !== null;
   } catch {
     return false;
   }
@@ -83,7 +83,7 @@ export function hasSavedSettings(): boolean {
 
 export function saveSettings(settings: FlightSettings) {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
   } catch {
     // Ignore write failures (e.g. storage disabled); the in-memory choice still applies.
   }
