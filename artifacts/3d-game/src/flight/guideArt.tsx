@@ -309,6 +309,33 @@ export function LandArt({ landLabel, takeoffLabel }: { landLabel: string; takeof
   );
 }
 
+/**
+ * On the ground: the bird hops along the ground (walk), jumps with a flip at the top, and a dashed
+ * arc off the cliff edge shows the glide back into flight.
+ */
+export function GroundArt({ label }: { label: string }) {
+  return (
+    <ArtFrame pose="-1.3s" label="A bird walking, jumping with a backflip, and gliding off a ledge">
+      <Svg>
+        <path d="M6 72 H104 L112 92" fill="none" stroke={FAINT} strokeWidth={1} />
+        <path d="M110 70 Q132 66 154 84" fill="none" stroke={CYAN} strokeDasharray="2 3" opacity={0.75} />
+        <path d="M30 70 Q52 30 74 70" fill="none" stroke={WARM} strokeDasharray="2 3" opacity={0.6} />
+        <g className="ascent-guide-walk">
+          <g className="ascent-guide-flipbird">
+            <BirdSide />
+          </g>
+        </g>
+        <Label x={12} y={14} anchor="start" fill={WARM}>
+          {label}
+        </Label>
+        <Label x={150} y={14} anchor="end" fill={CYAN}>
+          GLIDE
+        </Label>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
 /** One keycap. `press` animates it on a loop, starting `delay` into the cycle. */
 export function Keycap({
   children,

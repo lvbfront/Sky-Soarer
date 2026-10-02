@@ -42,6 +42,12 @@ export interface HandControlState {
   pitch: number;
   /** -1 (bank left) .. 1 (bank right), smoothed */
   roll: number;
+  /**
+   * On the ground or water: −1..1, walk (or paddle) forward (+) or back (−). Keyboard: W/S. Hand: the
+   * palm in the lower half of the box (the "dive" direction) walks forward, faster the lower it is.
+   * Not affected by the invert setting (it's not a pitch control).
+   */
+  walk: number;
   /** True while the hand is held in a closed fist / fingers folded into the palm (triggers boost + the barrel roll). */
   boost: boolean;
   /** One-shot pulse: true for exactly the frame a fast upward flick is detected. */
@@ -400,6 +406,7 @@ export class HandTracker {
         handDetected: false,
         pitch: 0,
         roll: 0,
+        walk: 0,
         boost: false,
         backflip: lost.backflip,
         brake: false,
@@ -515,6 +522,7 @@ export class HandTracker {
       handDetected: true,
       pitch: flick.pitch,
       roll,
+      walk: Math.max(0, -steeringPitch),
       boost: this.fistActive,
       backflip: flick.backflip,
       brake: brake.brake,

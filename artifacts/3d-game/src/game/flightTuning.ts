@@ -211,3 +211,53 @@ export const CAMERA_DISTANCE_SURFACE = 4.4;
 export const CAMERA_HEIGHT_SURFACE = 1.5;
 /** Flap rate during the takeoff's strong strokes (radians of flap phase per second). */
 export const TAKEOFF_FLAP_SPEED = 21;
+
+// ---- Ground locomotion (Part C) ----------------------------------------------------------------------
+//
+// The bird is ~1.7 m long in world units (meters), so a quick bird walk is ~2 m/s.
+
+/** Walking speed at full forward input, and backward (slow). */
+export const WALK_SPEED = 2;
+export const WALK_BACK_SPEED = 0.8;
+/** How fast walking speed changes (m/s²): a few steps to get going, a step or two to stop. */
+export const WALK_ACCEL = 7;
+/** Turning on the ground at full input (degrees per second), in place or curving while walking. */
+export const WALK_TURN_RATE_DEG = 90;
+/** The gait: steps per second at full walking speed (each leg swings once per two steps). */
+export const STEPS_PER_SECOND = 4.2;
+/** Steps can't climb more than this at once (m): a rock or ledge needs a jump. */
+export const MAX_STEP_UP = 0.35;
+/** A step down of more than this drops the bird (it hops down) rather than following the ground. */
+export const STEP_DOWN_FALL = 0.3;
+/** Walking off a drop of more than this (m) opens the wings into a glide: back to flying. The drop
+ * is measured LEDGE_PROBE ahead of the feet, so a slope steeper than ~60° counts as a ledge too
+ * (the ground mesh's triangles are 5–6 m wide, so a cliff is a steep slope, not a vertical step). */
+export const LEDGE_DROP = 2;
+export const LEDGE_PROBE = 1.2;
+/** Glide speed and descent when walking off a ledge into flight. */
+export const LEDGE_GLIDE_SPEED = 6;
+export const LEDGE_GLIDE_PITCH = -0.25;
+
+/** The jump: gravity (m/s²) and launch speed for an apex of ~1.7 m, with a flutter near the apex. */
+export const JUMP_GRAVITY = 11;
+export const JUMP_SPEED = 6.1;
+/** Near the apex (|vertical speed| below this) the wings flutter and gravity is halved. */
+export const JUMP_FLUTTER_SPEED = 1.6;
+/** The ground backflip: a slightly bigger jump with a full 360° pitch, at most once per cooldown. */
+export const GROUND_FLIP_SPEED = 6.6;
+export const GROUND_FLIP_COOLDOWN = 0.8;
+
+/** Floating: paddling speed at full input, backward, and the turn rate (degrees per second). */
+export const PADDLE_SPEED = 1;
+export const PADDLE_BACK_SPEED = 0.4;
+export const PADDLE_TURN_RATE_DEG = 60;
+/** Paddling ripples: one small pooled ring of droplets this often (seconds) while moving. */
+export const PADDLE_RIPPLE_INTERVAL = 0.4;
+
+/** The camera on the ground: after this long standing still it eases to a 3/4 side view. */
+export const CAMERA_IDLE_DELAY = 3;
+/** Where the idle camera ends up (degrees around from behind) and how fast it gets there (deg/s). */
+export const CAMERA_IDLE_ANGLE_DEG = 125;
+export const CAMERA_IDLE_ORBIT_RATE = 14;
+/** The camera never goes lower than this above the ground, water or a rock under it. */
+export const CAMERA_SURFACE_CLEARANCE = 0.6;

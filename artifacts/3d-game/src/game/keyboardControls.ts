@@ -53,6 +53,9 @@ export class KeyboardControls {
   private pitch = 0;
   private roll = 0;
   private backflipQueued = false;
+  // A Space press is reported for at least one emission, even if the key went down and up between
+  // two ticks (a quick tap at a low frame rate): a tap must always jump, take off from water or roll.
+  private boostTapQueued = false;
   private paused = false;
   private sensitivity = 1;
   // How long Space has been held (seconds): held TAKEOFF_KEY_HOLD while standing or floating takes off.
@@ -106,6 +109,7 @@ export class KeyboardControls {
     this.roll = 0;
     this.boostHeldFor = 0;
     this.backflipQueued = false;
+    this.boostTapQueued = false;
     this.lastTime = null;
     this.emit(true);
   };
@@ -115,6 +119,7 @@ export class KeyboardControls {
     // Stop the page from scrolling, and a focused HUD button from being "clicked" by Space.
     event.preventDefault();
     if (BACKFLIP_KEYS.has(event.code) && !event.repeat) this.backflipQueued = true;
+    if (BOOST_KEYS.has(event.code) && !event.repeat) this.boostTapQueued = true;
     this.held.add(event.code);
   };
 
@@ -149,13 +154,16 @@ export class KeyboardControls {
       handDetected: true,
       pitch: this.pitch,
       roll: this.roll,
-      boost: !this.paused && anyHeld(this.held, BOOST_KEYS),
+      // W/↑ walks forward, S/↓ back (on the ground; the engine ignores it in flight).
+      walk: this.pitch,
+      boost: !this.paused && (anyHeld(this.held, BOOST_KEYS) || this.boostTapQueued),
       backflip,
       brake: !this.paused && anyHeld(this.held, BRAKE_KEYS),
       takeoffHold: !this.paused && this.boostHeldFor >= TAKEOFF_KEY_HOLD,
       flickNearMiss: null,
       landmarks: null,
     };
+    this.boostTapQueued = false;
     const last = this.lastEmitted;
     const unchanged =
       last !== null &&

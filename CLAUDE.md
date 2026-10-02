@@ -44,7 +44,8 @@ How a session plays:
    - Move your palm inside the calibrated box to pitch and roll (keyboard: W/↑ climb, S/↓ dive, A/← and D/→ bank, with a smooth ramp). Roll banks the bird, and banking turns it in a coordinated turn: ~93°/s at cruise (a held key turns 180° in ~2.3 s), wider when boosting, tighter when braking or swimming (§6.14).
    - **Air brake:** hold **Shift**, or push your open palm toward the camera. The bird slows to half of cruise, sinks gently and turns much tighter (~145°/s; ~160°/s swimming). Boost cancels it.
    - **Steering settings** (sensitivity 0.5–2.0x, invert climb/dive) apply to **both** inputs, on the landing's last chapter and live in the pause menu (§6.14).
-   - **Landing:** keep the brake on low over flat ground, a rock top or the sea and the bird lands by itself (an LDG readout and a reticle on the surface show when you're in range). It stands (or floats, bobbing on the waves) until you **take off**: hold Space 0.4 s, or raise your palm into the top of your box for 0.5 s; on water a tap of Space or a fist starts a takeoff run (§6.15).
+   - **Landing:** keep the brake on low over flat ground, a rock top or the sea and the bird lands by itself (an LDG readout and a reticle on the surface show when you're in range). It stands (or floats, bobbing on the waves) until you **take off**: jump and jump again in the air, hold Space 0.4 s, or raise your palm into the top of your box for 0.5 s; on water a tap of Space or a fist starts a takeoff run (§6.15).
+   - **On the ground** the bird walks, turns, jumps and backflips (W/S, A/D, Space, F; or palm low, tilt, fist, flick). Walking off a ledge opens its wings into a glide; walking into the sea floats it, and it paddles back onto a beach (§6.16). The full controls table is in §6.16.
    - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll. Closing or opening the fist doesn't nudge the steering.
    - **Flick your hand up fast**, about half the height of your calibrated box in under 0.2 s (keyboard: **F**), for a 0.9 s backflip. The flick doesn't pitch the bird up. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
    - Both tricks are cosmetic only. They never change heading or momentum.
@@ -230,6 +231,7 @@ The game needs **no secrets, no backend and no database**.
 │               ├── landingSurface.ts # pure landing surfaces (ground as drawn, water, PerchPoint), footprint, landing envelope
 │               ├── landingCue.ts   # the touchdown reticle projected on the surface
 │               ├── takeoffGesture.ts # pure hand raise-and-hold takeoff detector
+│               ├── groundMotion.ts # pure GroundWalker: walking, turning, slope/step limits, jumps, ledges, beach ↔ water
 │               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
@@ -281,7 +283,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
                                                                  │ onResults
                                                                  ▼
                                    HandTracker.handleResults()  → HandControlState
-                                   {handDetected, pitch, roll, boost, backflip, flickNearMiss, landmarks}
+                                   {handDetected, pitch, roll, walk, boost, brake, takeoffHold, backflip,
+                                    flickNearMiss, landmarks}
             (keyboard mode: KeyboardControls rAF → the same HandControlState; handDetected always true)
                                                                  │ handleControlState (one stable callback in App)
             ┌────────────────────────────────────────────────────┼────────────────────────────┐
@@ -586,6 +589,8 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - moves the heading tape every frame (a strip of ticks from −120° to 480° slid under a center caret, so it never wraps)
   - writes HDG/SPD/ALT text about every 100 ms through refs, never React state
 
+  It also drives the **LDG** annunciator (§6.15) from `engine.getLandingCue()` (toggling `data-state`, so no React render), and the hint under the heading tape follows the bird's state (`birdMode` from `onModeChange`): flight, landing, standing (walk/jump/takeoff keys or gestures), floating. A **Brake** badge joins Boost / Barrel Roll / Backflip / Diving.
+
   These use the new `GameEngine` getters: `getHeadingDegrees()` (0° is the start direction and right turns increase it), `getAltitude()` (the bird's Y), and `getSpeed()` (×1.944 to show knots). The splash and underwater overlays are unchanged. The old warm boost vignette is replaced by a HUD effect: masked conic speed streaks (opacity plus a compositor-only transform animation), a faint warm rim, and frame brackets that tighten and turn warm. Badges snap on and off with no color transition.
 - **Takeoff.** `handleStartFlying` sets `launching` (which locks the calibration controls). It then awaits the engine chunk together with `playTakeoffLaunch()`: the panel lifts away, and the always-mounted pale veil (`takeoffVeilRef`, the landing intro's sky gradient, reading "Cleared for takeoff" and the bird, world and sky) fades to opaque. The landing scene is disposed and the engine built under the veil. Once `flightState` is `'flying'`, a layout effect fades the veil off the chase camera's swoop-in and staggers the `[data-flight-hud]` blocks in with `fromTo`. `clearProps` then removes GSAP's inline styles. Reduced motion uses plain crossfades.
 
@@ -597,14 +602,15 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Keys:**
   - W/↑ climb, S/↓ dive, A/← bank left, D/→ bank right.
   - Bank ramps toward ±1 at 5/s (0.2 s to full), returns at 6/s and reverses at 9/s; pitch keeps 2.8/s up (~0.36 s), 4/s back, 6/s reversing (`KEY_*` in `flightTuning.ts`). The steering sensitivity scales every ramp by √s (`setSensitivity`, live). The rates are frame-rate independent (`rampAxis`), and a rAF emits only when something changed.
-  - **Shift** (either) held = `brake`. No other binding uses Shift; the handler still ignores Ctrl/Alt/Meta combinations.
+  - **Shift** (either) held = `brake`. No other binding uses Shift; the handler still ignores Ctrl/Alt/Meta combinations. Windows may offer Sticky Keys after five Shift presses in a row (an OS prompt, not the game).
+  - On the ground W/S also arrive as `walk`, and Space held 0.4 s as `takeoffHold` (§6.16).
   - **Space** held = `boost`, so the engine's rising-edge barrel roll fires on each new press.
   - **F** = a one-shot `backflip` (key repeat ignored).
   - Handled keys `preventDefault` on keydown *and* keyup (Space activates a focused button on keyup), unless paused.
   - Window `blur` releases every key, and `setPaused` releases them and rests the axes at 0.
 - **Pause menu** (`PauseMenu`): dark glass in the HUD style, with a flight summary (and ring score) and **Resume** (autofocused, shows `Esc`) / **How to fly** / **Back to landing**, then a **Graphics** radio group (Auto / High / Low; with Auto it shows the level in use, "Auto · Low"). GSAP fades it in unless reduced motion.
 - **Guide** (`FlightGuide`):
-  - Hand mode has 5 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick), Air brake & tight turns (push your palm in). Keyboard mode has 5: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Air brake & tight turns (Shift), Pause (Esc / ?). Turn rates and brake speeds in the copy are computed from `flightModel.ts`.
+  - Hand mode has 7 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick), Air brake & tight turns (push your palm in), Land & take off, On the ground. Keyboard mode has 7: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Air brake & tight turns (Shift), Land & take off, On the ground, Pause (Esc / ?). Turn rates, brake speeds and ground numbers in the copy are computed from `flightModel.ts` / `flightTuning.ts`.
   - Each card has an illustration, the input, one precise tip, and a small mono line with the exact numbers.
   - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick and brake thresholds and the recommended `FLICK_TIP_RISE`/`FLICK_TIP_SECONDS`), `presets.ts` (speeds in knots, trick durations) and `flightTuning.ts` / `flightModel.ts` (ramps, turn rates, brake speed and sink). Change those constants, never the copy. The FlightHud "Flick higher" hint uses the same `FLICK_TIP_RISE` through `describeBoxFraction`.
   - The Backflip card: "Snap your open palm straight up about half the height of your calibrated box, in one quick motion of 0.2 s or less", with the spec "Needs ≥ 35% of your box within 250 ms, peaking > 3.5 box-heights/s · 1.2 s cooldown". Its art draws the calibrated box as a dashed rectangle, 54 units tall, so the 27-unit `ascent-guide-flick` travel reads as half of it. The Steer card says a corner is full deflection "at any sensitivity", and the Boost card says steering holds still while the fist closes.
@@ -646,6 +652,37 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **TAKEOFF** (1 s from the ground): a 0.12 s crouch, a jump (4.2 m/s up, 3 forward), 3–4 strong strokes with a sound each, legs tucking, then FLYING at ~7 m/s and a 22° climb that eases into cruise. From water: a 0.7 s run along the surface (pattering feet, small splashes) first. Inputs: keyboard **hold Space 0.4 s** (`takeoffHold` from `KeyboardControls`); hand **palm in the top 20% of the box for 0.5 s** (`RaiseHoldDetector`, tolerant of a < 0.25 s tracking dropout); floating, a **tap of Space or a fist**. Hand loss while standing or floating: it stays put and idles.
 - **Camera on the surface:** closer (4.4 behind, 1.5 up); pitch follows level.
 - **Integration:** Ring Challenge is unchanged (landing never scores; the next ring, the arrow and NEXT RING keep working while the bird is still: rings keep spawning ahead of its heading). Terrain streaming and the sky follow the bird in every state. Pause freezes every state (the machine isn't stepped), and Stop/Back work from all of them.
+
+### 6.16 Ground locomotion (`groundMotion.ts`, `birdState.ts`, GameEngine)
+- **Substates** (`BirdStateMachine.substate`, unit-tested): GROUNDED has IDLE, WALK, TURN, JUMP and GROUND_FLIP; FLOATING has IDLE and PADDLE. Transitions: the boost input's press → JUMP; pressed again while airborne from a JUMP → TAKEOFF from the air (`airStart`: no crouch, straight into strong strokes); the backflip input → GROUND_FLIP (at most once per `GROUND_FLIP_COOLDOWN` 0.8 s; not from a flip into a takeoff); `takeoffHold` → TAKEOFF from standing or mid-jump. What the walker reports drives the rest: `landed` → IDLE, `landed-water` → FLOATING, `landed-unstandable` and `ledge` → FLYING (event `glide`), `enter-water` → FLOATING, `exit-water` → GROUNDED. Floating: a boost press or `takeoffHold` → TAKEOFF from water; no jump or flip on water.
+- **`GroundWalker`** (pure, `groundMotion.test.ts`) moves a point over the `LandingSurfaces` (so over the ground *as drawn*): walk 2 m/s forward, 0.8 back (`WALK_ACCEL` 7 m/s²), turn 90°/s on the spot or while walking; paddle 1 m/s, 0.4 back, 60°/s. The steering sensitivity scales the turn rates (√s). It stops (no jitter, no clipping) at slopes over 30° or steps up over `MAX_STEP_UP` (0.35 m: jump onto rocks and ledges), hops down drops over 0.3 m, reports a **ledge** when the ground `LEDGE_PROBE` (1.2 m) ahead is more than `LEDGE_DROP` (2 m) below the feet (the mesh draws a cliff as a 5–6 m-wide steep triangle, so a drop is a slope over ~60°), and reports wading into water ≥ 0.3 m deep or paddling onto a beach shallow and gentle enough. Jumps: gravity 11, launch 6.1 m/s (apex ~1.8 m; the ground backflip 6.6 m/s), gravity halved near the apex while the wings flutter; in the air it can't move into ground above its feet; it lands on whatever is below (a ledge, a rock top, the sea).
+- **Engine:** `updateOnSurface` runs the walker for GROUNDED / FLOATING, copies its position and heading to the bird, and feeds its event to the state machine. Events: a jump or flip launches the walker (with a wing-stroke sound), a jump landing squashes softly (none under reduced motion) with a thump, a glide sets flying speed 6 m/s and a slight dive and lowers the flight floor to the bird (it relaxes back to 3.5 m), wading in splashes. Standing height (feet on the drawn ground, `settleOnSurface`) is skipped mid-jump, when the walker owns the height.
+- **Animation:** walking swings the legs alternately (`STEPS_PER_SECOND` 4.2 at full speed), bobs the head like a pigeon and sways the body (no bob or sway under reduced motion), leaning into a curve; turning on the spot takes small stepping hops; jumps open the wings halfway with a fast flutter at the apex and dangle the legs; the ground backflip sweeps 360° of pitch in 0.9 s with strong strokes; paddling kicks faster and leaves small rippling rings of droplets every 0.4 s (a third `WaterBurstEffect` style).
+- **Camera on the ground and water:** the surface chase camera (4.4 behind, 1.5 up, looking just past the bird) follows walking and turning with the same springs; after `CAMERA_IDLE_DELAY` (3 s) of standing or floating with no input it drifts at 14°/s to a 3/4 side view (125° round), and any input brings it back behind on a 0.35 s spring (no drift under reduced motion). It stays `CAMERA_SURFACE_CLEARANCE` (0.6) above whatever is drawn under it (ground, water, rock top).
+- **Hand input on the ground:** the tracker emits `walk` = the palm's offset below the box center (after the deadzone and expo), so a palm low in the box walks forward, faster the lower it is; tilting left/right turns. There is no backward walking by hand. The fist (boost) jumps; a second fist while airborne takes off; the upward flick is the ground backflip (the same detector and thresholds as in flight); raising the palm into the top of the box and holding 0.5 s takes off. A fast raise into the top can also count as a flick (a backflip): raise it steadily.
+- **Controls, both modes:**
+
+  | | Keyboard | Hand |
+  |---|---|---|
+  | **Air:** climb / dive | W/↑ · S/↓ (swapped by Invert) | palm up / down in the box (swapped by Invert) |
+  | bank and turn | A/← · D/→ | palm left / right |
+  | boost + barrel roll | hold Space (each press rolls) | close your fist |
+  | backflip | F | quick upward flick |
+  | air brake (and land, low) | hold Shift | push your open palm toward the camera |
+  | pause / guide | Esc / ? | Esc / ? (keyboard) |
+  | **Ground:** walk | W/↑ forward, S/↓ back (slow) | palm low in the box (forward only) |
+  | turn | A/D (on the spot or curving) | palm left / right |
+  | jump | tap Space | close your fist |
+  | take off | Space again in the air, or hold Space 0.4 s | fist again in the air, or palm in the top 20% for 0.5 s |
+  | backflip | F | quick upward flick |
+  | brake | — (Shift does nothing) | — |
+  | **Water (floating):** paddle | W forward, S back (slow) | palm low |
+  | turn | A/D | palm left / right |
+  | take off (run) | tap or hold Space | fist, or raise and hold |
+
+  Invert only swaps climb/dive in the air; walking and paddling keep W = forward and palm low = forward (inverting them would collide with the raise-and-hold takeoff).
+- **Keyboard taps are latched:** a Space press is reported for at least one emission (`boostTapQueued`), so a quick tap jumps, rolls or takes off from water even when the key goes down and up between two frames.
+- **Known limits (v1):** no landing on palm or tree tops, the seabed, or underwater; rock tops are perches but the bird can't walk up onto one (jump); creatures don't react to a standing bird; on the mountain map slopes rarely exceed 35°, so ledges (and glides off them) are mostly found on the steep island domes and tall rocks; no backward walking by hand; the ground is not slope-limited downhill below ~60° (it hops or glides); the walker samples the drawn ground at its center and footprint, so a very thin spike between samples could be stepped through.
 
 ## 7. Coding conventions and patterns
 
@@ -728,6 +765,7 @@ These come from code reading plus headless runs.
 2. ~~**Gestures that interfere with steering.**~~ Fixed: the fist steering guard, flick pitch suppression, calibration validation, and the sensitivity response curve (§6.3). Remaining edge: the fist guard's closed-fist offset is capped at 0.06 of the frame, so a hand with a much bigger knuckle shift would still nudge steering by the excess. The flick hold lets the first ~50 ms of a flick's climb through (≈ 0.02 of pitch at the bird).
 3. ~~**Reef items float mid-water.**~~ Fixed in the ocean overhaul: a streamed seabed, reef slopes under every island, and the reef scattered on the real ground height (§6.6). Remaining: reef items stand upright on slopes (not tilted to the ground normal), and the creatures' `Cruiser`s don't avoid islands (they're kept above the ground only).
 4. The skimming splash particles don't fade (the `PointsMaterial` issue in §6.9).
+31. **Landing, ground and hand gestures are verified headlessly and in unit tests only.** The brake gesture, the raise-and-hold takeoff and walking by hand have not been tried with a real webcam yet (see the PR checklist), nor in Safari.
 5. **Surface-level island pop.** A bird skimming *above* the water that flies into an island is still lifted to `height + 3.5` in one frame. Near the shore that's about 3.5 units. Only the underwater case was fixed.
 
 ### Robustness and UX
@@ -828,6 +866,8 @@ These come from code reading plus headless runs.
 - New steering or ground settings go **inside** `SteeringSettings` / the settings object (validated in `readSteering`), never under a new localStorage key (§12).
 - Anything the bird stands on must be read **as drawn**: ground through `meshGroundHeight` on the map's tile grid, water through `floatHeightAt` (the vertex-shader mirror), rocks through perches. If you change a tile's segment count, the water grid, the waves or the depth texture encoding, the landing surfaces follow only if they keep sharing those constants (`waterSurface.test.ts`, `landingSurface.test.ts`).
 - Standing and floating heights are set in `settleOnSurface`, **after** `ocean.animateWater` and `environment.update` for the frame, so they match what's rendered. Don't move them earlier.
+- The engine never knows the input type. Ground and takeoff controls arrive as semantic fields of `HandControlState` (`walk`, `brake`, `takeoffHold`) that each input computes its own way; a new input fills the same fields.
+- Ground and landing logic is split three ways on purpose: **when** (`birdState.ts`), **where it can move** (`groundMotion.ts`, `landingSurface.ts`) and **what it looks like** (the engine + `bird.ts` poses). Keep the first two pure and tested.
 - The ring guide arrow is modelled along **+Z** because `Object3D.lookAt` aims a non-camera object's +Z at the target. The target is the *next* ring (`RingManager.getNextRingPosition()`), never the nearest, and highlight colors live only in `NEXT_RING_HIGHLIGHTS`.
 - Don't move the `state.backflip` check below the `handDetected` guard in `applyControls`.
 - Don't re-throw from the per-frame `hands.send()` catch. Startup failures are different: `start()` surfaces them as `TrackingStartError` so the UI can show them.
@@ -873,7 +913,7 @@ The game is going public with privacy claims. This section is what the code guar
 
 **Network.** Every request is a same-origin GET. Hand mode: `/`, the entry JS + CSS, ~6 woff2 font files, `handControls-*.js`, `damping-*.js`, `GameEngine-*.js`, and from `/mediapipe/hands/`: `hands_solution_packed_assets_loader.js`, `hands_solution_simd_wasm_bin.js`, `hands.binarypb`, `hands_solution_packed_assets.data`, `hands_solution_simd_wasm_bin.wasm`, `hand_landmark_lite.tflite`. Keyboard mode: the same minus `handControls` and everything under `mediapipe/`. No analytics, tracking, ads, CDNs or third-party scripts.
 
-**Storage.** Only `localStorage`, all keys prefixed `bird-flight-` and listed in `STORED_DATA` (`src/game/storedData.ts`): `settings` (bird/map/sky/rings/input), `calibration` (5 points in 0..1 + a sensitivity), `best-score`, `guide-dismissed`, `quality`. No cookies, sessionStorage, IndexedDB, Cache Storage or service worker. The **Privacy** panel shows each key with its raw value; **Clear my data** (`clearStoredData`) removes every `bird-flight-*` key and App resets its in-memory copies (`handlePrivacyCleared`).
+**Storage.** Only `localStorage`, all keys prefixed `bird-flight-` and listed in `STORED_DATA` (`src/game/storedData.ts`): `settings` (bird/map/sky/rings/input, steering: sensitivity + invert), `calibration` (5 points in 0..1, a sensitivity and the palm's apparent size, one number), `best-score`, `guide-dismissed`, `quality`. No cookies, sessionStorage, IndexedDB, Cache Storage or service worker. The **Privacy** panel shows each key with its raw value; **Clear my data** (`clearStoredData`) removes every `bird-flight-*` key and App resets its in-memory copies (`handlePrivacyCleared`).
 
 **Camera lifecycle.**
 - Requested only from the **Begin pre-flight** / **Quick start** / **Recalibrate hand controls** click (hand mode). Keyboard mode never calls `getUserMedia`.

@@ -106,9 +106,11 @@ function contextHint(mode: BirdMode, keyboard: boolean, handDetected: boolean) {
     case 'TAKEOFF':
       return 'Taking off';
     case 'GROUNDED':
-      return keyboard ? 'Hold Space to take off' : 'Raise your palm high and hold to take off';
+      return keyboard
+        ? 'WASD walk · Space jump · Space×2 take off · F flip'
+        : 'Palm low walk · tilt turn · fist jump · fist×2 take off · flick flip · raise & hold take off';
     case 'FLOATING':
-      return keyboard ? 'Space take off' : 'Close your fist, or raise your palm and hold, to take off';
+      return keyboard ? 'W paddle · A/D turn · Space take off' : 'Palm low paddle · tilt turn · fist take off';
     default:
       return keyboard ? 'WASD steer · Space boost · Shift brake · F flip' : 'Tilt your palm to glide · push it in to brake';
   }

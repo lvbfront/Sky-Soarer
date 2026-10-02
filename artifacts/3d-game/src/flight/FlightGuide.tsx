@@ -24,13 +24,17 @@ import {
   TAKEOFF_KEY_HOLD,
   TAKEOFF_RAISE_HOLD,
   TAKEOFF_RAISE_ZONE,
+  WALK_SPEED,
+  WALK_TURN_RATE_DEG,
+  LEDGE_DROP,
+  GROUND_FLIP_COOLDOWN,
   KEY_PITCH_RAMP_UP,
   KEY_ROLL_RAMP_UP,
 } from '@/game/flightTuning';
 import { brakeSpeed, turnRate } from '@/game/flightModel';
 import type { ControlMode } from '@/game/settings';
 import { CornerBrackets } from '@/ui/hud';
-import { BackflipArt, BarrelRollArt, BoostArt, KeyFrame, Keycap, LandArt, PushArt, SteerArt, SteerKeysArt } from './guideArt';
+import { BackflipArt, BarrelRollArt, BoostArt, GroundArt, KeyFrame, Keycap, LandArt, PushArt, SteerArt, SteerKeysArt } from './guideArt';
 
 /** Where the guide was opened from, which decides its buttons. */
 export type GuideOrigin = 'preflight' | 'pause' | 'hud';
@@ -125,10 +129,20 @@ const HAND_MOVES: Move[] = [
     title: 'Land & take off',
     input: 'Brake low · raise and hold',
     art: <LandArt landLabel="PUSH IN" takeoffLabel="RAISE" />,
-    tip: `Keep the brake on (palm pushed in) low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. To take off, raise your palm into the top of your box and hold it there; on water, close your fist.`,
+    tip: `Keep the brake on (palm pushed in) low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. To take off, raise your palm into the top of your box and hold it there, or jump and jump again (a fist, twice); on water, close your fist.`,
     spec: `Lands within ${LANDING_MAX_AGL} m, braking, not diving, on slopes up to ${MAX_GROUND_SLOPE_DEG}° · takeoff: top ${percent(
       TAKEOFF_RAISE_ZONE,
     )} of the box for ${seconds(TAKEOFF_RAISE_HOLD)}`,
+  },
+  {
+    code: '07',
+    title: 'On the ground',
+    input: 'Palm low walks · fist jumps',
+    art: <GroundArt label="FIST" />,
+    tip: `Standing, your palm low in the box walks forward (lower is faster) and tilting turns. Close your fist to jump; close it again in the air to take off. A quick upward flick is a backflip. Walk off a ledge to glide away, or into the sea to float.`,
+    spec: `Walks ${WALK_SPEED.toFixed(1)} m/s · turns ${WALK_TURN_RATE_DEG}°/s · slopes ≤ ${MAX_GROUND_SLOPE_DEG}° · ledges > ${LEDGE_DROP} m glide · flip every ${seconds(
+      GROUND_FLIP_COOLDOWN,
+    )}`,
   },
 ];
 
@@ -190,13 +204,23 @@ const KEYBOARD_MOVES: Move[] = [
     title: 'Land & take off',
     input: 'Hold Shift low · hold Space',
     art: <LandArt landLabel="SHIFT" takeoffLabel="SPACE" />,
-    tip: `Hold Shift low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. Hold Space to take off; on water, a tap is enough.`,
+    tip: `Hold Shift low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. To take off, press Space twice (jump, then again in the air) or hold it; on water, a tap is enough.`,
     spec: `Lands within ${LANDING_MAX_AGL} m, braking, not diving, on slopes up to ${MAX_GROUND_SLOPE_DEG}° · hold Space ${seconds(
       TAKEOFF_KEY_HOLD,
     )} to take off`,
   },
   {
     code: '06',
+    title: 'On the ground',
+    input: 'WASD · Space · F',
+    art: <GroundArt label="SPACE" />,
+    tip: `Standing, W/S walk and A/D turn (on the spot, or curving as you walk). Space jumps; press it again in the air to take off. F is a backflip. Walk off a ledge to glide away, or into the sea to float and paddle.`,
+    spec: `Walks ${WALK_SPEED.toFixed(1)} m/s · turns ${WALK_TURN_RATE_DEG}°/s · slopes ≤ ${MAX_GROUND_SLOPE_DEG}° · ledges > ${LEDGE_DROP} m glide · flip every ${seconds(
+      GROUND_FLIP_COOLDOWN,
+    )}`,
+  },
+  {
+    code: '07',
     title: 'Pause',
     input: 'Esc, or ? for this guide',
     art: (

@@ -827,6 +827,31 @@ html {
   animation: ascent-guide-land 4.2s cubic-bezier(0.4, 0, 0.4, 1) infinite;
 }
 
+/* On the ground: walk along, jump (flipping at the top), walk on to the edge and glide off. */
+@keyframes ascent-guide-walk {
+  0% { transform: translate(12px, 66px); }
+  14% { transform: translate(30px, 66px); }
+  26% { transform: translate(52px, 36px); }
+  38% { transform: translate(74px, 66px); }
+  60% { transform: translate(106px, 66px); }
+  80% { transform: translate(130px, 70px); opacity: 1; }
+  92%, 100% { transform: translate(150px, 82px); opacity: 0; }
+}
+
+@keyframes ascent-guide-flipbird {
+  0%, 16% { transform: rotate(0deg); }
+  36%, 100% { transform: rotate(-360deg); }
+}
+
+.ascent-guide-walk {
+  animation: ascent-guide-walk 4.6s linear infinite;
+}
+
+.ascent-guide-flipbird {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-flipbird 4.6s ease-in-out infinite;
+}
+
 /* Keycaps: a key lights and sinks when "pressed". --press-delay staggers keys in a sequence. */
 .ascent-key {
   display: inline-flex;

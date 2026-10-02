@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { BirdStateMachine, flareDuration, takeoffDuration, type BirdEvent, type BirdStepInput } from './birdState';
-import { FLARE_MAX_DURATION, FLARE_MIN_DURATION, TAKEOFF_DURATION, TOUCHDOWN_DURATION } from './flightTuning';
+import {
+  FLARE_MAX_DURATION,
+  FLARE_MIN_DURATION,
+  GROUND_FLIP_COOLDOWN,
+  TAKEOFF_DURATION,
+  TOUCHDOWN_DURATION,
+} from './flightTuning';
 
 const DT = 1 / 60;
 const idle = (): BirdStepInput => ({
@@ -11,6 +17,10 @@ const idle = (): BirdStepInput => ({
   approachOk: true,
   agl: 3,
   surface: 'ground',
+  walk: 0,
+  turn: 0,
+  backflip: false,
+  ground: null,
 });
 
 /** Steps for `seconds` with `input`, collecting events. */
@@ -85,10 +95,11 @@ describe('bird state machine', () => {
     expect(takeoffDuration('water')).toBeGreaterThan(takeoffDuration('ground'));
   });
 
-  it('on the ground a boost tap alone does not take off (Part C makes it a jump)', () => {
+  it('on the ground a boost tap is a jump, not a takeoff', () => {
     const machine = landed();
-    expect(run(machine, 0.2, { boost: true })).toEqual([]);
+    expect(run(machine, DT, { boost: true })).toEqual(['jump']);
     expect(machine.mode).toBe('GROUNDED');
+    expect(machine.substate).toBe('JUMP');
   });
 
   it('blocks the flying tricks and boost in every non-FLYING state', () => {
@@ -109,5 +120,104 @@ describe('bird state machine', () => {
     const before = { mode: machine.mode, time: machine.time };
     for (let i = 0; i < 100; i += 1) expect(machine.step(0, { ...idle(), takeoffHold: true })).toBeNull();
     expect({ mode: machine.mode, time: machine.time }).toEqual(before);
+  });
+
+  describe('ground substates (Part C)', () => {
+    it('IDLE / WALK / TURN follow the walk and turn inputs', () => {
+      const machine = landed();
+      expect(machine.substate).toBe('IDLE');
+      run(machine, DT, { walk: 0.8 });
+      expect(machine.substate).toBe('WALK');
+      run(machine, DT, { walk: -0.5, turn: 1 });
+      expect(machine.substate).toBe('WALK');
+      run(machine, DT, { turn: -1 });
+      expect(machine.substate).toBe('TURN');
+      run(machine, DT, { walk: 0.02, turn: 0.03 });
+      expect(machine.substate).toBe('IDLE');
+    });
+
+    it('jump → lands back on its feet', () => {
+      const machine = landed();
+      run(machine, DT, { boost: true });
+      expect(run(machine, 0.5, { boost: false })).toEqual([]);
+      expect(machine.substate).toBe('JUMP');
+      expect(machine.isJumping()).toBe(true);
+      expect(run(machine, DT, { ground: 'landed' })).toEqual(['jump-landed']);
+      expect(machine.substate).toBe('IDLE');
+    });
+
+    it('jump → jump again while airborne → TAKEOFF from the air (double jump)', () => {
+      const machine = landed();
+      run(machine, DT, { boost: true });
+      run(machine, 0.2, { boost: false });
+      expect(run(machine, DT, { boost: true })).toEqual(['takeoff']);
+      expect(machine.mode).toBe('TAKEOFF');
+      expect(machine.airStart).toBe(true);
+      expect(machine.surface).toBe('ground');
+    });
+
+    it('holding the jump input 0.4 s (takeoffHold) takes off, from standing or mid-jump', () => {
+      const standing = landed();
+      expect(run(standing, DT, { takeoffHold: true })).toEqual(['takeoff']);
+      expect(standing.airStart).toBe(false);
+      const jumping = landed();
+      run(jumping, DT, { boost: true });
+      expect(run(jumping, DT, { boost: true, takeoffHold: true })).toEqual(['takeoff']);
+      expect(jumping.airStart).toBe(true);
+    });
+
+    it('a jump that comes down somewhere unstandable flaps off into flight; into water floats', () => {
+      const a = landed();
+      run(a, DT, { boost: true });
+      expect(run(a, DT, { ground: 'landed-unstandable' })).toEqual(['glide']);
+      expect(a.mode).toBe('FLYING');
+      const b = landed();
+      run(b, DT, { boost: true });
+      expect(run(b, DT, { ground: 'landed-water' })).toEqual(['enter-water']);
+      expect(b.mode).toBe('FLOATING');
+    });
+
+    it('ledge → glide into FLYING', () => {
+      const machine = landed();
+      run(machine, 0.3, { walk: 1 });
+      expect(run(machine, DT, { walk: 1, ground: 'ledge' })).toEqual(['glide']);
+      expect(machine.mode).toBe('FLYING');
+      expect(machine.substate).toBeNull();
+    });
+
+    it('beach ↔ water: wading in floats, paddling out stands', () => {
+      const machine = landed();
+      expect(run(machine, DT, { walk: 1, ground: 'enter-water' })).toEqual(['enter-water']);
+      expect(machine.mode).toBe('FLOATING');
+      run(machine, DT, { walk: 1 });
+      expect(machine.substate).toBe('PADDLE');
+      expect(run(machine, DT, { walk: 1, ground: 'exit-water' })).toEqual(['exit-water']);
+      expect(machine.mode).toBe('GROUNDED');
+    });
+
+    it('ground backflip, at most once per cooldown; no jump or flip on water', () => {
+      const machine = landed();
+      expect(run(machine, DT, { backflip: true })).toEqual(['ground-flip']);
+      expect(machine.substate).toBe('GROUND_FLIP');
+      run(machine, DT, { ground: 'landed' });
+      // Too soon after the last one.
+      expect(run(machine, DT, { backflip: true })).toEqual([]);
+      run(machine, GROUND_FLIP_COOLDOWN);
+      expect(run(machine, DT, { backflip: true })).toEqual(['ground-flip']);
+      // A flip can't be chained into a takeoff by pressing jump mid-flip.
+      expect(run(machine, DT, { boost: true })).toEqual([]);
+      const floating = landed('water');
+      run(floating, DT, { backflip: true });
+      expect(floating.mode).toBe('FLOATING');
+      expect(floating.substate).not.toBe('GROUND_FLIP');
+    });
+
+    it('flying tricks stay blocked in every ground substate', () => {
+      const machine = landed();
+      for (const input of [{ walk: 1 }, { turn: 1 }, { boost: true }, { backflip: true }] as const) {
+        run(machine, DT, input);
+        expect(machine.allowsFlightTricks()).toBe(false);
+      }
+    });
   });
 });
