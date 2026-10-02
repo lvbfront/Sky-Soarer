@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Bird, type BirdType } from './bird';
+import { Bird, createBirdPose, type BirdType } from './bird';
 import { TerrainManager } from './terrain';
 import { OceanManager } from './ocean';
 import { OceanLife } from './oceanLife';
@@ -15,6 +15,20 @@ import { damp, perFrameRate } from './damping';
 import { disposeObjectTree } from './dispose';
 import { WATER_LEVEL } from './oceanField';
 import { AutoQualityMonitor, QUALITY_PROFILES, levelFor, type QualityLevel, type QualitySetting } from './quality';
+import { BirdStateMachine, type BirdEvent, type BirdMode, type BirdStepInput } from './birdState';
+import {
+  createFootprint,
+  evaluateLandingEnvelope,
+  heightFieldSurfaces,
+  isLandable,
+  sampleFootprint,
+  type EnvelopeFailure,
+  type LandingEnvelope,
+  type LandingEnvelopeInput,
+  type LandingSurfaces,
+  type SurfaceKind,
+} from './landingSurface';
+import { LandingCue } from './landingCue';
 import type { HandControlState } from './handControls';
 import type { SteeringSettings } from './settings';
 import {
@@ -33,6 +47,25 @@ import {
 import {
   AIR_BRAKE_SINK,
   BODY_YAW_LEAD_AIR,
+  FLARE_MIN_DURATION,
+  FLARE_PITCH_DEG,
+  GO_AROUND_CLIMB,
+  GO_AROUND_DURATION,
+  LANDING_CUE_AGL,
+  MIN_FLYING_SPEED,
+  SURFACE_ALIGN,
+  TAKEOFF_CLIMB_DEG,
+  TAKEOFF_CROUCH,
+  TAKEOFF_EXIT_SPEED,
+  TAKEOFF_FLAP_SPEED,
+  TAKEOFF_JUMP_FORWARD,
+  TAKEOFF_JUMP_UP,
+  TOUCHDOWN_DURATION,
+  TOUCHDOWN_SPEED,
+  TURN_MIN_SPEED,
+  WATER_TAKEOFF_RUN,
+  WATER_TAKEOFF_RUN_SPEED,
+  WING_FOLD_DURATION,
   BODY_YAW_LEAD_WATER,
   BODY_YAW_MAX_DEG,
   BRAKE_BLEND_RATE,
@@ -40,7 +73,9 @@ import {
   BRAKE_WIND_DIP,
   CAMERA_DISTANCE,
   CAMERA_DISTANCE_RESPONSE,
+  CAMERA_DISTANCE_SURFACE,
   CAMERA_DISTANCE_WATER,
+  CAMERA_HEIGHT_SURFACE,
   CAMERA_GROUND_CLEARANCE,
   CAMERA_HEIGHT,
   CAMERA_HEIGHT_WATER,
@@ -103,7 +138,40 @@ export interface GameEngineOptions {
   onWaterTransition?: (state: 'submerged' | 'surfaced') => void;
   /** Auto quality changed the rendered level (it only ever drops, to 'low'). */
   onQualityChange?: (level: QualityLevel) => void;
+  /** The bird changed state (landing, standing, floating, taking off, flying). */
+  onModeChange?: (mode: BirdMode) => void;
 }
+
+/** What the HUD's LDG readout shows (one reused object). */
+export interface LandingCueInfo {
+  visible: boolean;
+  /** Height of the feet above the surface below. */
+  agl: number;
+  /** Every landing condition holds (or the landing is under way). */
+  ready: boolean;
+  /** The first condition that doesn't hold, e.g. 'not-braking'. */
+  failure: EnvelopeFailure | null;
+}
+
+// ---- Landing, standing, floating (Part B; the tunable numbers are in flightTuning.ts) ----------
+// A floating bird's origin rides this far above the drawn water surface (the body sits in it).
+const FLOAT_BODY_LIFT = 0.18;
+// The waves under a floating bird are probed this far ahead/behind/aside to pitch and roll it, and
+// it follows that slope by this fraction.
+const FLOAT_PROBE = 0.6;
+const FLOAT_ALIGN = 0.85;
+// Standing posture: nose a little up.
+const STAND_PITCH_DEG = 8;
+// On the ocean map, dry ground below this height is beach (sand puffs, a softer thump).
+const BEACH_TOP = 1.4;
+const DUST_COLOR = new THREE.Color('#d8c49a');
+const SAND_COLOR = new THREE.Color('#f2e2b6');
+const GRASS_DUST_COLOR = new THREE.Color('#cfd8a6');
+
+const smoothstep01 = (x: number) => {
+  const t = x <= 0 ? 0 : x >= 1 ? 1 : x;
+  return t * t * (3 - 2 * t);
+};
 
 // Every smoothing rate below is per second, applied with damp(rate, dt) so the feel is the same at
 // any frame rate. Each is written as the per-frame factor it replaced, at the 60 FPS it was tuned at.
@@ -152,6 +220,10 @@ const GLIDE_FLAP_MULTIPLIER = 0.55;
 // OceanManager's ground), kept this far below the bird. Over solid ground (terrain map, or an
 // island on the ocean map) the old hard floor above the surface is kept unchanged.
 const SEABED_CLEARANCE = 1.2;
+// Over solid ground the flying bird stays this far above it…
+const FLIGHT_FLOOR_CLEARANCE = 3.5;
+// …except right after leaving the ground, when the floor starts at the bird and eases up (per second).
+const FLOOR_RELAX_RATE = 1.2;
 // Small hysteresis band around the water surface so skimming exactly at sea level doesn't
 // rapidly flicker between airborne/underwater state.
 const UNDERWATER_HYSTERESIS = 0.4;
@@ -258,8 +330,62 @@ export class GameEngine {
   private cameraDistance = createSpring(CAMERA_START_DISTANCE);
   private cameraHeight = createSpring(CAMERA_START_HEIGHT);
   private cameraFovKick = 0;
-  // Diagnostics for the ?debug=flight overlay: the last visual bank.
+  // The last visual bank (the barrel roll starts from it; the debug overlay shows it).
   private lastVisualBank = 0;
+
+  // Landing, standing, floating and takeoff (Part B).
+  private state = new BirdStateMachine();
+  private surfaces: LandingSurfaces;
+  private footprint = createFootprint();
+  private envelope: LandingEnvelope = { ok: false, landable: false, failure: null };
+  private envelopeInput: LandingEnvelopeInput;
+  private stateInput: BirdStepInput = {
+    brake: false,
+    boost: false,
+    takeoffHold: false,
+    envelopeOk: false,
+    approachOk: true,
+    agl: 0,
+    surface: 'ground',
+  };
+  private landingCue: LandingCue;
+  private landingCueInfo: LandingCueInfo = { visible: false, agl: 0, ready: false, failure: null };
+  private pose = createBirdPose();
+  private dustBurst: WaterBurstEffect;
+  private boostInput = false;
+  // Set when flight begins with the boost input still held (from a hold-to-take-off): no boost
+  // until it's released.
+  private boostSuppressed = false;
+  private takeoffHold = false;
+  // Feet above the surface under the bird (the envelope's AGL).
+  private agl = 0;
+  private surfaceY = 0;
+  private goAroundTime = 0;
+  private floorClearance = FLIGHT_FLOOR_CLEARANCE;
+  private flareStartAgl = 0;
+  private flareStartSpeed = 0;
+  private flareWhooshed = false;
+  private takeoffLaunched = false;
+  private takeoffVelocityY = 0;
+  private takeoffFlapPhase = 0;
+  private splashClock = 0;
+  private readonly takeoffForward = new THREE.Vector3();
+  private readonly touchdownPoint = new THREE.Vector3();
+  // Attitude while landing, standing, floating and taking off (radians), and the surface tilt.
+  private visualPitch = 0;
+  private visualRoll = 0;
+  private surfacePitch = 0;
+  private surfaceRoll = 0;
+  private cameraPitchTarget = 0;
+  // Idle animation timers.
+  private idleClock = 0;
+  private headTimer = 0;
+  private headTarget = 0;
+  private headYaw = 0;
+  private ruffleTimer = 6;
+  private tailTimer = 3;
+  // Engine clock for animation (seconds of unpaused simulation).
+  private time = 0;
 
   // Scratch vectors, reused every frame (the hot loop allocates nothing).
   private readonly forward = new THREE.Vector3();
@@ -278,6 +404,7 @@ export class GameEngine {
     this.options = options;
     this.steering = options.steering ?? { sensitivity: 1, invertPitch: false };
     this.reducedMotion = options.reducedMotion ?? false;
+    this.state.reducedMotion = this.reducedMotion;
     const look = WEATHER_LOOKS[options.weather];
     this.look = look;
     this.oceanLook = OCEAN_LOOKS[options.weather];
@@ -356,6 +483,44 @@ export class GameEngine {
     this.bird = new Bird(options.birdType);
     this.bird.group.position.set(0, 26, 0);
     this.scene.add(this.bird.group);
+
+    // What the bird can land and stand on: the ground as drawn (its tile grid's triangles), plus on
+    // the ocean map the water surface as drawn and the rock tops.
+    const ocean = this.ocean;
+    const terrain = this.environment;
+    this.surfaces = ocean
+      ? heightFieldSurfaces({
+          ground: (x, z) => ocean.groundHeightAt(x, z),
+          gridSpacing: ocean.groundGridSpacing,
+          water: (x, z) => ocean.floatHeightAt(x, z),
+          perches: (x, z) => ocean.perchesNear(x, z),
+        })
+      : heightFieldSurfaces({
+          ground: (x, z) => terrain.heightAtWorld(x, z),
+          gridSpacing: (terrain as TerrainManager).groundGridSpacing,
+        });
+    this.envelopeInput = {
+      braking: false,
+      underwater: false,
+      trick: false,
+      speed: BASE_SPEED,
+      brakeSpeed: BASE_SPEED,
+      pathAngle: 0,
+      agl: Infinity,
+      footprint: this.footprint,
+    };
+    this.landingCue = new LandingCue(this.scene);
+    this.dustBurst = new WaterBurstEffect(this.scene, {
+      color: '#d8c49a',
+      count: 22,
+      lifetime: 0.9,
+      gravity: -2.5,
+      speedMin: 1.2,
+      speedMax: 3,
+      upward: 0.35,
+      size: 0.9,
+      additive: false,
+    });
 
     this.environment.update(this.bird.group.position);
 
@@ -611,6 +776,7 @@ export class GameEngine {
 
   setReducedMotion(reducedMotion: boolean) {
     this.reducedMotion = reducedMotion;
+    this.state.reducedMotion = reducedMotion;
   }
 
   /** Called by the active input (hand tracker or keyboard) whenever a new control reading is available. */
@@ -618,32 +784,41 @@ export class GameEngine {
     // Paused: input must not steer, boost or start a trick behind the pause menu. The next
     // reading after resuming sets the targets again.
     if (this.paused) return;
+    const flying = this.state.allowsFlightTricks();
 
     // The backflip gesture's "hand left frame" fallback reports handDetected: false (the
     // flick often carries the hand out of the webcam view), so this check must run before
-    // the guard below or that fallback path would silently do nothing.
-    if (state.backflip && this.flipProgress === null && this.backflipProgress === null) {
+    // the guard below or that fallback path would silently do nothing. Flying only: on the
+    // ground and on water the flying tricks are blocked.
+    if (flying && state.backflip && this.flipProgress === null && this.backflipProgress === null) {
       this.backflipProgress = 0;
       this.backflipStartPitch = this.pitchSpring.value * maxPitchAngle(this.steering.sensitivity);
       this.options.onBackflip?.();
     }
 
     // Hand lost: ease back to level flight at cruise speed instead of latching the last steering,
-    // boost and brake input (the pitch/bank ease comes from their springs in `update`).
+    // boost and brake input (the pitch/bank ease comes from their springs in `update`). Standing or
+    // floating, the bird simply stays put and idles.
     if (!state.handDetected) {
       this.targetPitch = 0;
       this.targetRoll = 0;
+      this.boostInput = false;
       this.boosting = false;
       this.brakeInput = false;
+      this.takeoffHold = false;
       return;
     }
 
     this.targetPitch = this.steering.invertPitch ? -state.pitch : state.pitch;
     this.targetRoll = state.roll;
     this.brakeInput = state.brake;
+    this.takeoffHold = state.takeoffHold;
+    this.boostInput = state.boost;
+    // A boost input still held from a hold-to-take-off doesn't boost (or roll) until it's let go.
+    if (!state.boost) this.boostSuppressed = false;
 
     const wasBoosting = this.boosting;
-    this.boosting = state.boost;
+    this.boosting = flying && state.boost && !this.boostSuppressed;
 
     // The barrel roll fires automatically the instant a fist closes (boost starts), instead
     // of needing a separate gesture — mutually exclusive with an in-progress backflip so the
@@ -656,13 +831,86 @@ export class GameEngine {
   }
 
   private update(dt: number) {
+    this.time += dt;
+    // The pitch input, smoothed by a critically damped spring (no overshoot). The bank's spring
+    // lives in the turn state (stepTurn).
+    stepSpring(this.pitchSpring, this.flightPitchTarget(dt), PITCH_OMEGA, dt, true);
+
+    const forward = this.state.isFlying() ? this.updateFlight(dt) : this.updateOnSurface(dt);
+    const bird = this.bird.group;
+
+    this.ocean?.animateWater(dt);
+    this.environment.update(bird.position);
+    // Standing and floating heights read the surface as drawn this frame (the water's uTime has
+    // just advanced and its mesh has just followed the bird), so the bird never sinks into or
+    // hovers over it.
+    if (!this.state.isFlying()) this.settleOnSurface();
+
+    if (!this.underwater) this.clouds.update(dt, bird.position, forward);
+    this.underwaterEnv?.update(dt, bird.position, forward);
+    if (!this.underwater) this.oceanLife?.update(dt, bird.position, forward);
+
+    if (this.rings) {
+      const collectedAt = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
+      if (collectedAt) {
+        this.score += 1;
+        if (this.state.isFlying()) this.speedPulse = RING_SPEED_PULSE;
+        this.sfx.playChime();
+        this.ringBurst?.trigger(collectedAt);
+        this.options.onScoreChange?.(this.score);
+      }
+      this.ringGuide?.update(dt, bird.position, forward, this.rings.getNextRingPosition());
+    }
+    this.ringBurst?.update(dt);
+    this.waterBurst?.update(dt);
+    this.dustBurst.update(dt);
+
+    if (this.splash && this.ocean) {
+      // Skimming spray is for flying low over the waves, not for a bird landing or afloat.
+      const skimming = this.state.isFlying() && this.ocean.isOverWater(bird.position.x, bird.position.z);
+      const waterSurfaceY = this.ocean.waterHeightAt(bird.position.x, bird.position.z);
+      this.splash.update(dt, bird.position, forward, waterSurfaceY, skimming);
+    }
+
+    this.updateLandingCue();
+    this.updateCamera(dt, this.state.isFlying() ? this.cameraPitchTarget : 0, this.lastVisualBank);
+
+    // Keep the sun's shadow frustum centered near the bird as it travels the endless map.
+    this.sun.position.copy(bird.position).add(SUN_OFFSET);
+    this.sun.target.position.copy(bird.position);
+    this.sun.target.updateMatrixWorld();
+
+    // The sky backdrop (gradient dome, distant clouds, starfield) follows the bird on XZ so the
+    // endless world never flies out of it.
+    this.sky.position.set(bird.position.x, 0, bird.position.z);
+    this.skyClouds.position.set(bird.position.x, 0, bird.position.z);
+    if (this.starfield) {
+      this.starfield.position.set(bird.position.x, 0, bird.position.z);
+    }
+
+    if (this.ocean) this.updateAtmosphere(dt);
+
+    // The wind follows the airspeed (a quiet floor when slow) and dips a little under the brake.
+    const baseSpeed = this.underwater ? UNDERWATER_BASE_SPEED : BASE_SPEED;
+    const boostSpeed = this.underwater ? UNDERWATER_BOOST_SPEED : BOOST_SPEED;
+    const speedRatio = Math.max(-0.15, (this.speed - baseSpeed) / (boostSpeed - baseSpeed));
+    this.wind.setIntensity((0.3 + speedRatio) * (1 - BRAKE_WIND_DIP * this.brakeBlend));
+  }
+
+  /** The pitch the flight spring chases: the input, or a gentle climb right after a go-around. */
+  private flightPitchTarget(dt: number) {
+    if (this.goAroundTime > 0) {
+      this.goAroundTime = Math.max(0, this.goAroundTime - dt);
+      // The player's own pitch input wins over the automatic climb.
+      if (Math.abs(this.targetPitch) < 0.1) return GO_AROUND_CLIMB;
+    }
+    return this.state.isFlying() ? this.targetPitch : 0;
+  }
+
+  /** FLYING: the flight model (A), the brake, and the landing envelope check. Returns `forward`. */
+  private updateFlight(dt: number) {
     const sensitivity = this.steering.sensitivity;
     const medium: Medium = this.underwater ? 'water' : 'air';
-
-    // The inputs, smoothed by critically damped springs: the bank responds in ~0.15 s and rolls
-    // out to level without overshoot; pitch a little softer.
-    stepSpring(this.pitchSpring, this.targetPitch, PITCH_OMEGA, dt, true);
-    const bankInput = this.turn.bank.value;
 
     // The air brake (boost cancels it).
     const braking = this.brakeInput && !this.boosting;
@@ -675,10 +923,11 @@ export class GameEngine {
     // them separate is what makes the barrel roll and backflip purely cosmetic instead of
     // corrupting the actual momentum/direction (see project memory on this pattern).
     const steeringPitchAngle = this.pitchSpring.value * maxPitchAngle(sensitivity);
+    this.cameraPitchTarget = steeringPitchAngle;
     let visualPitchAngle = steeringPitchAngle;
 
     // Visual bank: up to ~60° flying, ~40° swimming (the body yaws into the turn instead).
-    const bankAngle = visualBank(bankInput, medium, sensitivity);
+    const bankAngle = visualBank(this.turn.bank.value, medium, sensitivity);
     this.lastVisualBank = bankAngle;
     let visualRollAngle = bankAngle;
 
@@ -718,8 +967,8 @@ export class GameEngine {
 
     // Turning: a coordinated turn (rate ∝ tan(bank), falling with speed; see flightModel.ts), eased
     // in and out with a capped yaw acceleration. The heading is locked while a barrel roll is in
-    // progress, so boosting always continues straight ahead.
-    // (headingYaw grows to the left: a right turn decreases it.)
+    // progress, so boosting always continues straight ahead. (headingYaw grows to the left: a right
+    // turn decreases it.)
     const yawRate = stepTurn(this.turn, this.targetRoll, this.speed, medium, braking, sensitivity, dt, this.flipProgress !== null);
     this.headingYaw -= yawRate * dt;
 
@@ -766,31 +1015,15 @@ export class GameEngine {
       const floor = this.ocean.groundHeightAt(bird.position.x, bird.position.z) + SEABED_CLEARANCE;
       if (bird.position.y < floor) bird.position.y = floor;
     } else {
-      const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + 3.5;
+      // Right after a takeoff or a go-around the bird is lower than the usual floor: the floor eases
+      // back up to it instead of snapping the bird up.
+      this.floorClearance += (FLIGHT_FLOOR_CLEARANCE - this.floorClearance) * damp(FLOOR_RELAX_RATE, dt);
+      const minAltitude = this.environment.heightAtWorld(bird.position.x, bird.position.z) + this.floorClearance;
       if (bird.position.y < minAltitude) bird.position.y = minAltitude;
     }
     if (bird.position.y > 140) bird.position.y = 140;
 
-    // Underwater state, recomputed from the bird's post-movement position, with a small
-    // hysteresis band around the calm water level so skimming the waves doesn't flicker.
-    let targetUnderwater = false;
-    if (overWater) {
-      const depthBelowSurface = WATER_LEVEL - bird.position.y;
-      const threshold = this.underwater ? -UNDERWATER_HYSTERESIS : UNDERWATER_HYSTERESIS;
-      targetUnderwater = depthBelowSurface > threshold;
-    }
-    if (targetUnderwater !== this.underwater) {
-      this.underwater = targetUnderwater;
-      this.setUnderwaterWorld(this.underwater);
-      if (this.underwater) {
-        this.sfx.playSplash('dive');
-        this.options.onWaterTransition?.('submerged');
-      } else {
-        this.waterBurst?.trigger(bird.position);
-        this.sfx.playSplash('surface');
-        this.options.onWaterTransition?.('surfaced');
-      }
-    }
+    this.updateUnderwater(overWater);
 
     // The bird mesh's beak/head faces local +Z, which is the same axis `forward` above is
     // built from — so setting yaw to headingYaw directly (no extra 180deg offset) makes the
@@ -812,53 +1045,446 @@ export class GameEngine {
       flapSpeed *= GLIDE_FLAP_MULTIPLIER;
     }
     flapSpeed = THREE.MathUtils.clamp(flapSpeed, MIN_FLAP_SPEED, MAX_FLAP_SPEED);
-    this.bird.update(dt, flapSpeed, this.underwater, this.brakeBlend);
+    this.resetPose();
+    this.pose.brake = this.brakeBlend;
+    this.bird.update(dt, flapSpeed, this.underwater, this.pose);
 
-    this.ocean?.animateWater(dt);
-    this.environment.update(bird.position);
-    if (!this.underwater) this.clouds.update(dt, bird.position, forward);
-    this.underwaterEnv?.update(dt, bird.position, forward);
-    if (!this.underwater) this.oceanLife?.update(dt, bird.position, forward);
+    // Landing: intent (the brake) + a safe envelope, checked every frame while flying.
+    this.measureSurfaceBelow();
+    const env = this.envelopeInput;
+    env.braking = braking;
+    env.underwater = this.underwater;
+    env.trick = this.flipProgress !== null || this.backflipProgress !== null;
+    env.speed = this.speed;
+    env.brakeSpeed = brakeSpeed('air', BASE_SPEED);
+    env.pathAngle = Math.atan2(forward.y * this.speed - AIR_BRAKE_SINK * this.brakeBlend, Math.hypot(forward.x, forward.z) * this.speed);
+    env.agl = this.agl;
+    evaluateLandingEnvelope(env, this.envelope);
+    this.stepState(dt);
+    return forward;
+  }
 
-    if (this.rings) {
-      const collectedAt = this.rings.update(dt, bird.position, forward, (x, z) => this.environment.heightAtWorld(x, z));
-      if (collectedAt) {
-        this.score += 1;
-        this.speedPulse = RING_SPEED_PULSE;
-        this.sfx.playChime();
-        this.ringBurst?.trigger(collectedAt);
-        this.options.onScoreChange?.(this.score);
+  /** Samples the surface footprint under the bird and its feet's height above it. */
+  private measureSurfaceBelow() {
+    const p = this.bird.group.position;
+    sampleFootprint(this.surfaces, p.x, p.z, this.footprint);
+    this.agl = p.y - this.bird.standHeight - this.footprint.center.height;
+  }
+
+  /** Runs the state machine one step and reacts to the transition it reports. */
+  private stepState(dt: number) {
+    const input = this.stateInput;
+    input.brake = this.brakeInput && !this.boostInput;
+    input.boost = this.boostInput;
+    input.takeoffHold = this.takeoffHold;
+    input.envelopeOk = this.envelope.ok;
+    input.approachOk = this.approachOk();
+    input.agl = Math.max(0, this.agl);
+    input.surface = this.footprint.center.kind;
+    const event = this.state.step(dt, input);
+    if (event) this.onStateEvent(event);
+  }
+
+  /** FLARE: still braking, above water, over landable surface. Otherwise: go around. */
+  private approachOk() {
+    if (this.state.mode !== 'FLARE') return true;
+    return this.brakeInput && !this.boostInput && !this.underwater && isLandable(this.footprint);
+  }
+
+  private onStateEvent(event: BirdEvent) {
+    const bird = this.bird.group.position;
+    switch (event) {
+      case 'flare':
+        // Measured to where the bird will rest: feet on the ground, or the body on the water.
+        this.flareStartAgl = Math.max(0, bird.y - this.restHeight(this.footprint.center.kind) - this.footprint.center.height);
+        this.flareStartSpeed = this.speed;
+        this.flareWhooshed = false;
+        this.flipProgress = null;
+        this.backflipProgress = null;
+        break;
+      case 'go-around':
+        // Back to flying with a gentle climb (the brake was let go, or the ground ran out).
+        this.goAroundTime = GO_AROUND_DURATION;
+        this.speed = Math.max(this.speed, MIN_FLYING_SPEED);
+        this.lowerFloorToBird();
+        break;
+      case 'touchdown': {
+        const center = this.footprint.center;
+        const water = center.kind === 'water';
+        const sand = !water && this.ocean !== null && center.height < BEACH_TOP && !center.perch;
+        this.touchdownPoint.set(bird.x, center.height, bird.z);
+        if (water) {
+          this.waterBurst?.trigger(this.touchdownPoint, 0.6);
+          this.sfx.playSplash('dive', 0.5);
+        } else {
+          this.dustBurst.setColor(sand ? SAND_COLOR : this.ocean ? GRASS_DUST_COLOR : DUST_COLOR);
+          this.dustBurst.trigger(this.touchdownPoint);
+          this.sfx.playThump(sand ? 'sand' : 'ground');
+        }
+        this.speed = TOUCHDOWN_SPEED;
+        break;
       }
-      this.ringGuide?.update(dt, bird.position, forward, this.rings.getNextRingPosition());
+      case 'settled':
+        this.idleClock = 0;
+        break;
+      case 'takeoff':
+        this.takeoffLaunched = false;
+        this.takeoffVelocityY = 0;
+        this.takeoffFlapPhase = 0;
+        this.speed = 0;
+        break;
+      case 'airborne':
+        // Into normal flight: keep the climb the takeoff left off with, ease into cruise from here.
+        this.speed = Math.max(this.speed, MIN_FLYING_SPEED);
+        this.pitchSpring.value = deg(TAKEOFF_CLIMB_DEG) / maxPitchAngle(this.steering.sensitivity);
+        this.pitchSpring.velocity = 0;
+        this.boostSuppressed = this.boostInput;
+        this.goAroundTime = 0;
+        this.lowerFloorToBird();
+        break;
     }
-    this.ringBurst?.update(dt);
-    this.waterBurst?.update(dt);
+    this.options.onModeChange?.(this.state.mode);
+  }
 
-    if (this.splash && this.ocean) {
-      const waterSurfaceY = this.ocean.waterHeightAt(bird.position.x, bird.position.z);
-      this.splash.update(dt, bird.position, forward, waterSurfaceY, overWater);
+  /**
+   * FLARE, TOUCHDOWN, GROUNDED, FLOATING and TAKEOFF: scripted motion over the surface and the
+   * procedural animation for each. Returns `forward` (the horizontal heading, or the takeoff climb).
+   */
+  private updateOnSurface(dt: number) {
+    const bird = this.bird.group;
+    const state = this.state;
+    const reduced = this.reducedMotion;
+    this.brakeBlend += ((state.mode === 'FLARE' ? 1 : 0) - this.brakeBlend) * damp(BRAKE_BLEND_RATE, dt);
+    this.speedPulse = 0;
+    this.lastVisualBank += (0 - this.lastVisualBank) * damp(BRAKE_BLEND_RATE, dt);
+    this.resetPose();
+    const pose = this.pose;
+    let flapSpeed = 0;
+    let swimming = false;
+
+    // Gentle steering stays available while landing and taking off (and, in Part C, on the ground).
+    const steerScale = state.mode === 'FLARE' || state.mode === 'TAKEOFF' ? 0.45 : 0;
+    const yawRate = stepTurn(this.turn, this.targetRoll * steerScale, Math.max(this.speed, TURN_MIN_SPEED), 'air', true, this.steering.sensitivity, dt);
+    this.headingYaw -= yawRate * dt;
+    const forward = this.forward.set(Math.sin(this.headingYaw), 0, Math.cos(this.headingYaw));
+
+    switch (state.mode) {
+      case 'FLARE': {
+        // The final approach: horizontal speed bleeds off to a touchdown crawl, and the feet sink to
+        // the surface along (1 − u)², so the vertical speed is zero at contact (the flare itself).
+        const u = Math.min(1, state.time / state.duration);
+        this.speed = THREE.MathUtils.lerp(this.flareStartSpeed, TOUCHDOWN_SPEED, smoothstep01(u));
+        bird.position.addScaledVector(forward, this.speed * dt);
+        this.measureSurfaceBelow();
+        const targetAgl = this.flareStartAgl * (1 - u) * (1 - u);
+        this.surfaceY = this.footprint.center.height;
+        bird.position.y = this.surfaceY + this.restHeight(this.footprint.center.kind) + targetAgl;
+        this.agl = targetAgl;
+        // The flare pose in its last FLARE_MIN_DURATION: nose up, wings forward and cupped with a
+        // few hard back-strokes, tail fanned down, legs swung forward.
+        const flare = smoothstep01((state.time - (state.duration - FLARE_MIN_DURATION)) / FLARE_MIN_DURATION);
+        if (flare > 0 && !this.flareWhooshed) {
+          this.flareWhooshed = true;
+          this.sfx.playWhoosh();
+        }
+        pose.brake = 1;
+        pose.flare = flare;
+        pose.legs = smoothstep01(flare * 1.6);
+        pose.flapAmplitude = 1.25;
+        flapSpeed = flare > 0.15 && flare < 0.9 ? 15 : 4;
+        this.visualPitch = deg(FLARE_PITCH_DEG) * flare;
+        this.visualRoll = this.lastVisualBank * (1 - flare);
+        this.stepState(dt);
+        break;
+      }
+      case 'TOUCHDOWN': {
+        const u = Math.min(1, state.time / state.duration);
+        this.speed *= Math.exp(-12 * dt);
+        bird.position.addScaledVector(forward, this.speed * dt);
+        this.measureSurfaceBelow();
+        pose.legs = 1;
+        pose.flare = 1 - u;
+        pose.squash = reduced ? 0 : Math.sin(Math.min(1, u * 1.4) * Math.PI) * 0.85;
+        pose.fold = this.foldAmount();
+        this.visualPitch = THREE.MathUtils.lerp(deg(FLARE_PITCH_DEG), deg(STAND_PITCH_DEG), smoothstep01(u));
+        this.visualRoll = 0;
+        this.stepState(dt);
+        break;
+      }
+      case 'GROUNDED': {
+        this.speed = 0;
+        this.measureSurfaceBelow();
+        pose.legs = 1;
+        pose.fold = this.foldAmount();
+        this.idlePose(dt, false);
+        this.visualPitch = deg(STAND_PITCH_DEG);
+        this.visualRoll = 0;
+        this.stepState(dt);
+        break;
+      }
+      case 'FLOATING': {
+        this.speed = 0;
+        this.measureSurfaceBelow();
+        swimming = false;
+        pose.legs = 0.55;
+        pose.fold = this.foldAmount();
+        // Slow paddling under the surface.
+        pose.legSwing = Math.sin(this.time * 2.4) * (reduced ? 0.1 : 0.35);
+        this.idlePose(dt, true);
+        this.visualPitch = 0;
+        this.visualRoll = 0;
+        this.stepState(dt);
+        break;
+      }
+      case 'TAKEOFF': {
+        flapSpeed = this.updateTakeoff(dt, forward);
+        break;
+      }
+      default:
+        break;
     }
 
-    this.updateCamera(dt, steeringPitchAngle, bankAngle);
+    this.cameraPitchTarget = 0;
+    this.applySurfaceTransform(yawRate);
+    this.bird.update(dt, flapSpeed, swimming, pose);
+    this.updateUnderwater(false);
+    return state.mode === 'TAKEOFF' ? this.takeoffForward : forward;
+  }
 
-    // Keep the sun's shadow frustum centered near the bird as it travels the endless map.
-    this.sun.position.copy(bird.position).add(SUN_OFFSET);
-    this.sun.target.position.copy(bird.position);
-    this.sun.target.updateMatrixWorld();
+  /**
+   * TAKEOFF: a crouch, a jump up and forward, then strong full strokes while the legs tuck and the
+   * bird climbs away into cruise. From water, a short run along the surface comes first (feet
+   * pattering, little splashes). Returns the flap speed.
+   */
+  private updateTakeoff(dt: number, heading: THREE.Vector3) {
+    const state = this.state;
+    const bird = this.bird.group;
+    const pose = this.pose;
+    const fromWater = state.surface === 'water';
+    const runTime = fromWater ? WATER_TAKEOFF_RUN : 0;
+    const t = state.time;
+    pose.fold = Math.max(0, 1 - t / 0.15);
+    pose.legs = 1;
+    pose.flapAmplitude = 1.45;
+    let flapSpeed = TAKEOFF_FLAP_SPEED;
 
-    // The sky backdrop (gradient dome, distant clouds, starfield) follows the bird on XZ so the
-    // endless world never flies out of it.
-    this.sky.position.set(bird.position.x, 0, bird.position.z);
-    this.skyClouds.position.set(bird.position.x, 0, bird.position.z);
-    if (this.starfield) {
-      this.starfield.position.set(bird.position.x, 0, bird.position.z);
+    if (fromWater && t < runTime) {
+      // The run: pattering over the waves, accelerating.
+      this.speed = Math.min(WATER_TAKEOFF_RUN_SPEED, this.speed + (WATER_TAKEOFF_RUN_SPEED / runTime) * dt);
+      bird.position.addScaledVector(heading, this.speed * dt);
+      this.measureSurfaceBelow();
+      this.surfaceY = this.footprint.center.height;
+      bird.position.y = this.surfaceY + FLOAT_BODY_LIFT + 0.15 * (t / runTime);
+      pose.legSwing = Math.sin(t * 34) * 0.7;
+      this.splashClock -= dt;
+      if (this.splashClock <= 0) {
+        this.splashClock = 0.12;
+        this.touchdownPoint.set(bird.position.x, this.surfaceY, bird.position.z);
+        this.waterBurst?.trigger(this.touchdownPoint, 0.22);
+      }
+      this.visualPitch = deg(12);
+    } else if (!fromWater && t < TAKEOFF_CROUCH) {
+      // The crouch.
+      pose.crouch = this.reducedMotion ? 0 : t / TAKEOFF_CROUCH;
+      pose.fold = 0.5;
+      flapSpeed = 0;
+      this.visualPitch = deg(STAND_PITCH_DEG);
+    } else {
+      if (!this.takeoffLaunched) {
+        // The launch impulse.
+        this.takeoffLaunched = true;
+        this.takeoffVelocityY = fromWater ? TAKEOFF_JUMP_UP * 0.75 : TAKEOFF_JUMP_UP;
+        this.speed = Math.max(this.speed, TAKEOFF_JUMP_FORWARD);
+        if (!fromWater) {
+          this.dustBurst.trigger(bird.position, 0.5);
+        }
+      }
+      const climbStart = fromWater ? runTime : TAKEOFF_CROUCH;
+      const u = Math.min(1, (t - climbStart) / (state.duration - climbStart));
+      // Strong strokes carry it up (the jump's upward speed eases toward a steady climb) while the
+      // airspeed builds toward the exit speed.
+      const climbRate = TAKEOFF_EXIT_SPEED * Math.sin(deg(TAKEOFF_CLIMB_DEG));
+      this.takeoffVelocityY += (climbRate - this.takeoffVelocityY) * damp(3, dt);
+      this.speed += (TAKEOFF_EXIT_SPEED - this.speed) * damp(2.5, dt);
+      bird.position.addScaledVector(heading, this.speed * dt);
+      bird.position.y += this.takeoffVelocityY * dt;
+      pose.legs = 1 - smoothstep01((u - 0.25) / 0.5);
+      this.visualPitch = deg(TAKEOFF_CLIMB_DEG) * smoothstep01(u * 2);
+      // A wing-stroke sound on every downstroke.
+      const before = Math.floor(this.takeoffFlapPhase / (Math.PI * 2));
+      this.takeoffFlapPhase += dt * flapSpeed;
+      if (Math.floor(this.takeoffFlapPhase / (Math.PI * 2)) !== before) this.sfx.playFlap(1);
     }
+    // Never below the surface it left from.
+    this.measureSurfaceBelow();
+    const floor = this.footprint.center.height + (this.footprint.center.kind === 'water' ? FLOAT_BODY_LIFT : this.bird.standHeight);
+    if (bird.position.y < floor) bird.position.y = floor;
+    this.visualRoll = this.lastVisualBank;
+    const climb = this.takeoffLaunched ? Math.atan2(this.takeoffVelocityY, Math.max(this.speed, 0.1)) : 0;
+    this.takeoffForward.set(Math.sin(this.headingYaw) * Math.cos(climb), Math.sin(climb), Math.cos(this.headingYaw) * Math.cos(climb));
+    this.stepState(dt);
+    return flapSpeed;
+  }
 
-    if (this.ocean) this.updateAtmosphere(dt);
+  /** Wing fold after touchdown: two stages over WING_FOLD_DURATION (from the moment of contact). */
+  private foldAmount() {
+    const state = this.state;
+    const scale = this.reducedMotion ? 0.5 : 1;
+    const since = state.mode === 'TOUCHDOWN' ? state.time : state.time + TOUCHDOWN_DURATION * scale;
+    return Math.min(1, since / (WING_FOLD_DURATION * scale));
+  }
 
-    // The wind follows the airspeed (a quiet floor when slow) and dips a little under the brake.
-    const speedRatio = Math.max(-0.15, (this.speed - baseSpeed) / (boostSpeed - baseSpeed));
-    this.wind.setIntensity((0.3 + speedRatio) * (1 - BRAKE_WIND_DIP * this.brakeBlend));
+  /**
+   * Standing or floating idle: slow breathing, the head looking around now and then, an occasional
+   * wing ruffle and tail flick. Reduced motion keeps only a little breathing.
+   */
+  private idlePose(dt: number, floating: boolean) {
+    const pose = this.pose;
+    this.idleClock += dt;
+    pose.breathe = this.reducedMotion ? 0.3 : 1;
+    if (this.reducedMotion) {
+      this.headYaw += (0 - this.headYaw) * damp(4, dt);
+      pose.headYaw = this.headYaw;
+      return;
+    }
+    this.headTimer -= dt;
+    if (this.headTimer <= 0) {
+      this.headTimer = 1.4 + Math.random() * 2.6;
+      this.headTarget = Math.random() < 0.3 ? 0 : (Math.random() * 2 - 1) * 0.9;
+    }
+    this.headYaw += (this.headTarget - this.headYaw) * damp(7, dt);
+    pose.headYaw = this.headYaw;
+    this.ruffleTimer -= dt;
+    if (this.ruffleTimer <= -0.5) this.ruffleTimer = 6 + Math.random() * 6;
+    pose.ruffle = this.ruffleTimer < 0 ? Math.sin((-this.ruffleTimer / 0.5) * Math.PI) : 0;
+    this.tailTimer -= dt;
+    if (this.tailTimer <= -0.25) this.tailTimer = 3 + Math.random() * 4;
+    pose.tailLift = this.tailTimer < 0 ? Math.sin((-this.tailTimer / 0.25) * Math.PI) * 0.35 : 0;
+    if (floating) pose.tailLift += 0.12;
+  }
+
+  /**
+   * Places the bird on what it's standing on or floating in, after the world has updated for this
+   * frame: feet on the drawn ground (standHeight above it), or the body resting on the drawn waves,
+   * bobbing and rolling with them.
+   */
+  private settleOnSurface() {
+    const state = this.state;
+    if (state.mode !== 'GROUNDED' && state.mode !== 'FLOATING' && state.mode !== 'TOUCHDOWN') return;
+    const bird = this.bird.group;
+    this.measureSurfaceBelow();
+    const center = this.footprint.center;
+    if (center.kind === 'water' && this.ocean) {
+      const x = bird.position.x;
+      const z = bird.position.z;
+      const h = this.ocean.floatHeightAt(x, z);
+      bird.position.y = h + FLOAT_BODY_LIFT;
+      this.surfaceY = h;
+      // Pitch and roll with the waves: the surface's slope along the body and across it.
+      const sinH = Math.sin(this.headingYaw);
+      const cosH = Math.cos(this.headingYaw);
+      const ahead = this.ocean.floatHeightAt(x + sinH * FLOAT_PROBE, z + cosH * FLOAT_PROBE);
+      const behind = this.ocean.floatHeightAt(x - sinH * FLOAT_PROBE, z - cosH * FLOAT_PROBE);
+      const right = this.ocean.floatHeightAt(x - cosH * FLOAT_PROBE, z + sinH * FLOAT_PROBE);
+      const left = this.ocean.floatHeightAt(x + cosH * FLOAT_PROBE, z - sinH * FLOAT_PROBE);
+      this.surfacePitch = Math.atan2(ahead - behind, 2 * FLOAT_PROBE) * FLOAT_ALIGN;
+      this.surfaceRoll = Math.atan2(left - right, 2 * FLOAT_PROBE) * FLOAT_ALIGN;
+    } else {
+      bird.position.y = center.height + this.bird.standHeight;
+      this.surfaceY = center.height;
+      // Partly aligned to the ground's normal (see SURFACE_ALIGN).
+      const sinH = Math.sin(this.headingYaw);
+      const cosH = Math.cos(this.headingYaw);
+      const alongForward = center.normalX * sinH + center.normalZ * cosH;
+      const alongRight = -center.normalX * cosH + center.normalZ * sinH;
+      this.surfacePitch = Math.atan2(-alongForward, center.normalY) * SURFACE_ALIGN;
+      this.surfaceRoll = Math.atan2(alongRight, center.normalY) * SURFACE_ALIGN;
+    }
+    this.agl = 0;
+    this.applySurfaceTransform(0);
+  }
+
+  private applySurfaceTransform(yawRate: number) {
+    const bird = this.bird.group;
+    const onSurface = this.state.isOnSurface();
+    bird.rotation.order = 'YXZ';
+    bird.rotation.y = this.headingYaw + THREE.MathUtils.clamp(-yawRate * BODY_YAW_LEAD_AIR, -BODY_YAW_MAX, BODY_YAW_MAX);
+    bird.rotation.x = -(this.visualPitch + (onSurface ? this.surfacePitch : 0));
+    bird.rotation.z = this.visualRoll + (onSurface ? this.surfaceRoll : 0);
+  }
+
+  /** Underwater state from the bird's position, with a small hysteresis around the calm water level. */
+  private updateUnderwater(overWater: boolean) {
+    const bird = this.bird.group;
+    let targetUnderwater = false;
+    if (overWater) {
+      const depthBelowSurface = WATER_LEVEL - bird.position.y;
+      const threshold = this.underwater ? -UNDERWATER_HYSTERESIS : UNDERWATER_HYSTERESIS;
+      targetUnderwater = depthBelowSurface > threshold;
+    }
+    if (targetUnderwater !== this.underwater) {
+      this.underwater = targetUnderwater;
+      this.setUnderwaterWorld(this.underwater);
+      if (this.underwater) {
+        this.sfx.playSplash('dive');
+        this.options.onWaterTransition?.('submerged');
+      } else {
+        this.waterBurst?.trigger(bird.position);
+        this.sfx.playSplash('surface');
+        this.options.onWaterTransition?.('surfaced');
+      }
+    }
+  }
+
+  /** The touchdown reticle under the bird, and the numbers the HUD's LDG readout shows. */
+  private updateLandingCue() {
+    const cue = this.landingCueInfo;
+    const mode = this.state.mode;
+    const flying = mode === 'FLYING';
+    const show =
+      (flying && !this.underwater && this.agl <= LANDING_CUE_AGL && this.envelope.landable) || mode === 'FLARE';
+    cue.visible = show;
+    cue.agl = Math.max(0, this.agl);
+    cue.ready = mode === 'FLARE' || this.envelope.ok;
+    cue.failure = this.envelope.failure;
+    if (!show) {
+      this.landingCue.hide();
+      return;
+    }
+    const c = this.footprint.center;
+    const p = this.bird.group.position;
+    this.landingCue.show(p.x, c.height, p.z, c.normalX, c.normalY, c.normalZ, cue.agl, cue.ready, this.time);
+  }
+
+  /** Lets the flight floor start at the bird's current height above the ground (see updateFlight). */
+  private lowerFloorToBird() {
+    const p = this.bird.group.position;
+    const clearance = p.y - this.environment.heightAtWorld(p.x, p.z);
+    this.floorClearance = THREE.MathUtils.clamp(clearance, this.bird.standHeight, FLIGHT_FLOOR_CLEARANCE);
+  }
+
+  /** Height of the bird's origin above the surface it rests on: standing on its feet, or afloat. */
+  private restHeight(kind: SurfaceKind) {
+    return kind === 'water' ? FLOAT_BODY_LIFT : this.bird.standHeight;
+  }
+
+  private resetPose() {
+    const pose = this.pose;
+    pose.brake = 0;
+    pose.flare = 0;
+    pose.fold = 0;
+    pose.legs = 0;
+    pose.legSwing = 0;
+    pose.flapAmplitude = 1;
+    pose.headYaw = 0;
+    pose.headBob = 0;
+    pose.tailFan = 0;
+    pose.tailLift = 0;
+    pose.squash = 0;
+    pose.crouch = 0;
+    pose.ruffle = 0;
+    pose.bodyPitch = 0;
+    pose.breathe = 0;
   }
 
   /**
@@ -883,9 +1509,12 @@ export class GameEngine {
     stepSpring(this.cameraPitch, pitchAngle, CAMERA_PITCH_OMEGA, dt);
 
     const underwater = this.underwater;
+    const surface = !this.state.isFlying();
     const pullback = underwater ? 0 : Math.max(0, this.speed - BASE_SPEED) * CAMERA_SPEED_PULLBACK;
-    stepSpring(this.cameraDistance, (underwater ? CAMERA_DISTANCE_WATER : CAMERA_DISTANCE) + pullback, CAMERA_DISTANCE_OMEGA, dt);
-    stepSpring(this.cameraHeight, underwater ? CAMERA_HEIGHT_WATER : CAMERA_HEIGHT, CAMERA_DISTANCE_OMEGA, dt);
+    const distance = surface ? CAMERA_DISTANCE_SURFACE : underwater ? CAMERA_DISTANCE_WATER : CAMERA_DISTANCE;
+    const height = surface ? CAMERA_HEIGHT_SURFACE : underwater ? CAMERA_HEIGHT_WATER : CAMERA_HEIGHT;
+    stepSpring(this.cameraDistance, distance + pullback, CAMERA_DISTANCE_OMEGA, dt);
+    stepSpring(this.cameraHeight, height, CAMERA_DISTANCE_OMEGA, dt);
 
     const yaw = this.cameraYaw.value;
     const pitch = this.cameraPitch.value;
@@ -974,9 +1603,20 @@ export class GameEngine {
     return this.underwater;
   }
 
-  /** True while the air brake is applied (held, and not cancelled by boost). */
+  /** True while the air brake is applied (held, and not cancelled by boost) in flight or a landing. */
   isBraking() {
-    return this.brakeInput && !this.boosting;
+    const mode = this.state.mode;
+    return (mode === 'FLYING' || mode === 'FLARE') && this.brakeInput && !this.boostInput;
+  }
+
+  /** FLYING, FLARE, TOUCHDOWN, GROUNDED, FLOATING or TAKEOFF. */
+  getMode(): BirdMode {
+    return this.state.mode;
+  }
+
+  /** The LDG readout's numbers (a reused object; read it, don't keep it). */
+  getLandingCue(): Readonly<LandingCueInfo> {
+    return this.landingCueInfo;
   }
 
   /** Current turn rate in degrees per second (positive = turning right). */
@@ -986,17 +1626,20 @@ export class GameEngine {
 
   /** Numbers for the ?debug=flight overlay. */
   getDebugInfo() {
-    const p = this.bird.group.position;
+    const mode = this.state.mode;
+    const center = this.footprint.center;
     return {
-      state: this.underwater ? 'SWIMMING' : 'FLYING',
+      state: mode === 'FLYING' && this.underwater ? 'FLYING (underwater)' : mode,
       substate: '',
       speed: this.speed,
       yawRate: this.getYawRateDegrees(),
       bank: THREE.MathUtils.radToDeg(this.lastVisualBank),
-      agl: p.y - this.environment.heightAtWorld(p.x, p.z),
+      agl: this.agl,
       brake: this.isBraking(),
-      slope: null as number | null,
-      landable: null as boolean | null,
+      slope: center.kind === 'water' ? 0 : (center.slope as number | null),
+      landable: (mode === 'FLYING' ? this.envelope.landable : isLandable(this.footprint)) as boolean | null,
+      envelope: this.envelope.ok ? 'ok' : (this.envelope.failure ?? ''),
+      surface: center.perch ? 'rock' : center.kind,
       steering: this.steering,
       drawCalls: this.renderer.info.render.calls,
     };
@@ -1014,6 +1657,8 @@ export class GameEngine {
     this.splash?.dispose();
     this.ringBurst?.dispose();
     this.waterBurst?.dispose();
+    this.dustBurst.dispose();
+    this.landingCue.dispose();
     this.ringGuide?.dispose();
     this.oceanLife?.dispose();
     this.underwaterEnv?.dispose();

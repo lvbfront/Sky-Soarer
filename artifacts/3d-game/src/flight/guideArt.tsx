@@ -271,6 +271,44 @@ export function PushArt({ ratioLabel }: { ratioLabel: string }) {
   );
 }
 
+/** A small bird seen from the side (wings up), for the landing and ground cards. */
+function BirdSide() {
+  return (
+    <g>
+      <ellipse cx={0} cy={0} rx={6} ry={3.4} fill={INK} {...stroke} />
+      <circle cx={6.5} cy={-2.6} r={2.4} fill={INK} {...stroke} />
+      <path d="M8.6 -2.6 L11.5 -1.8 L8.6 -1.2" fill={WARM} stroke="none" />
+      <path d="M-1 -2 L-5 -9 L2 -3" fill={INK} {...stroke} />
+      <path d="M-5.5 0.5 L-10 2 L-5.5 2.2" fill={INK} {...stroke} />
+    </g>
+  );
+}
+
+/**
+ * Land & take off: the bird glides down a shallow, braked approach onto the touchdown reticle,
+ * stands, then springs back up. `landLabel` / `takeoffLabel` name the inputs.
+ */
+export function LandArt({ landLabel, takeoffLabel }: { landLabel: string; takeoffLabel: string }) {
+  return (
+    <ArtFrame pose="-2.1s" label="A bird braking down onto a landing reticle, standing, and taking off again">
+      <Svg>
+        <path d="M6 80 Q60 76 96 80 T156 78" fill="none" stroke={FAINT} strokeWidth={1} />
+        <path d="M14 22 Q60 30 92 74" fill="none" stroke={CYAN} strokeDasharray="2 3" opacity={0.7} />
+        <ellipse cx={96} cy={79} rx={11} ry={2.6} fill="none" stroke={CYAN} strokeWidth={1.1} />
+        <g className="ascent-guide-land">
+          <BirdSide />
+        </g>
+        <Label x={12} y={14} anchor="start" fill={CYAN}>
+          {landLabel}
+        </Label>
+        <Label x={150} y={14} anchor="end" fill={WARM}>
+          {takeoffLabel}
+        </Label>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
 /** One keycap. `press` animates it on a loop, starting `delay` into the cycle. */
 export function Keycap({
   children,

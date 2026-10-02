@@ -762,6 +762,32 @@ html {
   animation: ascent-guide-flick-trail 2.6s linear infinite;
 }
 
+/* The HUD's landing annunciator (LDG + AGL). FlightHud toggles data-state from its rAF: off (hidden),
+   armed (low over landable ground, pale) and ready (every landing condition holds, cyan). */
+.ascent-ldg {
+  opacity: 0;
+  transition: opacity 200ms ease-out;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.ascent-ldg[data-state='armed'],
+.ascent-ldg[data-state='ready'] {
+  opacity: 1;
+}
+
+.ascent-ldg[data-state='ready'] {
+  color: var(--ascent-cyan);
+}
+
+.ascent-ldg-lamp {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.ascent-ldg[data-state='ready'] .ascent-ldg-lamp {
+  background: var(--ascent-cyan);
+  box-shadow: 0 0 8px var(--ascent-cyan);
+}
+
 /* Air brake: the open palm grows (pushed toward the camera), holds, and drops back; the BRAKE
    readout and the tight-turn arc light only while it's held big. */
 @keyframes ascent-guide-push {
@@ -783,6 +809,22 @@ html {
 
 .ascent-guide-while-pushed {
   animation: ascent-guide-while-pushed 3.2s linear infinite;
+}
+
+/* Land & take off: down the braked approach onto the reticle, a pause standing, then up and away. */
+@keyframes ascent-guide-land {
+  0% { transform: translate(14px, 22px) rotate(8deg); opacity: 0; }
+  6% { opacity: 1; }
+  38% { transform: translate(84px, 64px) rotate(14deg); }
+  48%, 66% { transform: translate(96px, 75px) rotate(-6deg); }
+  72% { transform: translate(98px, 73px) rotate(-22deg); }
+  92% { transform: translate(134px, 34px) rotate(-24deg); opacity: 1; }
+  100% { transform: translate(146px, 24px) rotate(-24deg); opacity: 0; }
+}
+
+.ascent-guide-land {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-land 4.2s cubic-bezier(0.4, 0, 0.4, 1) infinite;
 }
 
 /* Keycaps: a key lights and sinks when "pressed". --press-delay staggers keys in a sequence. */

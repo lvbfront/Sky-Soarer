@@ -24,6 +24,8 @@ export class TerrainManager {
   private pool: THREE.Mesh[] = [];
   private material: THREE.MeshStandardMaterial;
   private currentTile = { x: Number.NaN, z: Number.NaN };
+  /** Spacing of the tiles' vertices: the ground is drawn as triangles on this grid. */
+  readonly groundGridSpacing = TILE_SIZE / TILE_SEGMENTS;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;

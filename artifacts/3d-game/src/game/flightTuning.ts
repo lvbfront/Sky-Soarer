@@ -143,3 +143,71 @@ export const CAMERA_GROUND_CLEARANCE = 0.8;
 
 export const deg = (degrees: number) => degrees * DEG;
 
+// ---- Landing (Part B) -----------------------------------------------------------------------------
+//
+// Landing is intent + envelope, never accidental: it starts by itself only while the brake is held,
+// low over flat, landable ground or water, slow, and not diving. Skimming the ground or the waves
+// without braking never lands.
+
+/** Height above the landable surface (feet to ground) under which a braking bird lands. */
+export const LANDING_MAX_AGL = 6;
+/** The landing cue (reticle + LDG readout) shows from this height down, over landable surfaces. */
+export const LANDING_CUE_AGL = 10;
+/** Airspeed must be at most the brake speed plus this margin. */
+export const LANDING_SPEED_MARGIN = 1.2;
+/** The flight path may descend at most this steeply (degrees below the horizon): not a dive. */
+export const LANDING_MAX_DESCENT_DEG = 30;
+/** … and climb at most this steeply. */
+export const LANDING_MAX_CLIMB_DEG = 15;
+/** Steepest ground the bird lands, stands and walks on (degrees). */
+export const MAX_GROUND_SLOPE_DEG = 30;
+/** The footprint sampled under the bird: the center plus 4 points this far out. */
+export const FOOTPRINT_RADIUS = 0.9;
+/** Footprint points may differ in height by at most this much (rejects cliff edges and ledges). */
+export const FOOTPRINT_MAX_STEP = 0.8;
+/** Water this shallow (above the ground under it) counts as beach: the bird stands, not floats. */
+export const MIN_FLOAT_DEPTH = 0.3;
+
+/** The flare: final approach and touchdown, never shorter than this (seconds)… */
+export const FLARE_MIN_DURATION = 0.7;
+/** …and stretched so the descent is at most this fast (m/s) from a higher start. */
+export const FLARE_SINK_SPEED = 3.2;
+export const FLARE_MAX_DURATION = 2.2;
+/** Body pitch at the height of the flare (nose up). */
+export const FLARE_PITCH_DEG = 40;
+/** Horizontal speed left at the moment of touchdown (m/s). */
+export const TOUCHDOWN_SPEED = 0.6;
+export const TOUCHDOWN_DURATION = 0.3;
+/** How much the standing body aligns to the surface normal (0 = upright, 1 = fully tilted). */
+export const SURFACE_ALIGN = 0.55;
+/** Wings fold in two stages over this long after touchdown. */
+export const WING_FOLD_DURATION = 0.5;
+/** Go-around: back to flying with this much climb input, for this long, unless the player pitches. */
+export const GO_AROUND_CLIMB = 0.35;
+export const GO_AROUND_DURATION = 1.2;
+
+// ---- Takeoff ----------------------------------------------------------------------------------------
+/** Keyboard: hold Space this long while standing or floating. */
+export const TAKEOFF_KEY_HOLD = 0.4;
+/** Hand: raise the palm into the top RAISE_ZONE of the calibrated box and hold it this long. */
+export const TAKEOFF_RAISE_ZONE = 0.2;
+export const TAKEOFF_RAISE_HOLD = 0.5;
+/** A missing frame shorter than this doesn't break the raise-and-hold (low tracker FPS). */
+export const TAKEOFF_RAISE_GAP = 0.25;
+export const TAKEOFF_DURATION = 1.0;
+/** Crouch before the jump. */
+export const TAKEOFF_CROUCH = 0.12;
+/** The launch impulse (m/s): up and forward. */
+export const TAKEOFF_JUMP_UP = 4.2;
+export const TAKEOFF_JUMP_FORWARD = 3;
+/** Speed and climb the bird leaves the takeoff with, before easing into cruise. */
+export const TAKEOFF_EXIT_SPEED = 7;
+export const TAKEOFF_CLIMB_DEG = 22;
+/** From water: a short run along the surface first (seconds), then the climb. */
+export const WATER_TAKEOFF_RUN = 0.7;
+export const WATER_TAKEOFF_RUN_SPEED = 5;
+/** The chase camera closes in while the bird is landing, standing, floating or taking off. */
+export const CAMERA_DISTANCE_SURFACE = 4.4;
+export const CAMERA_HEIGHT_SURFACE = 1.5;
+/** Flap rate during the takeoff's strong strokes (radians of flap phase per second). */
+export const TAKEOFF_FLAP_SPEED = 21;

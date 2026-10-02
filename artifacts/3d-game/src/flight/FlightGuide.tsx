@@ -19,13 +19,18 @@ import {
 import {
   AIR_BRAKE_SINK,
   CRUISE_TURN_RATE_DEG,
+  LANDING_MAX_AGL,
+  MAX_GROUND_SLOPE_DEG,
+  TAKEOFF_KEY_HOLD,
+  TAKEOFF_RAISE_HOLD,
+  TAKEOFF_RAISE_ZONE,
   KEY_PITCH_RAMP_UP,
   KEY_ROLL_RAMP_UP,
 } from '@/game/flightTuning';
 import { brakeSpeed, turnRate } from '@/game/flightModel';
 import type { ControlMode } from '@/game/settings';
 import { CornerBrackets } from '@/ui/hud';
-import { BackflipArt, BarrelRollArt, BoostArt, KeyFrame, Keycap, PushArt, SteerArt, SteerKeysArt } from './guideArt';
+import { BackflipArt, BarrelRollArt, BoostArt, KeyFrame, Keycap, LandArt, PushArt, SteerArt, SteerKeysArt } from './guideArt';
 
 /** Where the guide was opened from, which decides its buttons. */
 export type GuideOrigin = 'preflight' | 'pause' | 'hud';
@@ -115,6 +120,16 @@ const HAND_MOVES: Move[] = [
       BRAKE_RELEASE_RATIO,
     )} · sinks ${AIR_BRAKE_SINK.toFixed(1)} m/s · boost cancels it`,
   },
+  {
+    code: '06',
+    title: 'Land & take off',
+    input: 'Brake low · raise and hold',
+    art: <LandArt landLabel="PUSH IN" takeoffLabel="RAISE" />,
+    tip: `Keep the brake on (palm pushed in) low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. To take off, raise your palm into the top of your box and hold it there; on water, close your fist.`,
+    spec: `Lands within ${LANDING_MAX_AGL} m, braking, not diving, on slopes up to ${MAX_GROUND_SLOPE_DEG}° · takeoff: top ${percent(
+      TAKEOFF_RAISE_ZONE,
+    )} of the box for ${seconds(TAKEOFF_RAISE_HOLD)}`,
+  },
 ];
 
 const KEYBOARD_MOVES: Move[] = [
@@ -172,6 +187,16 @@ const KEYBOARD_MOVES: Move[] = [
   },
   {
     code: '05',
+    title: 'Land & take off',
+    input: 'Hold Shift low · hold Space',
+    art: <LandArt landLabel="SHIFT" takeoffLabel="SPACE" />,
+    tip: `Hold Shift low over flat ground or water and the bird lands by itself: watch for the LDG readout and the ring on the ground. Hold Space to take off; on water, a tap is enough.`,
+    spec: `Lands within ${LANDING_MAX_AGL} m, braking, not diving, on slopes up to ${MAX_GROUND_SLOPE_DEG}° · hold Space ${seconds(
+      TAKEOFF_KEY_HOLD,
+    )} to take off`,
+  },
+  {
+    code: '06',
     title: 'Pause',
     input: 'Esc, or ? for this guide',
     art: (

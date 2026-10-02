@@ -1,6 +1,7 @@
 import type { HandControlState } from './handControls';
 import { clampSensitivity, rampAxis } from './flightModel';
 import {
+  TAKEOFF_KEY_HOLD,
   KEY_PITCH_RAMP_DOWN,
   KEY_PITCH_RAMP_UP,
   KEY_PITCH_REVERSE,
@@ -54,6 +55,8 @@ export class KeyboardControls {
   private backflipQueued = false;
   private paused = false;
   private sensitivity = 1;
+  // How long Space has been held (seconds): held TAKEOFF_KEY_HOLD while standing or floating takes off.
+  private boostHeldFor = 0;
   private rafId: number | null = null;
   private lastTime: number | null = null;
   private lastEmitted: HandControlState | null = null;
@@ -101,6 +104,7 @@ export class KeyboardControls {
     this.held.clear();
     this.pitch = 0;
     this.roll = 0;
+    this.boostHeldFor = 0;
     this.backflipQueued = false;
     this.lastTime = null;
     this.emit(true);
@@ -130,6 +134,7 @@ export class KeyboardControls {
 
     const pitchTarget = (anyHeld(this.held, PITCH_UP_KEYS) ? 1 : 0) - (anyHeld(this.held, PITCH_DOWN_KEYS) ? 1 : 0);
     const rollTarget = (anyHeld(this.held, ROLL_RIGHT_KEYS) ? 1 : 0) - (anyHeld(this.held, ROLL_LEFT_KEYS) ? 1 : 0);
+    this.boostHeldFor = anyHeld(this.held, BOOST_KEYS) ? this.boostHeldFor + dt : 0;
     this.pitch = rampAxis(this.pitch, pitchTarget, dt, PITCH_RATES, this.sensitivity);
     this.roll = rampAxis(this.roll, rollTarget, dt, ROLL_RATES, this.sensitivity);
     this.emit(false);
@@ -147,6 +152,7 @@ export class KeyboardControls {
       boost: !this.paused && anyHeld(this.held, BOOST_KEYS),
       backflip,
       brake: !this.paused && anyHeld(this.held, BRAKE_KEYS),
+      takeoffHold: !this.paused && this.boostHeldFor >= TAKEOFF_KEY_HOLD,
       flickNearMiss: null,
       landmarks: null,
     };
@@ -157,7 +163,8 @@ export class KeyboardControls {
       last.pitch === state.pitch &&
       last.roll === state.roll &&
       last.boost === state.boost &&
-      last.brake === state.brake;
+      last.brake === state.brake &&
+      last.takeoffHold === state.takeoffHold;
     if (unchanged && !force) return;
     this.lastEmitted = state;
     this.onUpdate(state);

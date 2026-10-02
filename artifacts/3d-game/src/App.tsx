@@ -10,6 +10,7 @@ import {
 import { gsap } from 'gsap';
 import type { NormalizedLandmark } from '@mediapipe/hands';
 import type { GameEngine } from '@/game/GameEngine';
+import type { BirdMode } from '@/game/birdState';
 import { BIRD_OPTIONS } from '@/game/bird';
 import { LandingScene, type LandingTelemetry } from '@/game/LandingScene';
 import { MAP_OPTIONS, NEXT_RING_HIGHLIGHTS, WEATHER_OPTIONS } from '@/game/presets';
@@ -329,8 +330,14 @@ function describeStatus(state: {
   brake: boolean;
   barrelRolling: boolean;
   backflipping: boolean;
+  mode: BirdMode;
 }) {
+  if (state.mode === 'FLARE') return 'Landing';
+  if (state.mode === 'TOUCHDOWN') return 'Touchdown';
+  if (state.mode === 'TAKEOFF') return 'Taking Off';
   if (!state.handDetected) return 'No Hand Detected';
+  if (state.mode === 'GROUNDED') return 'Standing';
+  if (state.mode === 'FLOATING') return 'Floating';
   if (state.boost) return state.keyboard ? 'Boost Active' : 'Fist (Boost) Active';
   if (state.brake) return 'Air Brake';
   if (state.barrelRolling) return 'Barrel Roll Detected';
@@ -380,6 +387,28 @@ function App() {
   const [handDetected, setHandDetected] = useState(false);
   const [boosting, setBoosting] = useState(false);
   const [braking, setBraking] = useState(false);
+  // Flying, landing, standing, floating or taking off: the HUD's hint and badges follow it.
+  const [birdMode, setBirdMode] = useState<BirdMode>('FLYING');
+  const birdModeRef = useRef<BirdMode>('FLYING');
+  birdModeRef.current = birdMode;
+  // The status line follows the bird's state too, not only new control readings.
+  useEffect(() => {
+    const state = latestControlRef.current;
+    if (!state) return;
+    setStatusText(
+      describeStatus({
+        keyboard: settingsRef.current.controls === 'keyboard',
+        handDetected: state.handDetected,
+        roll: state.roll,
+        pitch: state.pitch,
+        boost: state.boost,
+        brake: state.brake,
+        barrelRolling: barrelRollingRef.current,
+        backflipping: backflippingRef.current,
+        mode: birdMode,
+      }),
+    );
+  }, [birdMode]);
   const [barrelRolling, setBarrelRolling] = useState(false);
   const [backflipping, setBackflipping] = useState(false);
   const [underwater, setUnderwater] = useState(false);
@@ -563,6 +592,7 @@ function App() {
         brake: state.brake,
         barrelRolling: barrelRollingRef.current,
         backflipping: backflippingRef.current,
+        mode: birdModeRef.current,
       }),
     );
     const nearMiss = state.flickNearMiss;
@@ -1055,6 +1085,7 @@ function App() {
         steering: chosen.steering,
         reducedMotion: reducedMotionRef.current,
         onQualityChange: (level) => setRenderedQuality(level),
+        onModeChange: (mode) => setBirdMode(mode),
         onScoreChange: (total) => {
           setScore(total);
           setBestScore(saveBestScoreIfHigher(total));
@@ -1191,6 +1222,7 @@ function App() {
     setHandDetected(false);
     setBoosting(false);
     setBraking(false);
+    setBirdMode('FLYING');
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
@@ -1217,6 +1249,7 @@ function App() {
     setFlickHint(null);
     setBoosting(false);
     setBraking(false);
+    setBirdMode('FLYING');
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
@@ -1364,6 +1397,7 @@ function App() {
           handDetected={handDetected}
           boosting={boosting}
           braking={braking}
+          birdMode={birdMode}
           barrelRolling={barrelRolling}
           backflipping={backflipping}
           underwater={underwater}

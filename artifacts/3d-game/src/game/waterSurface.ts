@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TILE_SIZE, WAVE_SHORE_DAMP_DEPTH, wavesGlsl } from './oceanField';
+import { TILE_SIZE, WATER_LEVEL, WAVE_SHORE_DAMP_DEPTH, smoothstep, waveHeight, wavesGlsl } from './oceanField';
 import { FOG_CULL_EXPONENT } from './oceanShaders';
 
 // The ocean's water surface: one grid mesh that follows the bird (a single draw call for the whole
@@ -14,11 +14,34 @@ import { FOG_CULL_EXPONENT } from './oceanShaders';
 
 // Grid: dense near the bird, sparse toward the fogged edge. f(u) = HALF·(a·u + (1-a)·u³) gives an
 // inner spacing of ~1.5 units at 128 segments and ~19 units at the rim.
-const HALF_EXTENT = 470;
+export const HALF_EXTENT = 470;
 const INNER_WEIGHT = 0.2;
 // The mesh moves in steps of this many units, so vertices near the bird land on the same world
 // positions after a snap (no visible wave "swimming").
-const SNAP = 12;
+export const SNAP = 12;
+
+/** Local offset of grid line `index` (0..segments) from the mesh's center. */
+export function gridLine(index: number, segments: number) {
+  const u = (index / segments) * 2 - 1;
+  return HALF_EXTENT * (INNER_WEIGHT * u + (1 - INNER_WEIGHT) * u * u * u);
+}
+
+/** The grid cell containing local offset `local`: its index (0..segments-1). Bisection on gridLine. */
+export function gridCell(local: number, segments: number) {
+  let lo = 0;
+  let hi = segments;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (gridLine(mid, segments) <= local) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Where the water mesh's center sits when it follows a bird at (x, z) (see WaterSurface.follow). */
+export function snappedOrigin(value: number) {
+  return Math.round(value / SNAP) * SNAP;
+}
 
 // Toroidal ground-height texture: TEX_SIZE² texels of TEXEL_SIZE world units. It covers 1024
 // units, more than the 7x7 streamed tiles (840), so the loaded area never wraps onto itself.
@@ -62,6 +85,29 @@ export class GroundDepthTexture {
   }
 
   /**
+   * The ground height the water shader reads at (x, z): the same 8-bit texels, bilinearly filtered
+   * the way the GPU's LinearFilter + RepeatWrapping does it, decoded like DEPTH_DECODE. So the CPU
+   * mirror of the waves damps them by exactly the depth the shader sees, not the exact ground.
+   */
+  sampleHeight(x: number, z: number) {
+    const size = DEPTH_TEX_SIZE;
+    const sx = x / DEPTH_TEXEL_SIZE - 0.5;
+    const sz = z / DEPTH_TEXEL_SIZE - 0.5;
+    const i0 = Math.floor(sx);
+    const j0 = Math.floor(sz);
+    const fx = sx - i0;
+    const fz = sz - j0;
+    const c0 = ((i0 % size) + size) % size;
+    const c1 = (c0 + 1) % size;
+    const r0 = (((j0 % size) + size) % size) * size;
+    const r1 = ((((j0 + 1) % size) + size) % size) * size;
+    const d = this.data;
+    const top = d[r0 + c0] + (d[r0 + c1] - d[r0 + c0]) * fx;
+    const bottom = d[r1 + c0] + (d[r1 + c1] - d[r1 + c0]) * fx;
+    return (top + (bottom - top) * fz) / DEPTH_SCALE + DEPTH_MIN;
+  }
+
+  /**
    * Writes rows [rowStart, rowEnd) of one tile's texels from `heightAt`. Split into row ranges so
    * the tile streamer can spread a tile over several frames.
    */
@@ -93,12 +139,12 @@ export const TILE_TEXEL_ROWS = TEXELS_PER_TILE;
 function buildGrid(segments: number) {
   const n = segments + 1;
   const positions = new Float32Array(n * n * 3);
-  const map = (u: number) => HALF_EXTENT * (INNER_WEIGHT * u + (1 - INNER_WEIGHT) * u * u * u);
+  // gridLine is also what the CPU wave mirror (surfaceHeightAt) uses, so both agree on every vertex.
   for (let j = 0; j < n; j += 1) {
-    const z = map((j / segments) * 2 - 1);
+    const z = gridLine(j, segments);
     for (let i = 0; i < n; i += 1) {
       const k = (j * n + i) * 3;
-      positions[k] = map((i / segments) * 2 - 1);
+      positions[k] = gridLine(i, segments);
       positions[k + 1] = 0;
       positions[k + 2] = z;
     }
@@ -127,14 +173,14 @@ function buildGrid(segments: number) {
   return geometry;
 }
 
-const DEPTH_DECODE = /* glsl */ `
+export const DEPTH_DECODE = /* glsl */ `
 uniform sampler2D uDepthTex;
 float oceanGround(vec2 xz) {
   return texture(uDepthTex, xz * ${(1 / (DEPTH_TEX_SIZE * DEPTH_TEXEL_SIZE)).toFixed(10)}).r * ${(255 / DEPTH_SCALE).toFixed(4)} + ${DEPTH_MIN.toFixed(1)};
 }
 `;
 
-const VERTEX_SHADER = /* glsl */ `
+export const VERTEX_SHADER = /* glsl */ `
 #include <common>
 #include <fog_pars_vertex>
 uniform float uTime;
@@ -278,8 +324,49 @@ export class WaterSurface {
 
   /** Follow the bird in SNAP-unit steps; `focus` brightens the underside right above it. */
   follow(position: THREE.Vector3) {
-    this.mesh.position.set(Math.round(position.x / SNAP) * SNAP, 0, Math.round(position.z / SNAP) * SNAP);
+    this.mesh.position.set(snappedOrigin(position.x), 0, snappedOrigin(position.z));
     this.uniforms.uFocus.value.copy(position);
+  }
+
+  getSegments() {
+    return this.segments;
+  }
+
+  /**
+   * The rendered water height at (x, z), for a floating bird: the CPU mirror of the vertex shader.
+   * Each grid vertex around the point is displaced exactly as the shader does it (the shared WAVES
+   * table, damped by smoothstep(0, WAVE_SHORE_DAMP_DEPTH, depth) with the depth read from the same
+   * ground texture), then the point is interpolated on the same triangle the GPU rasterises. So it
+   * follows the grid density of the current quality level too. `originX/Z` is where the mesh sits
+   * (snappedOrigin of the followed position), `time` the shared uTime.
+   */
+  surfaceHeightAt(x: number, z: number, time: number, originX: number, originZ: number, depth: GroundDepthTexture) {
+    const n = this.segments;
+    const lx = Math.max(-HALF_EXTENT, Math.min(HALF_EXTENT, x - originX));
+    const lz = Math.max(-HALF_EXTENT, Math.min(HALF_EXTENT, z - originZ));
+    const i = gridCell(lx, n);
+    const j = gridCell(lz, n);
+    const x0 = gridLine(i, n);
+    const x1 = gridLine(i + 1, n);
+    const z0 = gridLine(j, n);
+    const z1 = gridLine(j + 1, n);
+    const tx = (lx - x0) / (x1 - x0);
+    const tz = (lz - z0) / (z1 - z0);
+    const vertex = (vx: number, vz: number) => {
+      const wx = originX + vx;
+      const wz = originZ + vz;
+      const damp = smoothstep(0, WAVE_SHORE_DAMP_DEPTH, -depth.sampleHeight(wx, wz));
+      return WATER_LEVEL + waveHeight(wx, wz, time) * damp;
+    };
+    // The grid's triangles are (a, c, b) and (b, c, d), split along the b–c diagonal (see buildGrid).
+    const hb = vertex(x1, z0);
+    const hc = vertex(x0, z1);
+    if (tx + tz <= 1) {
+      const ha = vertex(x0, z0);
+      return ha + (hb - ha) * tx + (hc - ha) * tz;
+    }
+    const hd = vertex(x1, z1);
+    return hd + (hc - hd) * (1 - tx) + (hb - hd) * (1 - tz);
   }
 
   setSegments(segments: number) {

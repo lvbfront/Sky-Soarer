@@ -4,6 +4,7 @@ import { damp, perFrameRate } from './damping';
 import { meterDownloads } from './downloadMeter';
 import { FlickDetector } from './flickDetector';
 import { PalmBrakeDetector } from './brakeDetector';
+import { RaiseHoldDetector } from './takeoffGesture';
 import { expoCurve } from './flightModel';
 import { applyDeadzone, axisValue, clamp, computeBox, depthCorrected, palmSize, validateCalibration } from './trackingMath';
 import {
@@ -47,6 +48,11 @@ export interface HandControlState {
   backflip: boolean;
   /** True while the air brake is held (keyboard: Shift; hand: the open palm pushed toward the camera). */
   brake: boolean;
+  /**
+   * True once the input's own hold-to-take-off gesture is complete (keyboard: Space held 0.4 s; hand:
+   * the palm held in the top of the box for 0.5 s). Only read while standing or floating.
+   */
+  takeoffHold: boolean;
   /**
    * One-shot: set on the frame an upward flick ends that came close to a backflip but missed
    * (too slow, or too short), so the HUD can coach the player. Null on every other frame.
@@ -178,6 +184,7 @@ export class HandTracker {
   // The air brake (palm pushed toward the camera): the palm's apparent size against the size at
   // calibration. `palmSizeSmoothed` follows the size so the center capture can record it.
   private brake = new PalmBrakeDetector();
+  private raise = new RaiseHoldDetector();
   private palmSizeSmoothed = 0;
   private lastSizeMs: number | null = null;
   private calibratedHandSize: number | null = null;
@@ -388,6 +395,7 @@ export class HandTracker {
       // If the hand vanished right after a fast upward flick (the flick often carries the hand out
       // of the webcam frame entirely), the detector still honors the gesture once here.
       const lost = this.flick.handLost(now);
+      this.raise.handLost(now);
       this.onUpdate({
         handDetected: false,
         pitch: 0,
@@ -395,6 +403,7 @@ export class HandTracker {
         boost: false,
         backflip: lost.backflip,
         brake: false,
+        takeoffHold: false,
         flickNearMiss: lost.nearMiss,
         landmarks: null,
       });
@@ -499,6 +508,8 @@ export class HandTracker {
     // Backflip gesture on the raw palm Y, in heights of the calibrated box. While a flick is under
     // way the detector hands back the pre-flick pitch instead of the spike the flick causes.
     const flick = this.flick.update(trackedRawY, box.bottom - box.top, now, steeringPitch);
+    // Raise-and-hold takeoff, on the smoothed steering point's height within the box.
+    const takeoffHold = this.raise.update((this.smoothedY - box.top) / Math.max(box.bottom - box.top, 0.05), now);
 
     this.onUpdate({
       handDetected: true,
@@ -507,6 +518,7 @@ export class HandTracker {
       boost: this.fistActive,
       backflip: flick.backflip,
       brake: brake.brake,
+      takeoffHold,
       flickNearMiss: flick.nearMiss,
       landmarks: hand,
     });
