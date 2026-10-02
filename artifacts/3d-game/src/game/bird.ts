@@ -289,12 +289,18 @@ export class Bird {
    * `swimming` softens the wing motion into a gentle paddle stroke — used whenever the
    * bird is submerged underwater, regardless of which species is selected.
    */
-  update(dt: number, flapSpeed: number, swimming = false) {
+  update(dt: number, flapSpeed: number, swimming = false, brake = 0) {
     this.flapPhase += dt * flapSpeed;
-    const flap = swimming
+    let flap = swimming
       ? Math.sin(this.flapPhase) * 0.22 + 0.1
       : Math.sin(this.flapPhase) * 0.65 + 0.25;
-    this.leftWing.rotation.z = flap;
-    this.rightWing.rotation.z = -flap;
+    // Air brake (0..1): the wings spread wide and steady, swing forward and cup (their leading
+    // edges tilt up against the airflow), with only a shallow flutter left. The left wing sits on
+    // −X, so a positive yaw swings it forward; the right wing mirrors it.
+    flap = flap * (1 - 0.7 * brake) + 0.12 * brake;
+    this.leftWing.rotation.order = 'YZX';
+    this.rightWing.rotation.order = 'YZX';
+    this.leftWing.rotation.set(-0.42 * brake, 0.3 * brake, flap);
+    this.rightWing.rotation.set(-0.42 * brake, -0.3 * brake, -flap);
   }
 }

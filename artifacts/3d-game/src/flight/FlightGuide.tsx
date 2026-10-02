@@ -4,6 +4,9 @@ import { ArrowRight, ChevronLeft } from 'lucide-react';
 import { BACKFLIP_DURATION, BARREL_ROLL_DURATION, BASE_SPEED, BOOST_SPEED } from '@/game/presets';
 import {
   BACKFLIP_COOLDOWN_MS,
+  BRAKE_ENGAGE_RATIO,
+  BRAKE_HOLD_MS,
+  BRAKE_RELEASE_RATIO,
   FIST_HOLD_FRAMES,
   FLICK_MIN_RISE,
   FLICK_MIN_SPEED,
@@ -13,10 +16,16 @@ import {
   STEERING_DEADZONE,
   describeBoxFraction,
 } from '@/game/trackingShared';
-import { RAMP_UP_PER_SEC } from '@/game/keyboardControls';
+import {
+  AIR_BRAKE_SINK,
+  CRUISE_TURN_RATE_DEG,
+  KEY_PITCH_RAMP_UP,
+  KEY_ROLL_RAMP_UP,
+} from '@/game/flightTuning';
+import { brakeSpeed, turnRate } from '@/game/flightModel';
 import type { ControlMode } from '@/game/settings';
 import { CornerBrackets } from '@/ui/hud';
-import { BackflipArt, BarrelRollArt, BoostArt, KeyFrame, Keycap, SteerArt, SteerKeysArt } from './guideArt';
+import { BackflipArt, BarrelRollArt, BoostArt, KeyFrame, Keycap, PushArt, SteerArt, SteerKeysArt } from './guideArt';
 
 /** Where the guide was opened from, which decides its buttons. */
 export type GuideOrigin = 'preflight' | 'pause' | 'hud';
@@ -34,6 +43,14 @@ const seconds = (value: number) => `${value.toFixed(1)} s`;
 // FLICK_TIP_RISE (half the box) within FLICK_TIP_SECONDS, which clears both with room to spare.
 const FLICK_TIP_LABEL = describeBoxFraction(FLICK_TIP_RISE);
 const FLICK_TIP_GLYPH = FLICK_TIP_RISE === 0.5 ? '½' : FLICK_TIP_RISE === 0.75 ? '¾' : percent(FLICK_TIP_RISE);
+
+// The air brake, from the flight model itself: its speed, and full-input turn rates with and without it.
+const BRAKE_KT = Math.round(brakeSpeed('air', BASE_SPEED) * MS_TO_KNOTS);
+const degPerSec = (radians: number) => Math.round((radians * 180) / Math.PI);
+const BRAKE_TURN = degPerSec(turnRate(1, brakeSpeed('air', BASE_SPEED), 'air', true, 1));
+const SWIM_BRAKE_TURN = degPerSec(turnRate(1, brakeSpeed('water', BASE_SPEED), 'water', true, 1));
+const CRUISE_TURN = Math.round(CRUISE_TURN_RATE_DEG);
+const BOOST_TURN = degPerSec(turnRate(1, BOOST_SPEED, 'air', false, 1));
 
 interface Move {
   code: string;
@@ -53,10 +70,10 @@ const HAND_MOVES: Move[] = [
     title: 'Steer',
     input: 'Move your palm inside your box',
     art: <SteerArt />,
-    tip: `A corner of your calibrated box is full climb or dive plus full bank at any sensitivity, and the middle ${percent(
+    tip: `Small moves turn gently and the outer part of your box turns hard: a corner is full climb or dive plus full bank. The middle ${percent(
       STEERING_DEADZONE,
     )} is a dead zone, so a steady palm flies level.`,
-    spec: 'Sensitivity sets the response near the center · tracks your palm center · bank to turn',
+    spec: `Full bank turns ${CRUISE_TURN}°/s at cruise, ${BOOST_TURN}°/s boosting · sensitivity scales it · tracks your palm center`,
   },
   {
     code: '02',
@@ -88,6 +105,16 @@ const HAND_MOVES: Move[] = [
       1,
     )} box-heights/s · ${seconds(BACKFLIP_COOLDOWN_MS / 1000)} cooldown`,
   },
+  {
+    code: '05',
+    title: 'Air brake & tight turns',
+    input: 'Push your open palm toward the camera',
+    art: <PushArt ratioLabel={`≥ ${percent(BRAKE_ENGAGE_RATIO)} SIZE`} />,
+    tip: `Move your open hand a little closer to the camera and hold it: the bird slows to ${BRAKE_KT} kt, sinks gently and turns at up to ${BRAKE_TURN}°/s. Pull back to release. Steering stays where your palm is.`,
+    spec: `Engages at ≥ ${percent(BRAKE_ENGAGE_RATIO)} of your calibrated palm size for ${BRAKE_HOLD_MS} ms · releases below ${percent(
+      BRAKE_RELEASE_RATIO,
+    )} · sinks ${AIR_BRAKE_SINK.toFixed(1)} m/s · boost cancels it`,
+  },
 ];
 
 const KEYBOARD_MOVES: Move[] = [
@@ -96,10 +123,10 @@ const KEYBOARD_MOVES: Move[] = [
     title: 'Steer',
     input: 'W A S D or the arrow keys',
     art: <SteerKeysArt />,
-    tip: `A held key ramps to full deflection in about ${seconds(
-      1 / RAMP_UP_PER_SEC,
-    )} and eases back to level when you let go, so tap for small corrections.`,
-    spec: 'W / ↑ climb · S / ↓ dive · A / ← bank left · D / → bank right',
+    tip: `A held key banks fully in about ${seconds(1 / KEY_ROLL_RAMP_UP)} (climb or dive in ${seconds(
+      1 / KEY_PITCH_RAMP_UP,
+    )}) and rolls back to level without overshoot when you let go, so tap for small corrections.`,
+    spec: `W / ↑ climb · S / ↓ dive · A / ← · D / → bank · full bank ${CRUISE_TURN}°/s at cruise, scaled by sensitivity`,
   },
   {
     code: '02',
@@ -131,6 +158,20 @@ const KEYBOARD_MOVES: Move[] = [
   },
   {
     code: '04',
+    title: 'Air brake & tight turns',
+    input: 'Hold Shift',
+    art: (
+      <KeyFrame label="The Shift key">
+        <Keycap press wide cycle="3.2s" label="Shift">
+          Shift
+        </Keycap>
+      </KeyFrame>
+    ),
+    tip: `Hold Shift to slow to ${BRAKE_KT} kt and turn at up to ${BRAKE_TURN}°/s (${SWIM_BRAKE_TURN}°/s swimming): perfect for U-turns, chasing a shark, or a landing approach. The bird sinks gently while braking.`,
+    spec: `Sinks ${AIR_BRAKE_SINK.toFixed(1)} m/s · never stalls · Space (boost) cancels it`,
+  },
+  {
+    code: '05',
     title: 'Pause',
     input: 'Esc, or ? for this guide',
     art: (

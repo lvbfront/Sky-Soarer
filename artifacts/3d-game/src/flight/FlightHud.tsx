@@ -32,6 +32,8 @@ interface FlightHudProps {
   previewHeight: number;
   handDetected: boolean;
   boosting: boolean;
+  /** The air brake is applied (Shift, or the palm pushed toward the camera). */
+  braking: boolean;
   barrelRolling: boolean;
   backflipping: boolean;
   underwater: boolean;
@@ -108,6 +110,7 @@ export function FlightHud({
   previewHeight,
   handDetected,
   boosting,
+  braking,
   barrelRolling,
   backflipping,
   underwater,
@@ -166,6 +169,7 @@ export function FlightHud({
 
   const badges = [
     { key: 'boost', label: 'Boost', active: boosting, cool: false },
+    { key: 'brake', label: 'Brake', active: braking, cool: true },
     { key: 'roll', label: 'Barrel Roll', active: barrelRolling, cool: false },
     { key: 'flip', label: 'Backflip', active: backflipping, cool: false },
     ...(showDiving ? [{ key: 'dive', label: 'Diving', active: underwater, cool: true }] : []),
@@ -268,9 +272,9 @@ export function FlightHud({
           style={handDetected ? undefined : { borderColor: 'rgba(255, 149, 128, 0.6)' }}
         >
           {keyboard
-            ? 'WASD / arrows steer · Space boost · F flip'
+            ? 'WASD steer · Space boost · Shift brake · F flip'
             : handDetected
-              ? 'Tilt your palm to glide'
+              ? 'Tilt your palm to glide · push it in to brake'
               : 'Show your hand to the camera to steer'}
         </p>
         {/* Near-miss coaching: an upward flick that almost made a backflip. Re-keyed per hint so
@@ -372,6 +376,7 @@ export function FlightHud({
             <span className="ascent-hud text-white/70">m</span>
           </p>
         </div>
+
       </div>
 
       {/* ---- Bottom center: trick badges. They snap on and off like annunciator lights (no color

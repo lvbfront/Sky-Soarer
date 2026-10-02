@@ -32,6 +32,7 @@ import {
   shouldAutoShowGuide,
   type ControlMode,
   type FlightSettings,
+  type SteeringSettings,
 } from '@/game/settings';
 import { Landing } from '@/landing/Landing';
 import { BootSequence, type BootLine } from '@/preflight/BootSequence';
@@ -45,6 +46,7 @@ import {
 import { FlightHud, type FlickHint } from '@/flight/FlightHud';
 import { FlightGuide, type GuideOrigin } from '@/flight/FlightGuide';
 import { PauseMenu } from '@/flight/PauseMenu';
+import { DebugOverlay, isFlightDebugEnabled } from '@/flight/DebugOverlay';
 import { PrivacyPanel } from '@/ui/privacy';
 
 // Hand tracking (handControls + the @mediapipe/hands runtime) and the full game engine are split
@@ -295,10 +297,16 @@ function buildBootLines(boot: BootStatus, error: StartupError | null): BootLine[
 }
 
 /** The calibration screen's points as the tracker's calibration data, once all five are captured. */
-function calibrationFromPoints(points: CalibrationPointsMap, sensitivity: number): CalibrationData | null {
+function calibrationFromPoints(
+  points: CalibrationPointsMap,
+  sensitivity: number,
+  handSize: number | null = null,
+): CalibrationData | null {
   const { center, topLeft, topRight, bottomLeft, bottomRight } = points;
   if (!center || !topLeft || !topRight || !bottomLeft || !bottomRight) return null;
-  return { center, corners: { topLeft, topRight, bottomLeft, bottomRight }, sensitivity };
+  const calibration: CalibrationData = { center, corners: { topLeft, topRight, bottomLeft, bottomRight }, sensitivity };
+  if (handSize !== null) calibration.handSize = handSize;
+  return calibration;
 }
 
 /** What's wrong with the captured points (see validateCalibration); empty until all five exist. */
@@ -318,11 +326,13 @@ function describeStatus(state: {
   roll: number;
   pitch: number;
   boost: boolean;
+  brake: boolean;
   barrelRolling: boolean;
   backflipping: boolean;
 }) {
   if (!state.handDetected) return 'No Hand Detected';
   if (state.boost) return state.keyboard ? 'Boost Active' : 'Fist (Boost) Active';
+  if (state.brake) return 'Air Brake';
   if (state.barrelRolling) return 'Barrel Roll Detected';
   if (state.backflipping) return 'Backflip!';
   if (state.roll > 0) return 'Steering Right';
@@ -369,6 +379,7 @@ function App() {
   const [flightState, setFlightState] = useState<FlightState>('landing');
   const [handDetected, setHandDetected] = useState(false);
   const [boosting, setBoosting] = useState(false);
+  const [braking, setBraking] = useState(false);
   const [barrelRolling, setBarrelRolling] = useState(false);
   const [backflipping, setBackflipping] = useState(false);
   const [underwater, setUnderwater] = useState(false);
@@ -398,7 +409,6 @@ function App() {
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
 
-  const [sensitivity, setSensitivity] = useState(1);
   const [calibrationStep, setCalibrationStep] = useState(0);
   // Validation of the finished calibration (also read by the preview rAF, through the ref), whether
   // the points came from the saved calibration, and whether one is saved at all (the landing's
@@ -415,6 +425,8 @@ function App() {
   calibrationStepRef.current = calibrationStep;
 
   const reducedMotion = usePrefersReducedMotion();
+  // ?debug=flight: the flight numbers overlay (read once; nothing stored).
+  const [flightDebug] = useState(isFlightDebugEnabled);
   const reducedMotionRef = useRef(reducedMotion);
   reducedMotionRef.current = reducedMotion;
   // The landing intro timeline plays once per page load, not on every return from pre-flight.
@@ -426,6 +438,9 @@ function App() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const controlMode = settings.controls;
+  const steering = settings.steering;
+  const flightStateRef = useRef(flightState);
+  flightStateRef.current = flightState;
 
   const flying = flightState === 'flying';
   const paused = flying && (pauseOpen || guide !== null);
@@ -534,7 +549,10 @@ function App() {
     latestControlRef.current = state;
     latestLandmarksRef.current = state.landmarks;
     setHandDetected(state.handDetected);
-    setBoosting(state.boost);
+    // The engine decides what the inputs mean (on the ground, boost is not a boost).
+    const engine = engineRef.current;
+    setBoosting(engine ? engine.isBoosting() : state.boost);
+    setBraking(engine ? engine.isBraking() : state.brake && !state.boost);
     setStatusText(
       describeStatus({
         keyboard: settingsRef.current.controls === 'keyboard',
@@ -542,6 +560,7 @@ function App() {
         roll: state.roll,
         pitch: state.pitch,
         boost: state.boost,
+        brake: state.brake,
         barrelRolling: barrelRollingRef.current,
         backflipping: backflippingRef.current,
       }),
@@ -675,14 +694,10 @@ function App() {
 
       // A returning player's saved calibration skips the calibration screen (the landing's
       // Recalibrate, the guide's Back, the pause menu and the calibration screen itself all lead
-      // back to it). Otherwise it opens, starting from the saved sensitivity if there is one.
+      // back to it). The sensitivity is a steering setting (settings.steering), not the tracker's.
       const saved = loadCalibration();
       const useSaved = saved !== null && !forceCalibrationRef.current;
       forceCalibrationRef.current = false;
-      if (saved) {
-        tracker.setSensitivity(saved.sensitivity);
-        setSensitivity(saved.sensitivity);
-      }
       if (useSaved) {
         tracker.applyCalibration(saved);
         calibrationPointsRef.current = { center: saved.center, ...saved.corners };
@@ -911,10 +926,25 @@ function App() {
     }
   }, []);
 
-  const handleSensitivityChange = useCallback((value: number) => {
-    setSensitivity(value);
-    trackerRef.current?.setSensitivity(value);
+  // Steering settings (sensitivity, invert), from the landing, the calibration screen or the pause
+  // menu: they apply to a live flight at once. Outside the landing (whose choices are all saved
+  // together by Begin pre-flight) they're saved right away, inside the settings object.
+  const handleSteeringChange = useCallback((patch: Partial<SteeringSettings>) => {
+    const next: FlightSettings = { ...settingsRef.current, steering: { ...settingsRef.current.steering, ...patch } };
+    settingsRef.current = next;
+    setSettings(next);
+    engineRef.current?.setSteering(next.steering);
+    keyboardRef.current?.setSensitivity(next.steering.sensitivity);
+    if (flightStateRef.current !== 'landing') {
+      saveSettings(next);
+      setQuickStartSettings(next);
+      setHasSaved(true);
+    }
   }, []);
+  const handleSensitivityChange = useCallback(
+    (value: number) => handleSteeringChange({ sensitivity: value }),
+    [handleSteeringChange],
+  );
 
   /** Kills any takeoff animation, hides the veil, and releases a pending launch await. */
   const resetTakeoff = useCallback(() => {
@@ -1022,6 +1052,8 @@ function App() {
         weather: chosen.weather,
         ringChallenge: chosen.ringChallenge,
         quality: qualityRef.current,
+        steering: chosen.steering,
+        reducedMotion: reducedMotionRef.current,
         onQualityChange: (level) => setRenderedQuality(level),
         onScoreChange: (total) => {
           setScore(total);
@@ -1063,7 +1095,7 @@ function App() {
     // already disposed it in that case.
     if (engineRef.current !== engine) return;
     if (chosen.controls === 'keyboard') {
-      const keyboard = new KeyboardControls(handleControlState);
+      const keyboard = new KeyboardControls(handleControlState, chosen.steering.sensitivity);
       keyboardRef.current = keyboard;
       keyboard.start();
     }
@@ -1085,12 +1117,16 @@ function App() {
 
   // Start Flying on the calibration screen: remember this calibration for next time, then take off.
   const handleCalibratedTakeoff = useCallback(() => {
-    const calibration = calibrationFromPoints(calibrationPointsRef.current, sensitivity);
+    const calibration = calibrationFromPoints(
+      calibrationPointsRef.current,
+      settingsRef.current.steering.sensitivity,
+      trackerRef.current?.getHandSize() ?? null,
+    );
     if (!calibration || calibrationProblemsFor(calibrationPointsRef.current).length > 0) return;
     saveCalibration(calibration);
     setCalibrationSaved(true);
     requestTakeoff();
-  }, [sensitivity, requestTakeoff]);
+  }, [requestTakeoff]);
 
   // Takeoff, part 2: once the first flight frame is up, the veil lifts off the chase camera's
   // swoop-in and the HUD blocks stagger in. Explicit from/to values keep this correct even if an
@@ -1154,6 +1190,7 @@ function App() {
     setFlickHint(null);
     setHandDetected(false);
     setBoosting(false);
+    setBraking(false);
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
@@ -1179,6 +1216,7 @@ function App() {
     setGuide(null);
     setFlickHint(null);
     setBoosting(false);
+    setBraking(false);
     setBarrelRolling(false);
     setBackflipping(false);
     setUnderwater(false);
@@ -1221,6 +1259,8 @@ function App() {
   }, [flightState]);
 
   // ---- Pause and the "How to fly" guide ----------------------------------------------------
+
+  useEffect(() => engineRef.current?.setReducedMotion(reducedMotion), [reducedMotion]);
 
   // The game loop and the keyboard input freeze while the pause menu or the guide is open.
   useEffect(() => {
@@ -1323,6 +1363,7 @@ function App() {
           previewHeight={HUD_PREVIEW_HEIGHT}
           handDetected={handDetected}
           boosting={boosting}
+          braking={braking}
           barrelRolling={barrelRolling}
           backflipping={backflipping}
           underwater={underwater}
@@ -1341,6 +1382,8 @@ function App() {
         />
       )}
 
+      {flying && flightDebug && <DebugOverlay engineRef={engineRef} />}
+
       {flying && pauseOpen && guide === null && (
         <PauseMenu
           summary={takeoffSummary}
@@ -1349,6 +1392,9 @@ function App() {
           quality={quality}
           renderedQuality={renderedQuality}
           onQualityChange={handleQualityChange}
+          steering={steering}
+          controlMode={controlMode}
+          onSteeringChange={handleSteeringChange}
           onResume={handleResume}
           onGuide={handleOpenGuideFromPause}
           onRecalibrate={controlMode === 'hand' ? handleRecalibrate : undefined}
@@ -1380,6 +1426,7 @@ function App() {
           reducedMotion={reducedMotion}
           playIntro={introPending}
           onChange={handleSettingsChange}
+          onSteeringChange={handleSteeringChange}
           onBegin={handleBeginPreflight}
           onRecalibrate={handleBeginRecalibration}
           onQuickStart={handleQuickStart}
@@ -1420,7 +1467,7 @@ function App() {
             canvasHeight={CALIBRATION_PREVIEW_HEIGHT}
             handDetected={handDetected}
             step={calibrationStep}
-            sensitivity={sensitivity}
+            sensitivity={steering.sensitivity}
             problems={calibrationProblems}
             restored={calibrationRestored}
             feedResolution={boot.cameraResolution}

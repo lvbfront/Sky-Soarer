@@ -3,12 +3,12 @@ import { MEDIAPIPE_FILE_SIZES } from 'virtual:mediapipe-hands-assets';
 import { damp, perFrameRate } from './damping';
 import { meterDownloads } from './downloadMeter';
 import { FlickDetector } from './flickDetector';
-import { applyDeadzone, applySensitivity, axisValue, clamp, computeBox, validateCalibration } from './trackingMath';
+import { PalmBrakeDetector } from './brakeDetector';
+import { expoCurve } from './flightModel';
+import { applyDeadzone, axisValue, clamp, computeBox, depthCorrected, palmSize, validateCalibration } from './trackingMath';
 import {
   DEFAULT_BOX,
   FIST_HOLD_FRAMES,
-  MAX_SENSITIVITY,
-  MIN_SENSITIVITY,
   STEERING_DEADZONE,
   TrackingStartError,
   type CalibrationBox,
@@ -45,6 +45,8 @@ export interface HandControlState {
   boost: boolean;
   /** One-shot pulse: true for exactly the frame a fast upward flick is detected. */
   backflip: boolean;
+  /** True while the air brake is held (keyboard: Shift; hand: the open palm pushed toward the camera). */
+  brake: boolean;
   /**
    * One-shot: set on the frame an upward flick ends that came close to a backflip but missed
    * (too slow, or too short), so the HUD can coach the player. Null on every other frame.
@@ -173,9 +175,12 @@ export class HandTracker {
   private corners: Partial<Record<CalibrationCorner, CalibrationPoint>> = {};
   private box: CalibrationBox = { ...DEFAULT_BOX };
 
-  // Steering response curve applied on top of the box-normalized signal (see applySensitivity),
-  // set by the calibration screen's slider; 1 = linear, >1 = twitchier near center, <1 = calmer.
-  private sensitivity = 1;
+  // The air brake (palm pushed toward the camera): the palm's apparent size against the size at
+  // calibration. `palmSizeSmoothed` follows the size so the center capture can record it.
+  private brake = new PalmBrakeDetector();
+  private palmSizeSmoothed = 0;
+  private lastSizeMs: number | null = null;
+  private calibratedHandSize: number | null = null;
 
   // The backflip gesture, measured in box heights on the raw (un-smoothed) palm Y, tracked
   // independently of the smoothed steering signal so smoothing doesn't blur out the flick (see
@@ -290,11 +295,6 @@ export class HandTracker {
     return { x: this.originX, y: this.originY };
   }
 
-  /** Sets the steering response curve; 1 = linear, >1 = twitchier near center, <1 = calmer. */
-  setSensitivity(multiplier: number) {
-    this.sensitivity = clamp(multiplier, MIN_SENSITIVITY, MAX_SENSITIVITY);
-  }
-
   /**
    * Captures the current smoothed tracked position as the new neutral center, so the player
    * can hold their hand wherever is comfortable and declare that "straight ahead".
@@ -304,7 +304,19 @@ export class HandTracker {
   captureNeutralCenter(): CalibrationPoint | null {
     if (!this.hasSmoothed) return null;
     this.setOrigin(this.smoothedX, this.smoothedY);
+    // The palm's size here is the air brake's reference ("my hand at its normal distance").
+    if (this.palmSizeSmoothed > 0) this.setHandSize(this.palmSizeSmoothed);
     return this.getOrigin();
+  }
+
+  /** The palm size recorded at the center capture (saved with the calibration), if any. */
+  getHandSize() {
+    return this.calibratedHandSize ?? this.brake.getBaseline();
+  }
+
+  private setHandSize(size: number | null) {
+    this.calibratedHandSize = size;
+    this.brake.setBaseline(size);
   }
 
   /**
@@ -330,7 +342,12 @@ export class HandTracker {
     this.box = computeBox(this.corners);
   }
 
-  /** Restores a complete calibration (center, 4 corners, sensitivity), e.g. one saved last session. */
+  /**
+   * Restores a complete calibration (center, 4 corners, palm size), e.g. one saved last session.
+   * Its sensitivity is a steering setting the engine applies (both control modes), not the tracker.
+   * A calibration saved before the air brake existed has no palm size: the brake measures one from
+   * the first seconds of tracking instead.
+   */
   applyCalibration(calibration: CalibrationData) {
     this.setOrigin(calibration.center.x, calibration.center.y);
     this.corners = {};
@@ -338,7 +355,7 @@ export class HandTracker {
       this.corners[corner] = { x: clamp(point.x, 0, 1), y: clamp(point.y, 0, 1) };
     }
     this.box = computeBox(this.corners);
-    this.setSensitivity(calibration.sensitivity);
+    this.setHandSize(calibration.handSize ?? null);
   }
 
   /** What's wrong with the current center + box, if anything (see validateCalibration). */
@@ -352,6 +369,7 @@ export class HandTracker {
     this.originY = 0.5;
     this.corners = {};
     this.box = { ...DEFAULT_BOX };
+    this.setHandSize(null);
   }
 
   private handleResults(results: Results) {
@@ -365,6 +383,7 @@ export class HandTracker {
       this.fistFrameCounter = 0;
       this.fistActive = false;
       this.resetFistGuard();
+      this.brake.release();
       this.previousPoint = null;
       // If the hand vanished right after a fast upward flick (the flick often carries the hand out
       // of the webcam frame entirely), the detector still honors the gesture once here.
@@ -375,6 +394,7 @@ export class HandTracker {
         roll: 0,
         boost: false,
         backflip: lost.backflip,
+        brake: false,
         flickNearMiss: lost.nearMiss,
         landmarks: null,
       });
@@ -391,12 +411,26 @@ export class HandTracker {
     palmX /= PALM_POINTS.length;
     palmY /= PALM_POINTS.length;
 
+    // Air brake: the palm's apparent size against its size at calibration. Pushing the hand toward
+    // the camera also moves its image away from the frame's center, so the steering point is
+    // corrected back by the same ratio (pushing in brakes without steering).
+    const video = this.videoEl;
+    const aspect = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 4 / 3;
+    const size = palmSize(hand, aspect);
+    const sizeDt = this.lastSizeMs === null ? 0 : Math.min((now - this.lastSizeMs) / 1000, MAX_SMOOTHING_DT);
+    this.lastSizeMs = now;
+    this.palmSizeSmoothed =
+      this.palmSizeSmoothed > 0 ? this.palmSizeSmoothed + (size - this.palmSizeSmoothed) * damp(SMOOTHING_RATE, sizeDt) : size;
+    const brake = this.brake.update(size, now);
+    const steerX = depthCorrected(palmX, brake.ratio);
+    const steerY = depthCorrected(palmY, brake.ratio);
+
     // Raw camera-frame Y of the steering point (the flick detector's input), and the X mirrored
     // horizontally (scaleX = -1) to match the mirrored webcam preview: this makes moving your hand
     // to your own left steer left and to your own right steer right, the way a mirror (or any
     // selfie camera app) naturally behaves.
-    const trackedRawY = palmY;
-    const mirroredTrackedX = 1 - palmX;
+    const trackedRawY = steerY;
+    const mirroredTrackedX = 1 - steerX;
 
     // Fist detection: average fingertip distance from palm center, normalized by hand size.
     const wrist = hand[0];
@@ -457,8 +491,10 @@ export class HandTracker {
     // axisValue's "greater than center = positive" convention.
     const pitchRaw = axisValue(-this.smoothedY, -this.originY, -box.top, -box.bottom);
 
-    const roll = applySensitivity(applyDeadzone(rollRaw, STEERING_DEADZONE), this.sensitivity);
-    const steeringPitch = applySensitivity(applyDeadzone(pitchRaw, STEERING_DEADZONE), this.sensitivity);
+    // Deadzone, then the comfort expo (gentle near the center, sharp at the edge of the box). The
+    // steering sensitivity is turn authority, applied by the engine for both control modes.
+    const roll = expoCurve(applyDeadzone(rollRaw, STEERING_DEADZONE));
+    const steeringPitch = expoCurve(applyDeadzone(pitchRaw, STEERING_DEADZONE));
 
     // Backflip gesture on the raw palm Y, in heights of the calibrated box. While a flick is under
     // way the detector hands back the pre-flick pitch instead of the spike the flick causes.
@@ -470,6 +506,7 @@ export class HandTracker {
       roll,
       boost: this.fistActive,
       backflip: flick.backflip,
+      brake: brake.brake,
       flickNearMiss: flick.nearMiss,
       landmarks: hand,
     });

@@ -762,6 +762,29 @@ html {
   animation: ascent-guide-flick-trail 2.6s linear infinite;
 }
 
+/* Air brake: the open palm grows (pushed toward the camera), holds, and drops back; the BRAKE
+   readout and the tight-turn arc light only while it's held big. */
+@keyframes ascent-guide-push {
+  0%, 22% { transform: scale(1); }
+  34%, 70% { transform: scale(1.32); }
+  82%, 100% { transform: scale(1); }
+}
+
+@keyframes ascent-guide-while-pushed {
+  0%, 30% { opacity: 0.25; }
+  36%, 70% { opacity: 1; }
+  78%, 100% { opacity: 0.25; }
+}
+
+.ascent-guide-push {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-push 3.2s cubic-bezier(0.45, 0, 0.3, 1) infinite;
+}
+
+.ascent-guide-while-pushed {
+  animation: ascent-guide-while-pushed 3.2s linear infinite;
+}
+
 /* Keycaps: a key lights and sinks when "pressed". --press-delay staggers keys in a sequence. */
 .ascent-key {
   display: inline-flex;

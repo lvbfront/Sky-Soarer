@@ -41,7 +41,9 @@ How a session plays:
    - **Returning players skip calibration.** When a valid calibration is saved, the hand boot shows `CALIBRATION [SAVED]` and goes straight to takeoff. To recalibrate, use **Recalibrate hand controls** under Begin pre-flight on the landing, **Recalibrate** in the pause menu, or the guide's **Back to calibration** (which opens the saved box). **Recalibrate** on a complete calibration screen starts over.
    - **"How to fly" guide.** Before takeoff (after Start Flying, or after the keyboard boot), the guide opens by itself until the player ticks **Don't show again**, stored per input mode. It has one card per move, each with a looping procedural SVG/CSS illustration and one precise tip whose numbers come from the real thresholds (§6.12). **Take off** continues; **Back** returns to calibration (hand) or the landing (keyboard).
 4. **Flight.**
-   - Move your palm inside the calibrated box to pitch and roll (keyboard: W/↑ climb, S/↓ dive, A/← and D/→ bank, with a smooth ramp). Roll banks the bird, and banking turns it.
+   - Move your palm inside the calibrated box to pitch and roll (keyboard: W/↑ climb, S/↓ dive, A/← and D/→ bank, with a smooth ramp). Roll banks the bird, and banking turns it in a coordinated turn: ~93°/s at cruise (a held key turns 180° in ~2.3 s), wider when boosting, tighter when braking or swimming (§6.14).
+   - **Air brake:** hold **Shift**, or push your open palm toward the camera. The bird slows to half of cruise, sinks gently and turns much tighter (~145°/s; ~160°/s swimming). Boost cancels it.
+   - **Steering settings** (sensitivity 0.5–2.0x, invert climb/dive) apply to **both** inputs, on the landing's last chapter and live in the pause menu (§6.14).
    - **Close a fist** (keyboard: hold **Space**) to boost. Boosting also fires an automatic 0.8 s barrel roll. Closing or opening the fist doesn't nudge the steering.
    - **Flick your hand up fast**, about half the height of your calibrated box in under 0.2 s (keyboard: **F**), for a 0.9 s backflip. The flick doesn't pitch the bird up. An upward flick that was too slow or too short shows a brief coaching hint, "Flick faster ↑" or "Flick higher ↑".
    - Both tricks are cosmetic only. They never change heading or momentum.
@@ -188,11 +190,13 @@ The game needs **no secrets, no backend and no database**.
 │           ├── flight/
 │           │   ├── FlightHud.tsx  # in-flight HUD: heading tape, SPD/ALT, score, badges, boost effect, sensor feed or
 │           │   │                  #   keyboard input indicator, near-miss flick hint, NEXT RING distance, ? / Pause / Stop buttons
-│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Recalibrate (hand) / Back to landing, Graphics quality
+│           │   ├── PauseMenu.tsx  # pause menu: Resume / How to fly / Recalibrate (hand) / Back to landing, Steering, Graphics
+│           │   ├── DebugOverlay.tsx # ?debug=flight numbers overlay (state, speed, yaw rate, bank, AGL, brake, FPS…)
 │           │   ├── FlightGuide.tsx # "How to fly" guide: per-move cards for hand or keyboard, tips built from real constants
 │           │   └── guideArt.tsx   # procedural SVG hand illustrations + animated keycaps (CSS keyframes in index.css)
 │           ├── ui/
 │           │   ├── hud.tsx        # CornerBrackets, Wordmark (shared instrument-frame pieces)
+│           │   ├── SteeringControls.tsx # sensitivity slider + invert switch (landing chapter 4, pause menu)
 │           │   └── privacy.tsx    # CAMERA_PRIVACY_NOTE, PrivacyNote (note + "Privacy" link), PrivacyPanel (stored data, Clear my data)
 │           ├── landing/       # ★ the scroll-driven landing page ("The Ascent")
 │           │   ├── Landing.tsx     # chapters, GSAP ScrollTrigger (scrub + snap), intro timeline, HUD, keys, sound toggle
@@ -215,7 +219,12 @@ The game needs **no secrets, no backend and no database**.
 │               ├── handControls.ts # MediaPipe wrapper: load + frame loop, calibration box, fist gesture + steering guard,
 │               │                   #   flick detector wiring (lazy-loaded)
 │               ├── *.test.ts       # Vitest unit tests (next to the module they test)
-│               ├── keyboardControls.ts # keyboard input → the same HandControlState (ramped axes, Space boost, F backflip)
+│               ├── keyboardControls.ts # keyboard input → the same HandControlState (ramped axes, Space boost, Shift brake,
+│               │                       #   F backflip; sensitivity scales the ramps)
+│               ├── flightTuning.ts # ★ every tunable flight number: turn model, springs, brake, steering ranges, camera
+│               ├── flightModel.ts  # pure flight maths: coordinated-turn rate, critically damped springs, stepTurn,
+│               │                   #   visual bank, sensitivity scaling, hand expo, brake speeds, keyboard ramps
+│               ├── brakeDetector.ts # pure hand air-brake gesture (palm size vs. calibration, hold + hysteresis)
 │               ├── downloadMeter.ts # real download progress for MediaPipe's own fetch/XHR requests (used by handControls)
 │               ├── bird.ts         # 4 procedural low-poly birds + wing flap
 │               ├── terrain.ts      # Mountain Valley: streamed simplex-noise tiles
@@ -341,12 +350,15 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 
 ### 6.2 Flight physics and camera (`GameEngine.update`)
 - **Every smoothing is frame-rate independent:** `value += (target - value) * damp(RATE, dt)` with `damp = 1 - exp(-rate·dt)` (`damping.ts`). Each rate is written as `perFrameRate(oldFactor, 60)`, so the feel at 60 FPS is exactly the old per-frame lerp, and 30/144 Hz now match it. Unit-tested in `damping.test.ts`.
-- `currentPitch` and `currentRoll` chase the tracker's targets at `ORIENTATION_RATE` (0.06 per frame at 60 FPS), then scale by max angles of 38° pitch and 48° roll.
-- **Steering and visual angles are separate.** Heading, the forward vector and movement use only `steeringPitchAngle`/`steeringRollAngle`. The mesh rotation uses `visual*Angle`, which adds the 360° trick sweep. **Never merge these.** See `.agents/memory/decouple-visual-sweep-from-physics.md`.
-- **Turning.** `headingYaw -= steeringRoll * dt * 0.6`, and the heading is locked while a barrel roll is in progress.
+- **The flight model lives in two modules** (§6.14): every number in `flightTuning.ts`, every formula in `flightModel.ts` (pure, unit-tested). The engine only wires them up.
+- **Inputs are smoothed by critically damped springs** (`stepSpring`, exact closed form, frame-rate independent, ζ = 1): pitch (63% in 0.2 s) and the bank (0.15 s, inside `stepTurn`). Rolling out never overshoots past level (a guard stops a spring that would cross its target).
+- **Steering and visual angles are separate.** Heading, the forward vector and movement use only the steering pitch and the turn state. The mesh rotation uses `visual*Angle`, which adds the 360° trick sweep. **Never merge these.** See `.agents/memory/decouple-visual-sweep-from-physics.md`.
+- **Turning** (`stepTurn`): a coordinated turn. The yaw rate is `GAIN·tan(bank)/√(speed/9)` × the sensitivity's turn authority (√s) × a brake factor (1.1 in the air), clamped to 200°/s, then eased by a fast spring whose acceleration is capped at 400°/s². `headingYaw -= yawRate·dt`. The heading is locked (yaw rate 0) while a barrel roll is in progress. Banking never changes altitude: the model is kinematic, so a level turn holds its height exactly.
+- **Visual bank** is up to ~60° flying and ~40° swimming (where the body yaws into the turn instead, `BODY_YAW_LEAD_WATER`); sensitivity scales it with the turn (capped at 70°). Max pitch is 38° × s^¼.
 - **Speed.**
   - Base speed is 9 and boost is 20. Underwater they're 5 and 10.
   - Speed chases its target at `SPEED_RATE` (0.04 per frame at 60 FPS), or `UNDERWATER_SPEED_RATE` (0.02).
+  - **Air brake:** target 4.5 (half of cruise; never below `MIN_FLYING_SPEED` 4) in the air, 3 swimming, at `BRAKE_SPEED_RATE`; in the air the bird also sinks `AIR_BRAKE_SINK` (1.5 m/s). Boost cancels it.
   - Collecting a ring adds a +7 pulse that decays at 9/s.
 - **Altitude.**
   - Over solid ground (mountains or islands) the floor is `height + 3.5`.
@@ -354,10 +366,11 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - Over open water the floor is the real seabed: `ocean.groundHeightAt(x, z) + SEABED_CLEARANCE` (1.2), so it follows the dunes, rocks and the reef slopes rising toward islands (the bird is eased up a slope near the shore, never snapped).
   - The ceiling is y = 140.
   - The bird starts at (0, 26, 0) heading +Z.
-- **Camera.** A chase camera 6.5 behind and 2.2 above the bird, looking 8 units ahead, chasing at `CAMERA_RATE` (0.05 per frame at 60 FPS; 0.03 underwater). FOV chases at `FOV_RATE` (0.06).
+- **Camera** (`updateCamera`, allocation-free). Its yaw follows the heading on a critically damped spring (0.3 s), aimed into the turn by yawRate × 0.18 s (0.08 s under reduced motion), and is clamped to 35° from the heading so the bird never leaves the frame in a U-turn. Pitch, distance (6.5; 5 underwater; boost pulls it back 0.3 per m/s over cruise) and height (2.2; 1.7 underwater) have springs too. It looks 8 units ahead along its own direction, rolls with 22% of the bird's bank, and widens its FOV by up to 3° in tight turns; reduced motion: no roll, no turn or boost FOV kicks. It starts far and high (14 / 7) so takeoff still swoops in. On the mountain map and over islands it stays 0.8 above the ground. FOV chases at `FOV_RATE` (0.06).
   - **Ocean: the camera stays on the bird's side of the water** (`keepCameraOnBirdSide`): underwater it's kept 0.35 below the animated surface (`waterHeightAt`, the same waves the shader draws) and 0.6 above the seabed; above water it's kept 0.35 above the waves. The water is opaque, so without this a shallow-swimming bird would be hidden under it. The underwater look (fog, sky hidden, reef shown) therefore always matches the bird's `underwater` state.
   - The underwater switch uses the calm water level (0) ±0.4 hysteresis, not the waves, so skimming never flickers.
-- **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` to false, so the bird eases back to level cruise instead of latching the last input.
+- **Hand loss.** On `handDetected: false`, `applyControls` first handles the backflip fallback. It then sets `targetPitch`/`targetRoll` to 0 and `boosting` and the brake to false, so the bird eases back to level cruise instead of latching the last input.
+- **Steering settings** reach the engine at construction (`options.steering`) and live through `setSteering()`; invert flips the pitch input in `applyControls`. `setReducedMotion()` follows the OS setting live.
 - **Timing.** A `THREE.Timer` (not the deprecated `Clock`), connected to the document so a hidden tab yields a zero delta; `loop` calls `timer.update().getDelta()`. `dt` is still clamped to 0.05 s, so below 20 FPS the simulation runs in slow motion.
 - **Pause.** `setPaused(true)` cancels the rAF loop, so there's no update and no render and the canvas holds the last frame. It also suspends the wind `AudioContext`, and `applyControls` returns early (input can't steer, boost or start a trick behind the menu). `setPaused(false)` discards the paused time with `timer.reset()` and restarts the loop. A resize while paused re-renders the held frame once. Before `start()` has finished, `setPaused` only records the flag, and `start()` honors it (so two loops are never scheduled).
 - **Wing flaps.** Flap rate is mapped from speed onto 7–17, times 0.55 when gliding in a dive (pitch below -0.15 and not boosting), and uses a gentle paddle stroke underwater.
@@ -385,18 +398,26 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   3. Mirror X as `1 - x`, so the steering matches the mirrored "selfie" preview.
   4. Subtract the closed-fist offset (see **Fist steering guard**), then smooth with a frame-rate independent EMA, `damp(SMOOTHING_RATE, frameDt)` where the rate is the old 0.35 per frame at a webcam's 30 FPS. The EMA is **not updated** while the fist guard holds the steering sample.
   5. Map onto -1..1 **within the calibrated box** with `axisValue()`. Each side of the center uses its own asymmetric extent.
-  6. Apply a normalized deadzone of 0.06, rescaled so there's no jump at its edge.
-  7. Apply the sensitivity (0.5–2.0) as a response curve, `applySensitivity(v, s) = s·v / (1 + (s − 1)·|v|)`. It keeps 0 → 0 and ±1 → ±1, so a box corner is full deflection at every sensitivity, and its gain at the center is `s`. At 0.5x the edge is still 1 (the middle of the box reads 0.33), and at 2x it doesn't saturate mid-box (the middle reads 0.67). The old plain multiply got both of those wrong.
+  6. Apply a normalized deadzone of 0.07 (7% of the calibrated half-range), rescaled so there's no jump at its edge.
+  7. Apply the comfort expo, `expoCurve(v) = 0.65·v + 0.35·v³` (`HAND_EXPO`): small offsets turn gently, and with the turn model's tan(bank) the last 30% of the box gives more than half the full turn rate. The **sensitivity is no longer applied here**: it's a steering setting the engine applies to both inputs as turn authority (§6.14). (`applySensitivity` is kept in `trackingMath.ts`, unused, with its tests.)
   8. Feed the raw palm Y to the `FlickDetector`, which returns the pitch to output (the steering pitch, or the held pre-flick value).
+
+  Before step 1's point is used for steering, it's **depth-corrected** for the air brake (`depthCorrected`): pushing the hand toward the camera moves its image away from the frame's center by the palm-size ratio, so the offset is divided by that ratio (only when > 1) and braking doesn't steer.
+
+  The steering EMA (step 4) is the hand path's only low-pass: a time constant of ~77 ms at any tracker rate.
 
   Frame times come from `frameStartMs`, taken in `processFrame` when a new video frame is picked up, *before* `hands.send()`. So MediaPipe's variable inference time doesn't jitter the flick speeds or the EMA. The warm-up frame falls back to `performance.now()`.
 - **Box calibration.**
   - `captureNeutralCenter()` and `captureCorner()` snapshot the smoothed point.
   - `computeBox()` (`trackingMath.ts`, pure) averages the two corners that share a side, so the left edge is the mean of `topLeft.x` and `bottomLeft.x`, and keeps a side at its default until both of its corners exist.
-  - `setCorner()` sets a corner directly and backs the drag-to-fine-tune feature. `applyCalibration(data)` restores a saved center + 4 corners + sensitivity. `getCalibrationProblems()` runs `validateCalibration`.
+  - `setCorner()` sets a corner directly and backs the drag-to-fine-tune feature. `applyCalibration(data)` restores a saved center + 4 corners + palm size (the sensitivity is a steering setting now, read from `settings.steering`). `getCalibrationProblems()` runs `validateCalibration`.
   - Default box (`DEFAULT_BOX` in `trackingShared.ts`, also the calibration screen's ghost-reticle hints): x 0.24–0.76, y 0.28–0.72.
   - **Validation** (`validateCalibration`): the box must be at least `MIN_BOX_SIZE` (0.15 of the frame) on each axis, so an inside-out box with left and right swapped fails too. The center must sit inside it with at least `MIN_CENTER_MARGIN` (0.15 of the box's span) on every side. The problems are `box-too-narrow`, `box-too-short` and `center-outside`.
-  - **Persistence** (`settings.ts`): `saveCalibration` writes `{version: 1, center, corners, sensitivity}` to `bird-flight-calibration` at Start Flying. `loadCalibration` rejects anything that isn't four finite 0..1 corners plus a center, or that fails validation, and clamps the sensitivity.
+  - **Persistence** (`settings.ts`): `saveCalibration` writes `{version: 1, center, corners, sensitivity, handSize?}` to `bird-flight-calibration` at Start Flying (the sensitivity mirrors the steering setting, so older code still reads it). `loadCalibration` rejects anything that isn't four finite 0..1 corners plus a center, or that fails validation, clamps the sensitivity, and keeps `handSize` only if it's a sane number.
+- **Air brake (palm pushed toward the camera)**, `brakeDetector.ts` (pure, unit-tested).
+  - Palm size (`palmSize` in `trackingMath.ts`) is the mean side of the wrist / index-MCP / pinky-MCP triangle (aspect-corrected): it doesn't change when the fingers curl (a fist never reads as a push), and tilting the hand only makes it smaller.
+  - The brake engages once the size has stayed ≥ `BRAKE_ENGAGE_RATIO` (1.25) × the calibrated size for `BRAKE_HOLD_MS` (150 ms), and releases below `BRAKE_RELEASE_RATIO` (1.15). Hand loss releases it.
+  - The calibrated size is recorded at the **center capture** and saved as `handSize` in the calibration (optional field, same key, same version). Calibrations saved before it have none: the detector then takes the median of the first `BRAKE_BASELINE_MS` (2.5 s) of tracking, and brakes only after that.
 - **Boost (fist).**
   - `fistRatio` is the mean fingertip-to-palm distance divided by the wrist-to-middle-MCP distance.
   - The fist closes below 0.62 and opens above 0.8, with 3 frames of hysteresis in each direction.
@@ -570,16 +591,17 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
   - It reads `event.code` (physical keys), so WASD is ZQSD on AZERTY.
 - **Keys:**
   - W/↑ climb, S/↓ dive, A/← bank left, D/→ bank right.
-  - Axes ramp toward ±1 at 2.8/s (about 0.36 s to full), return at 4/s, and reverse at 6/s. The rates are frame-rate independent, and a rAF emits only when something changed.
+  - Bank ramps toward ±1 at 5/s (0.2 s to full), returns at 6/s and reverses at 9/s; pitch keeps 2.8/s up (~0.36 s), 4/s back, 6/s reversing (`KEY_*` in `flightTuning.ts`). The steering sensitivity scales every ramp by √s (`setSensitivity`, live). The rates are frame-rate independent (`rampAxis`), and a rAF emits only when something changed.
+  - **Shift** (either) held = `brake`. No other binding uses Shift; the handler still ignores Ctrl/Alt/Meta combinations.
   - **Space** held = `boost`, so the engine's rising-edge barrel roll fires on each new press.
   - **F** = a one-shot `backflip` (key repeat ignored).
   - Handled keys `preventDefault` on keydown *and* keyup (Space activates a focused button on keyup), unless paused.
   - Window `blur` releases every key, and `setPaused` releases them and rests the axes at 0.
 - **Pause menu** (`PauseMenu`): dark glass in the HUD style, with a flight summary (and ring score) and **Resume** (autofocused, shows `Esc`) / **How to fly** / **Back to landing**, then a **Graphics** radio group (Auto / High / Low; with Auto it shows the level in use, "Auto · Low"). GSAP fades it in unless reduced motion.
 - **Guide** (`FlightGuide`):
-  - Hand mode has 4 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick). Keyboard mode has 4: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Pause (Esc / ?).
+  - Hand mode has 5 cards: Steer, Boost (close fist), Barrel roll, Backflip (quick upward flick), Air brake & tight turns (push your palm in). Keyboard mode has 5: Steer (WASD/arrows), Boost + barrel roll (Space), Backflip (F), Air brake & tight turns (Shift), Pause (Esc / ?). Turn rates and brake speeds in the copy are computed from `flightModel.ts`.
   - Each card has an illustration, the input, one precise tip, and a small mono line with the exact numbers.
-  - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick thresholds and the recommended `FLICK_TIP_RISE`/`FLICK_TIP_SECONDS`), `presets.ts` (speeds in knots, trick durations) and `keyboardControls.ts` (ramp). Change those constants, never the copy. The FlightHud "Flick higher" hint uses the same `FLICK_TIP_RISE` through `describeBoxFraction`.
+  - **Every number is computed from the real constants**: `trackingShared.ts` (deadzone, fist hold frames, flick and brake thresholds and the recommended `FLICK_TIP_RISE`/`FLICK_TIP_SECONDS`), `presets.ts` (speeds in knots, trick durations) and `flightTuning.ts` / `flightModel.ts` (ramps, turn rates, brake speed and sink). Change those constants, never the copy. The FlightHud "Flick higher" hint uses the same `FLICK_TIP_RISE` through `describeBoxFraction`.
   - The Backflip card: "Snap your open palm straight up about half the height of your calibrated box, in one quick motion of 0.2 s or less", with the spec "Needs ≥ 35% of your box within 250 ms, peaking > 3.5 box-heights/s · 1.2 s cooldown". Its art draws the calibrated box as a dashed rectangle, 54 units tall, so the 27-unit `ascent-guide-flick` travel reads as half of it. The Steer card says a corner is full deflection "at any sensitivity", and the Boost card says steering holds still while the fist closes.
   - **Buttons by origin:**
     - `'preflight'`: **Take off** (primary), **Back** (to calibration / to landing) and **Don't show again**
@@ -596,6 +618,15 @@ The game still sits in the `artifacts/3d-game` pnpm-workspace layout. Replit's `
 - **Quality setting.** `QualitySetting` is `'auto' | 'high' | 'low'` (saved in `bird-flight-quality`, `settings.ts`); the rendered `QualityLevel` is `'high' | 'low'`. `QUALITY_PROFILES` sets: pixel ratio cap (2 / 1), reef density (1 / 0.5) and radius (62 / 50), fish density (1 / 0.55), marine snow (700 / 260), light shafts (8 / 4), caustics (on / off), decor radius (260 / 190), water grid (128 / 80) and shadow map size (1024 / 512).
 - **Auto** starts at High. `AutoQualityMonitor` (pure, unit-tested) ignores the first 3 s and any frame over 0.25 s (hitches), then averages the real (unclamped) frame time over 4-second windows; the first window under 50 FPS drops the flight to Low for good (it never goes back up, to avoid oscillating). Pausing resets the window. The engine reports the drop through `onQualityChange`, and the pause menu shows it.
 - `GameEngine.setQuality(setting)` applies a change live (pixel ratio, shadow map size, ocean and underwater profiles, caustics) and re-renders a held frame when paused. App keeps the setting in state + `qualityRef` and passes it at engine construction.
+
+### 6.14 Flight tuning, steering settings and the debug overlay (`flightTuning.ts`, `flightModel.ts`, `ui/SteeringControls.tsx`, `flight/DebugOverlay.tsx`)
+- **`flightTuning.ts` holds every tunable flight number**, commented with its why: the turn model (`TURN_BANK_MAX_DEG` 58, `CRUISE_TURN_RATE_DEG` 93, `TURN_REF_SPEED` 9, brake factors, `MAX_YAW_RATE_DEG` 200), spring response times (bank 0.15 s, yaw rate 0.06 s, pitch 0.2 s; `MAX_YAW_ACCEL_DEG` 400), attitude (pitch 38°, visual bank 60° / 40° swimming, body yaw), the steering ranges, keyboard ramps, the hand expo, the air brake, and the chase camera. Plain numbers, no three.js: the guide, the landing and the tests import it. Tune there, never inline.
+- **`flightModel.ts`** is the pure maths: `turnRate`, `visualBank`, `maxPitchAngle`, `turnAuthority` (√s), `expoCurve`, `brakeSpeed`, the springs (`stepSpring`, `stepLimitedSpring`, `stepAngleSpring`, `springOmega` = 2.146 / response), `stepTurn` (the engine's whole turning step) and `rampAxis` (the keyboard ramp). `flightModel.test.ts` flies the same chain to check the 180° turn times, the sensitivity in keyboard mode, frame-rate independence and ≤ 2% roll-out overshoot.
+- **Why √speed:** a real coordinated turn is `g·tan(bank)/v`, which gives 40°/s boosting and 180°/s braking. Softening the speed term to `1/√(v/9)` lands every target with one gain: cruise 93, boost 62, brake 145, swim 125, swim + brake 161 °/s (full input, default sensitivity).
+- **Measured (headless Chromium, keyboard, sim time), 180° at full input:** cruise 6.76 → 2.27 s, boost 6.73 → 3.22 s, underwater 13.0 → 1.78 s; brake 1.61 s, underwater + brake 1.47 s; sensitivity 0.5x / 2x at cruise: 3.11 / 1.70 s. Roll-out overshoot 0 in every case; the camera trailed the heading by at most 16°.
+- **Steering settings** (`SteeringSettings` in `settings.ts`: `sensitivity` 0.5–2.0, `invertPitch`) live inside the existing `bird-flight-settings` object (no new key). Settings saved before they existed load with defaults, except that the sensitivity is taken from the saved hand calibration (where the calibration slider used to keep it). Both apply to **both** control modes: sensitivity is turn authority (turn rate and visual bank ×√s, pitch range ×s^¼, keyboard ramps ×√s); invert flips climb/dive for keys and palm alike. **No steering setting is hand-only**; the only hand-only control is the calibration box itself (Recalibrate).
+- **Where they're changed:** the landing's last chapter (saved with the other choices at Begin pre-flight), the pause menu (applied to the flight at once with `engine.setSteering` / `keyboard.setSensitivity`, and saved immediately), and the calibration screen's sensitivity slider (the same value).
+- **Debug overlay:** `?debug=flight` in the URL (read once; nothing stored) shows state/substate, speed, yaw rate, bank, AGL, brake, surface slope, landable, the steering settings, FPS and draw calls, written into a `<pre>` ten times a second from `engine.getDebugInfo()`. Off by default.
 
 ## 7. Coding conventions and patterns
 
@@ -773,7 +804,9 @@ These come from code reading plus headless runs.
 - Don't wrap text that has `ascent-shadow` in `overflow-hidden` masks. The clip turns the soft shadow into visible rectangles, so reveal it with opacity and a transform instead.
 - Don't fold the trick sweep into the steering angles (see memory note).
 - Flick thresholds are in **box heights** (`rawY / boxHeight`), and the rise and peak speed are judged **over the window**, not on one frame. If you retune them, run `pnpm test`: `flickDetector.test.ts` pins both "a natural half-box flick fires every time at 15–60 Hz" and "a 0.45 s full-range steering sweep never fires". Keep `FLICK_TIP_*` clearing both thresholds with room to spare, since the guide and the hints quote them.
-- Don't add per-frame lerp factors (`x += (t - x) * 0.05`). Use `damp(rate, dt)` (§7).
+- Don't add per-frame lerp factors (`x += (t - x) * 0.05`). Use `damp(rate, dt)` (§7), or a critically damped spring (`stepSpring`) where overshoot matters.
+- Flight numbers belong in `flightTuning.ts` and their formulas in `flightModel.ts`. The guide, the steering controls and the tests read both, so a retune updates the copy and is re-checked by `flightModel.test.ts`.
+- New steering or ground settings go **inside** `SteeringSettings` / the settings object (validated in `readSteering`), never under a new localStorage key (§12).
 - The ring guide arrow is modelled along **+Z** because `Object3D.lookAt` aims a non-camera object's +Z at the target. The target is the *next* ring (`RingManager.getNextRingPosition()`), never the nearest, and highlight colors live only in `NEXT_RING_HIGHLIGHTS`.
 - Don't move the `state.backflip` check below the `handDetected` guard in `applyControls`.
 - Don't re-throw from the per-frame `hands.send()` catch. Startup failures are different: `start()` surfaces them as `TrackingStartError` so the UI can show them.

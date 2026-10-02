@@ -21,12 +21,14 @@ export const STORED_DATA: readonly StoredDataEntry[] = [
   {
     key: SETTINGS_KEY,
     label: 'Last flight settings',
-    contents: 'Bird, world, sky, Ring Challenge on/off and input (hand or keyboard), for Quick start.',
+    contents:
+      'Bird, world, sky, Ring Challenge on/off, input (hand or keyboard) and steering (sensitivity, invert), for Quick start.',
   },
   {
     key: CALIBRATION_KEY,
     label: 'Hand calibration',
-    contents: 'Five points (x, y between 0 and 1) and a sensitivity number. No image, no video, no hand shape.',
+    contents:
+      'Five points (x, y between 0 and 1), a sensitivity number and your palm’s apparent size (one number, for the air brake). No image, no video, no hand shape.',
   },
   {
     key: BEST_SCORE_KEY,

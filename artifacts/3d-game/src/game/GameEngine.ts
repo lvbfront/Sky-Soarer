@@ -16,6 +16,49 @@ import { disposeObjectTree } from './dispose';
 import { WATER_LEVEL } from './oceanField';
 import { AutoQualityMonitor, QUALITY_PROFILES, levelFor, type QualityLevel, type QualitySetting } from './quality';
 import type { HandControlState } from './handControls';
+import type { SteeringSettings } from './settings';
+import {
+  brakeSpeed,
+  createSpring,
+  createTurnState,
+  maxPitchAngle,
+  springOmega,
+  stepAngleSpring,
+  stepSpring,
+  stepTurn,
+  visualBank,
+  wrapAngle,
+  type Medium,
+} from './flightModel';
+import {
+  AIR_BRAKE_SINK,
+  BODY_YAW_LEAD_AIR,
+  BODY_YAW_LEAD_WATER,
+  BODY_YAW_MAX_DEG,
+  BRAKE_BLEND_RATE,
+  BRAKE_SPEED_RATE,
+  BRAKE_WIND_DIP,
+  CAMERA_DISTANCE,
+  CAMERA_DISTANCE_RESPONSE,
+  CAMERA_DISTANCE_WATER,
+  CAMERA_GROUND_CLEARANCE,
+  CAMERA_HEIGHT,
+  CAMERA_HEIGHT_WATER,
+  CAMERA_LEAD,
+  CAMERA_LEAD_REDUCED,
+  CAMERA_MAX_ANGLE_DEG,
+  CAMERA_PITCH_RESPONSE,
+  CAMERA_ROLL_FRACTION,
+  CAMERA_SPEED_PULLBACK,
+  CAMERA_TURN_FOV_DEG,
+  CAMERA_YAW_RESPONSE,
+  LOOK_AHEAD_DISTANCE,
+  MAX_YAW_RATE_DEG,
+  PITCH_RESPONSE,
+  UNDERWATER_BASE_SPEED,
+  UNDERWATER_BOOST_SPEED,
+  deg,
+} from './flightTuning';
 
 import {
   BACKFLIP_DURATION,
@@ -50,6 +93,10 @@ export interface GameEngineOptions {
   ringChallenge: boolean;
   /** Graphics quality (Auto / High / Low); defaults to Auto. */
   quality?: QualitySetting;
+  /** Sensitivity and invert, shared by both inputs; changeable mid-flight with setSteering. */
+  steering?: SteeringSettings;
+  /** prefers-reduced-motion: no camera roll or FOV kicks, a gentler look-into-turn lead. */
+  reducedMotion?: boolean;
   onScoreChange?: (score: number) => void;
   onBarrelRoll?: () => void;
   onBackflip?: () => void;
@@ -67,13 +114,9 @@ const RING_SPEED_PULSE = 7;
 const SPEED_PULSE_DECAY_PER_SEC = 9;
 
 // Underwater flight is slower and floatier than airborne flight — momentum builds and
-// bleeds off more gradually, matching the "more drag, floatier" swimming feel from spec.
-const UNDERWATER_BASE_SPEED = 5;
-const UNDERWATER_BOOST_SPEED = 10;
+// bleeds off more gradually, matching the "more drag, floatier" swimming feel from spec. The
+// swimming speeds and every turning number live in flightTuning.ts.
 const UNDERWATER_SPEED_RATE = perFrameRate(0.02, 60);
-// Steering input is damped underwater so both the visual roll and the actual turn rate
-// soften together — swimming banks gentler than flying.
-const UNDERWATER_STEERING_DAMPING = 0.5;
 
 const BASE_FOV = 58;
 const BOOST_FOV = 72;
@@ -81,19 +124,22 @@ const UNDERWATER_BASE_FOV = 50;
 const UNDERWATER_BOOST_FOV = 60;
 const FOV_RATE = perFrameRate(0.06, 60);
 
-const CAMERA_RATE = perFrameRate(0.05, 60);
-const UNDERWATER_CAMERA_RATE = perFrameRate(0.03, 60);
-const CAMERA_BACK_DISTANCE = 6.5;
-const CAMERA_HEIGHT = 2.2;
-const LOOK_AHEAD_DISTANCE = 8;
+// The chase camera's springs (flightTuning.ts holds their response times).
+const CAMERA_YAW_OMEGA = springOmega(CAMERA_YAW_RESPONSE);
+const CAMERA_PITCH_OMEGA = springOmega(CAMERA_PITCH_RESPONSE);
+const CAMERA_DISTANCE_OMEGA = springOmega(CAMERA_DISTANCE_RESPONSE);
+const CAMERA_MAX_ANGLE = deg(CAMERA_MAX_ANGLE_DEG);
+// Where the camera starts at takeoff (behind, far and high), so it swoops in onto the bird.
+const CAMERA_START_DISTANCE = 14;
+const CAMERA_START_HEIGHT = 7;
 // The chase camera always stays on the bird's side of the water surface (by this margin), so a
 // swimming bird is never hidden under the opaque sea and the view crosses the surface with it.
 const CAMERA_SURFACE_MARGIN = 0.35;
 const CAMERA_SEABED_CLEARANCE = 0.6;
 
-const MAX_PITCH_ANGLE = THREE.MathUtils.degToRad(38);
-const MAX_ROLL_ANGLE = THREE.MathUtils.degToRad(48);
-const ORIENTATION_RATE = perFrameRate(0.06, 60);
+const PITCH_OMEGA = springOmega(PITCH_RESPONSE);
+const MAX_YAW_RATE = deg(MAX_YAW_RATE_DEG);
+const BODY_YAW_MAX = deg(BODY_YAW_MAX_DEG);
 
 // Trick lengths (BARREL_ROLL_DURATION, BACKFLIP_DURATION) live in presets.ts (the guide quotes them).
 
@@ -179,31 +225,47 @@ export class GameEngine {
   private timer = new THREE.Timer();
   private animationHandle: number | null = null;
 
+  private steering: SteeringSettings;
+  private reducedMotion: boolean;
+
+  // Control targets from the active input (pitch already inverted if the player chose that).
   private targetPitch = 0;
   private targetRoll = 0;
-  private currentPitch = 0;
-  private currentRoll = 0;
+  private brakeInput = false;
+  // The smoothed inputs: critically damped springs (no overshoot), see flightModel.ts.
+  private pitchSpring = createSpring();
+  // The smoothed bank input and the yaw rate (rad/s, positive = turning right; see stepTurn).
+  private turn = createTurnState();
+  // 0..1: how much of the air brake is applied (blends in and out over ~0.1 s).
+  private brakeBlend = 0;
 
   private speed = BASE_SPEED;
   private speedPulse = 0;
   private boosting = false;
 
   private flipProgress: number | null = null; // barrel roll; null when not flipping
-  private flipStartRoll = 0;
+  private flipStartRoll = 0; // visual roll angle when the roll began
 
   private backflipProgress: number | null = null; // null when not backflipping
-  private backflipStartPitch = 0;
+  private backflipStartPitch = 0; // pitch angle when the flip began
 
   private underwater = false;
 
   private headingYaw = 0;
-  private cameraTarget = new THREE.Vector3();
-  private cameraLookAt = new THREE.Vector3();
+  // The chase camera: yaw and pitch springs behind the bird, distance and height springs.
+  private cameraYaw = createSpring();
+  private cameraPitch = createSpring();
+  private cameraDistance = createSpring(CAMERA_START_DISTANCE);
+  private cameraHeight = createSpring(CAMERA_START_HEIGHT);
+  private cameraFovKick = 0;
+  // Diagnostics for the ?debug=flight overlay: the last visual bank.
+  private lastVisualBank = 0;
 
   // Scratch vectors, reused every frame (the hot loop allocates nothing).
   private readonly forward = new THREE.Vector3();
   private readonly desiredCamera = new THREE.Vector3();
   private readonly desiredLookAt = new THREE.Vector3();
+  private readonly cameraDir = new THREE.Vector3();
   private readonly tmpColor = new THREE.Color();
 
   private disposed = false;
@@ -214,6 +276,8 @@ export class GameEngine {
 
   constructor(private container: HTMLDivElement, options: GameEngineOptions) {
     this.options = options;
+    this.steering = options.steering ?? { sensitivity: 1, invertPitch: false };
+    this.reducedMotion = options.reducedMotion ?? false;
     const look = WEATHER_LOOKS[options.weather];
     this.look = look;
     this.oceanLook = OCEAN_LOOKS[options.weather];
@@ -540,6 +604,15 @@ export class GameEngine {
     return this.paused;
   }
 
+  /** Steering settings changed (pause menu or landing): applies from the next frame. */
+  setSteering(steering: SteeringSettings) {
+    this.steering = { ...steering };
+  }
+
+  setReducedMotion(reducedMotion: boolean) {
+    this.reducedMotion = reducedMotion;
+  }
+
   /** Called by the active input (hand tracker or keyboard) whenever a new control reading is available. */
   applyControls(state: HandControlState) {
     // Paused: input must not steer, boost or start a trick behind the pause menu. The next
@@ -551,21 +624,23 @@ export class GameEngine {
     // the guard below or that fallback path would silently do nothing.
     if (state.backflip && this.flipProgress === null && this.backflipProgress === null) {
       this.backflipProgress = 0;
-      this.backflipStartPitch = this.currentPitch;
+      this.backflipStartPitch = this.pitchSpring.value * maxPitchAngle(this.steering.sensitivity);
       this.options.onBackflip?.();
     }
 
-    // Hand lost: ease back to level flight at cruise speed instead of latching the last steering
-    // and boost input (the pitch/roll ease comes from the ORIENTATION_RATE chase in `update`).
+    // Hand lost: ease back to level flight at cruise speed instead of latching the last steering,
+    // boost and brake input (the pitch/bank ease comes from their springs in `update`).
     if (!state.handDetected) {
       this.targetPitch = 0;
       this.targetRoll = 0;
       this.boosting = false;
+      this.brakeInput = false;
       return;
     }
 
-    this.targetPitch = state.pitch;
+    this.targetPitch = this.steering.invertPitch ? -state.pitch : state.pitch;
     this.targetRoll = state.roll;
+    this.brakeInput = state.brake;
 
     const wasBoosting = this.boosting;
     this.boosting = state.boost;
@@ -575,30 +650,37 @@ export class GameEngine {
     // two one-shot tricks never fight over the bird's rotation in the same frame.
     if (!wasBoosting && this.boosting && this.flipProgress === null && this.backflipProgress === null) {
       this.flipProgress = 0;
-      this.flipStartRoll = this.currentRoll;
+      this.flipStartRoll = this.lastVisualBank;
       this.options.onBarrelRoll?.();
     }
   }
 
   private update(dt: number) {
-    // Smoothly chase the gesture-driven pitch/roll targets (extra jitter removal beyond
-    // the exponential smoothing already applied to the raw hand keypoints).
-    const orientationAlpha = damp(ORIENTATION_RATE, dt);
-    this.currentPitch += (this.targetPitch - this.currentPitch) * orientationAlpha;
-    this.currentRoll += (this.targetRoll - this.currentRoll) * orientationAlpha;
+    const sensitivity = this.steering.sensitivity;
+    const medium: Medium = this.underwater ? 'water' : 'air';
 
-    // `steeringPitchAngle`/`steeringRollAngle` are the player's actual steering input and are
-    // the ONLY things allowed to change the flight path (forward vector, heading/yaw).
+    // The inputs, smoothed by critically damped springs: the bank responds in ~0.15 s and rolls
+    // out to level without overshoot; pitch a little softer.
+    stepSpring(this.pitchSpring, this.targetPitch, PITCH_OMEGA, dt, true);
+    const bankInput = this.turn.bank.value;
+
+    // The air brake (boost cancels it).
+    const braking = this.brakeInput && !this.boosting;
+    this.brakeBlend += ((braking ? 1 : 0) - this.brakeBlend) * damp(BRAKE_BLEND_RATE, dt);
+
+    // `steeringPitchAngle` and the yaw rate are the player's actual steering input and are the
+    // ONLY things allowed to change the flight path (forward vector, heading/yaw).
     // `visualPitchAngle`/`visualRollAngle` are what actually gets applied to the bird's
     // mesh/camera rotation, which during a trick sweeps a full 360 degrees on top — keeping
     // them separate is what makes the barrel roll and backflip purely cosmetic instead of
     // corrupting the actual momentum/direction (see project memory on this pattern).
-    const steeringPitchAngle = this.currentPitch * MAX_PITCH_ANGLE;
+    const steeringPitchAngle = this.pitchSpring.value * maxPitchAngle(sensitivity);
     let visualPitchAngle = steeringPitchAngle;
 
-    let steeringRollAngle = this.currentRoll * MAX_ROLL_ANGLE;
-    if (this.underwater) steeringRollAngle *= UNDERWATER_STEERING_DAMPING;
-    let visualRollAngle = steeringRollAngle;
+    // Visual bank: up to ~60° flying, ~40° swimming (the body yaws into the turn instead).
+    const bankAngle = visualBank(bankInput, medium, sensitivity);
+    this.lastVisualBank = bankAngle;
+    let visualRollAngle = bankAngle;
 
     // Barrel roll: sweep a full 360 degrees of roll on top of the steering roll over 0.8s.
     if (this.flipProgress !== null) {
@@ -607,7 +689,7 @@ export class GameEngine {
         this.flipProgress = null;
       } else {
         const sweep = easeInOutCubic(this.flipProgress) * Math.PI * 2;
-        visualRollAngle = this.flipStartRoll * MAX_ROLL_ANGLE + sweep;
+        visualRollAngle = this.flipStartRoll + sweep;
       }
     }
 
@@ -619,22 +701,27 @@ export class GameEngine {
         this.backflipProgress = null;
       } else {
         const sweep = easeInOutCubic(this.backflipProgress) * Math.PI * 2;
-        visualPitchAngle = this.backflipStartPitch * MAX_PITCH_ANGLE + sweep;
+        visualPitchAngle = this.backflipStartPitch + sweep;
       }
-    }
-
-    // Turning: bank angle steers yaw, like a real glider — but heading is locked while a
-    // barrel roll is in progress, so boosting always continues straight ahead.
-    if (this.flipProgress === null) {
-      this.headingYaw -= steeringRollAngle * dt * 0.6;
     }
 
     this.speedPulse = Math.max(0, this.speedPulse - SPEED_PULSE_DECAY_PER_SEC * dt);
     const baseSpeed = this.underwater ? UNDERWATER_BASE_SPEED : BASE_SPEED;
     const boostSpeed = this.underwater ? UNDERWATER_BOOST_SPEED : BOOST_SPEED;
-    const speedRate = this.underwater ? UNDERWATER_SPEED_RATE : SPEED_RATE;
-    const targetSpeed = (this.boosting ? boostSpeed : baseSpeed) + this.speedPulse;
-    this.speed += (targetSpeed - this.speed) * damp(speedRate, dt);
+    let targetSpeed = this.boosting ? boostSpeed : baseSpeed;
+    let speedRate = this.underwater ? UNDERWATER_SPEED_RATE : SPEED_RATE;
+    if (braking) {
+      targetSpeed = brakeSpeed(medium, BASE_SPEED);
+      speedRate = BRAKE_SPEED_RATE;
+    }
+    this.speed += (targetSpeed + this.speedPulse - this.speed) * damp(speedRate, dt);
+
+    // Turning: a coordinated turn (rate ∝ tan(bank), falling with speed; see flightModel.ts), eased
+    // in and out with a capped yaw acceleration. The heading is locked while a barrel roll is in
+    // progress, so boosting always continues straight ahead.
+    // (headingYaw grows to the left: a right turn decreases it.)
+    const yawRate = stepTurn(this.turn, this.targetRoll, this.speed, medium, braking, sensitivity, dt, this.flipProgress !== null);
+    this.headingYaw -= yawRate * dt;
 
     // The actual flight path uses only the steering pitch (never the trick sweep above), so
     // a backflip never alters where the bird is actually heading.
@@ -650,6 +737,9 @@ export class GameEngine {
     const prevX = bird.position.x;
     const prevZ = bird.position.z;
     bird.position.addScaledVector(forward, this.speed * dt);
+    // Braking in the air sinks gently (a landing approach). Banking alone never changes altitude:
+    // the model is kinematic, so a level turn holds its height exactly with no lift term needed.
+    if (!this.underwater) bird.position.y -= AIR_BRAKE_SINK * this.brakeBlend * dt;
 
     // Islands are solid below the waterline: a submerged bird that swims into an island's
     // footprint slides along its edge instead of being snapped up through the surface by the
@@ -696,7 +786,7 @@ export class GameEngine {
         this.sfx.playSplash('dive');
         this.options.onWaterTransition?.('submerged');
       } else {
-        this.waterBurst?.trigger(bird.position.clone());
+        this.waterBurst?.trigger(bird.position);
         this.sfx.playSplash('surface');
         this.options.onWaterTransition?.('surfaced');
       }
@@ -705,9 +795,12 @@ export class GameEngine {
     // The bird mesh's beak/head faces local +Z, which is the same axis `forward` above is
     // built from — so setting yaw to headingYaw directly (no extra 180deg offset) makes the
     // beak point the way the bird is actually flying, away from the chase camera, instead of
-    // staring back at it.
+    // staring back at it. The body also yaws a little into the turn (much more when swimming,
+    // where it banks less).
+    const bodyLead = this.underwater ? BODY_YAW_LEAD_WATER : BODY_YAW_LEAD_AIR;
+    const bodyYaw = THREE.MathUtils.clamp(-yawRate * bodyLead, -BODY_YAW_MAX, BODY_YAW_MAX);
     bird.rotation.order = 'YXZ';
-    bird.rotation.y = this.headingYaw;
+    bird.rotation.y = this.headingYaw + bodyYaw;
     bird.rotation.x = -visualPitchAngle;
     bird.rotation.z = visualRollAngle;
 
@@ -719,7 +812,7 @@ export class GameEngine {
       flapSpeed *= GLIDE_FLAP_MULTIPLIER;
     }
     flapSpeed = THREE.MathUtils.clamp(flapSpeed, MIN_FLAP_SPEED, MAX_FLAP_SPEED);
-    this.bird.update(dt, flapSpeed, this.underwater);
+    this.bird.update(dt, flapSpeed, this.underwater, this.brakeBlend);
 
     this.ocean?.animateWater(dt);
     this.environment.update(bird.position);
@@ -746,24 +839,7 @@ export class GameEngine {
       this.splash.update(dt, bird.position, forward, waterSurfaceY, overWater);
     }
 
-    // Camera follow: heavy lerp for a floaty, relaxed feel — even heavier underwater so the
-    // chase camera reads as swimming through water rather than flying through air.
-    const cameraLerp = damp(this.underwater ? UNDERWATER_CAMERA_RATE : CAMERA_RATE, dt);
-    const desiredCameraPos = this.desiredCamera.copy(bird.position).addScaledVector(forward, -CAMERA_BACK_DISTANCE);
-    desiredCameraPos.y += CAMERA_HEIGHT;
-    this.cameraTarget.lerp(desiredCameraPos, cameraLerp);
-    if (this.ocean) this.keepCameraOnBirdSide(this.cameraTarget);
-    this.camera.position.copy(this.cameraTarget);
-
-    const desiredLookAt = this.desiredLookAt.copy(bird.position).addScaledVector(forward, LOOK_AHEAD_DISTANCE);
-    this.cameraLookAt.lerp(desiredLookAt, cameraLerp);
-    this.camera.lookAt(this.cameraLookAt);
-
-    const baseFov = this.underwater ? UNDERWATER_BASE_FOV : BASE_FOV;
-    const boostFov = this.underwater ? UNDERWATER_BOOST_FOV : BOOST_FOV;
-    const targetFov = this.boosting ? boostFov : baseFov;
-    this.camera.fov += (targetFov - this.camera.fov) * damp(FOV_RATE, dt);
-    this.camera.updateProjectionMatrix();
+    this.updateCamera(dt, steeringPitchAngle, bankAngle);
 
     // Keep the sun's shadow frustum centered near the bird as it travels the endless map.
     this.sun.position.copy(bird.position).add(SUN_OFFSET);
@@ -780,8 +856,58 @@ export class GameEngine {
 
     if (this.ocean) this.updateAtmosphere(dt);
 
-    const speedRatio = (this.speed - baseSpeed) / (boostSpeed - baseSpeed);
-    this.wind.setIntensity(0.3 + speedRatio);
+    // The wind follows the airspeed (a quiet floor when slow) and dips a little under the brake.
+    const speedRatio = Math.max(-0.15, (this.speed - baseSpeed) / (boostSpeed - baseSpeed));
+    this.wind.setIntensity((0.3 + speedRatio) * (1 - BRAKE_WIND_DIP * this.brakeBlend));
+  }
+
+  /**
+   * The chase camera. Its yaw follows the heading with a critically damped spring, aimed slightly
+   * into the turn (yaw rate × CAMERA_LEAD), and never trails the heading by more than
+   * CAMERA_MAX_ANGLE_DEG, so the bird stays in frame through a U-turn. Pitch, distance and height
+   * have springs of their own (boost pulls the camera back). It rolls with a fraction of the bird's
+   * bank and widens its FOV slightly in tight turns, except under reduced motion. Allocation-free.
+   */
+  private updateCamera(dt: number, pitchAngle: number, bankAngle: number) {
+    const bird = this.bird.group.position;
+    const reduced = this.reducedMotion;
+    // Heading-space yaw rate (headingYaw grows to the left).
+    const headingRate = -this.turn.yawRate.value;
+    const lead = (reduced ? CAMERA_LEAD_REDUCED : CAMERA_LEAD) * headingRate;
+    stepAngleSpring(this.cameraYaw, this.headingYaw + lead, CAMERA_YAW_OMEGA, dt);
+    const trail = wrapAngle(this.cameraYaw.value - this.headingYaw);
+    if (Math.abs(trail) > CAMERA_MAX_ANGLE) {
+      this.cameraYaw.value = this.headingYaw + Math.sign(trail) * CAMERA_MAX_ANGLE;
+      this.cameraYaw.velocity = headingRate;
+    }
+    stepSpring(this.cameraPitch, pitchAngle, CAMERA_PITCH_OMEGA, dt);
+
+    const underwater = this.underwater;
+    const pullback = underwater ? 0 : Math.max(0, this.speed - BASE_SPEED) * CAMERA_SPEED_PULLBACK;
+    stepSpring(this.cameraDistance, (underwater ? CAMERA_DISTANCE_WATER : CAMERA_DISTANCE) + pullback, CAMERA_DISTANCE_OMEGA, dt);
+    stepSpring(this.cameraHeight, underwater ? CAMERA_HEIGHT_WATER : CAMERA_HEIGHT, CAMERA_DISTANCE_OMEGA, dt);
+
+    const yaw = this.cameraYaw.value;
+    const pitch = this.cameraPitch.value;
+    const dir = this.cameraDir.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    const position = this.desiredCamera.copy(bird).addScaledVector(dir, -this.cameraDistance.value);
+    position.y += this.cameraHeight.value;
+    if (this.ocean) this.keepCameraOnBirdSide(position);
+    if (!this.underwater && (!this.ocean || !this.ocean.isOverWater(position.x, position.z))) {
+      const floor = this.environment.heightAtWorld(position.x, position.z) + CAMERA_GROUND_CLEARANCE;
+      if (position.y < floor) position.y = floor;
+    }
+    this.camera.position.copy(position);
+    this.camera.lookAt(this.desiredLookAt.copy(bird).addScaledVector(dir, LOOK_AHEAD_DISTANCE));
+    if (!reduced) this.camera.rotateZ(-bankAngle * CAMERA_ROLL_FRACTION);
+
+    const baseFov = underwater ? UNDERWATER_BASE_FOV : BASE_FOV;
+    const boostFov = underwater ? UNDERWATER_BOOST_FOV : BOOST_FOV;
+    const turnKick = reduced ? 0 : CAMERA_TURN_FOV_DEG * Math.min(1, Math.abs(headingRate) / MAX_YAW_RATE);
+    this.cameraFovKick += (turnKick - this.cameraFovKick) * damp(FOV_RATE, dt);
+    const targetFov = (this.boosting && !reduced ? boostFov : baseFov) + this.cameraFovKick;
+    this.camera.fov += (targetFov - this.camera.fov) * damp(FOV_RATE, dt);
+    this.camera.updateProjectionMatrix();
   }
 
   /** The chase camera stays on the bird's side of the waves (and above the seabed). */
@@ -846,6 +972,34 @@ export class GameEngine {
 
   isUnderwater() {
     return this.underwater;
+  }
+
+  /** True while the air brake is applied (held, and not cancelled by boost). */
+  isBraking() {
+    return this.brakeInput && !this.boosting;
+  }
+
+  /** Current turn rate in degrees per second (positive = turning right). */
+  getYawRateDegrees() {
+    return THREE.MathUtils.radToDeg(this.turn.yawRate.value);
+  }
+
+  /** Numbers for the ?debug=flight overlay. */
+  getDebugInfo() {
+    const p = this.bird.group.position;
+    return {
+      state: this.underwater ? 'SWIMMING' : 'FLYING',
+      substate: '',
+      speed: this.speed,
+      yawRate: this.getYawRateDegrees(),
+      bank: THREE.MathUtils.radToDeg(this.lastVisualBank),
+      agl: p.y - this.environment.heightAtWorld(p.x, p.z),
+      brake: this.isBraking(),
+      slope: null as number | null,
+      landable: null as boolean | null,
+      steering: this.steering,
+      drawCalls: this.renderer.info.render.calls,
+    };
   }
 
   dispose() {

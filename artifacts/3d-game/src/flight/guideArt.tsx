@@ -239,6 +239,38 @@ export function BackflipArt({ distanceLabel, timeLabel }: { distanceLabel: strin
   );
 }
 
+/**
+ * Air brake: the open palm pushed toward the camera, so it looks bigger than the dashed outline
+ * (its size at calibration). While it's held big, the BRAKE readout and a tight turn arc light up.
+ */
+export function PushArt({ ratioLabel }: { ratioLabel: string }) {
+  return (
+    <ArtFrame pose="-1.6s" label="An open palm pushed toward the camera so it looks bigger, applying the air brake">
+      <Svg>
+        <circle cx={56} cy={52} r={24} fill="none" stroke={FAINT} strokeDasharray="3 3" />
+        <Label x={56} y={92}>
+          CALIBRATED SIZE
+        </Label>
+        <g transform="translate(56 52)">
+          <g className="ascent-guide-push">
+            <HandGlyph />
+          </g>
+        </g>
+        <g className="ascent-guide-while-pushed">
+          <path d="M104 74 Q104 34 132 30" fill="none" stroke={CYAN} strokeWidth={1.4} strokeLinecap="round" />
+          <path d="M128 26 L133 30 L128 34" fill="none" stroke={CYAN} strokeWidth={1.4} strokeLinecap="round" />
+          <Label x={150} y={14} anchor="end" fill={CYAN}>
+            BRAKE
+          </Label>
+          <Label x={150} y={92} anchor="end" fill={CYAN}>
+            {ratioLabel}
+          </Label>
+        </g>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
 /** One keycap. `press` animates it on a loop, starting `delay` into the cycle. */
 export function Keycap({
   children,
