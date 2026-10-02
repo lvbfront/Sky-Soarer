@@ -57,6 +57,8 @@ type BuildJob = { kind: 'mesh'; key: string; tileX: number; tileZ: number } | { 
  */
 export class OceanManager {
   readonly field = new OceanField();
+  /** Spacing of the ground tiles' vertices: the ground is drawn as triangles on this grid. */
+  readonly groundGridSpacing = TILE_SIZE / TILE_SEGMENTS;
   /** Shared by every ocean shader (water, caustics, sway): write `uTime` etc. once per frame. */
   readonly uniforms: OceanUniforms = createOceanUniforms();
 
@@ -340,6 +342,21 @@ export class OceanManager {
   /** The animated water surface height (matches the shader's waves). */
   waterHeightAt(x: number, z: number) {
     return this.field.waterHeight(x, z, this.uniforms.uTime.value);
+  }
+
+  /**
+   * The water height a floating bird rests on: the rendered surface itself (the CPU mirror of the
+   * water vertex shader on the current grid, with the same depth texture and the same uTime; see
+   * WaterSurface.surfaceHeightAt). Call it after `update` and `animateWater` for the frame.
+   */
+  floatHeightAt(x: number, z: number) {
+    const mesh = this.water.mesh;
+    return this.water.surfaceHeightAt(x, z, this.uniforms.uTime.value, mesh.position.x, mesh.position.z, this.depthTexture);
+  }
+
+  /** Standable rock tops near (x, z) (a reused array). */
+  perchesNear(x: number, z: number) {
+    return this.decor.perchesNear(x, z);
   }
 
   /** True when the given world point sits over open water (no island under it). */

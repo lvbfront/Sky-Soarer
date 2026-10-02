@@ -6,8 +6,9 @@ import { BIRD_OPTIONS } from '@/game/bird';
 import { MAP_OPTIONS, WEATHER_LOOKS, WEATHER_OPTIONS } from '@/game/presets';
 import { WindAudio } from '@/game/audio';
 import type { LandingScene, LandingTelemetry } from '@/game/LandingScene';
-import type { FlightSettings } from '@/game/settings';
+import type { FlightSettings, SteeringSettings } from '@/game/settings';
 import { PrivacyNote } from '@/ui/privacy';
+import { SteeringControls } from '@/ui/SteeringControls';
 import {
   BIRD_PERSONALITY,
   CHAPTERS,
@@ -41,6 +42,8 @@ interface LandingProps {
   /** Plays the full intro timeline (first visit of the page load only). */
   playIntro: boolean;
   onChange: (patch: Partial<FlightSettings>) => void;
+  /** Sensitivity / invert: the same steering settings for both control modes. */
+  onSteeringChange: (patch: Partial<SteeringSettings>) => void;
   onBegin: () => void;
   /** Begin pre-flight, but show the calibration screen even though one is saved. */
   onRecalibrate: () => void;
@@ -85,6 +88,7 @@ export function Landing({
   onChange,
   onBegin,
   onRecalibrate,
+  onSteeringChange,
   onQuickStart,
   onOpenPrivacy,
   subscribeTelemetry,
@@ -806,10 +810,16 @@ export function Landing({
                     />
                   </button>
                 </div>
+                <div className="flex items-start gap-4 px-3 py-2.5">
+                  <dt className="ascent-hud w-14 pt-0.5 text-white/55">Steer</dt>
+                  <dd className="min-w-0 flex-1">
+                    <SteeringControls steering={settings.steering} mode={settings.controls} onChange={onSteeringChange} compact />
+                  </dd>
+                </div>
               </dl>
             </div>
 
-            <ul data-reveal className="mt-4 grid grid-cols-3 gap-2" aria-label="Controls">
+            <ul data-reveal className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4" aria-label="Controls">
               {CONTROLS_BRIEFING[settings.controls].map((item) => (
                 <li key={item.key} className="rounded-xl border border-white/15 px-3 py-2.5" title={item.detail}>
                   <span className="ascent-hud block text-[10px] text-[color:var(--ascent-cyan)]">{item.key}</span>

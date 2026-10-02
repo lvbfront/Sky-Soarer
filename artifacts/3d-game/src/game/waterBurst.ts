@@ -1,13 +1,37 @@
 import * as THREE from 'three';
 
 const MAX_PARTICLES = 90;
-const PARTICLES_PER_BURST = 26;
-const BURST_LIFETIME = 0.6;
-// Heavier than the ring-burst's gravity — these are water droplets, not glowing sparks, so
-// they should arc and fall back down quickly rather than hang in the air.
-const GRAVITY = -14;
-const BURST_SPEED_MIN = 2.5;
-const BURST_SPEED_MAX = 6;
+
+/**
+ * Tuning of one burst flavour. The defaults are the surfacing splash: water droplets, heavier than
+ * the ring-burst's gravity so they arc and fall back quickly rather than hang in the air. The same
+ * pooled effect, retuned, makes the touchdown dust and sand puffs and the paddling ripples.
+ */
+export interface BurstStyle {
+  color: string;
+  count: number;
+  lifetime: number;
+  gravity: number;
+  speedMin: number;
+  speedMax: number;
+  /** 0..1: how much the burst is thrown up (1 = the upper hemisphere) vs. spread flat. */
+  upward: number;
+  size: number;
+  /** Additive (glowing droplets) or normal blending (opaque dust). */
+  additive: boolean;
+}
+
+export const SPLASH_BURST: BurstStyle = {
+  color: '#dff3ff',
+  count: 26,
+  lifetime: 0.6,
+  gravity: -14,
+  speedMin: 2.5,
+  speedMax: 6,
+  upward: 0.9,
+  size: 0.6,
+  additive: true,
+};
 
 /** Builds a small soft droplet sprite texture at runtime (no image asset needed). */
 function createDropletTexture() {
@@ -64,12 +88,18 @@ export class WaterBurstEffect {
   private alive: boolean[];
   private cursor = 0;
   private texture: THREE.CanvasTexture;
+  private style: BurstStyle;
+  private activeCount = 0;
 
-  constructor(private scene: THREE.Scene) {
+  constructor(
+    private scene: THREE.Scene,
+    style: Partial<BurstStyle> = {},
+  ) {
+    this.style = { ...SPLASH_BURST, ...style };
     this.positions = new Float32Array(MAX_PARTICLES * 3);
     this.velocities = new Float32Array(MAX_PARTICLES * 3);
-    this.ages = new Float32Array(MAX_PARTICLES).fill(BURST_LIFETIME + 1);
-    this.lifetimes = new Float32Array(MAX_PARTICLES).fill(BURST_LIFETIME);
+    this.ages = new Float32Array(MAX_PARTICLES).fill(this.style.lifetime + 1);
+    this.lifetimes = new Float32Array(MAX_PARTICLES).fill(this.style.lifetime);
     this.alive = new Array(MAX_PARTICLES).fill(false);
 
     this.geometry = new THREE.BufferGeometry();
@@ -81,13 +111,13 @@ export class WaterBurstEffect {
     const material = new THREE.ShaderMaterial({
       uniforms: {
         map: { value: this.texture },
-        color: { value: new THREE.Color('#dff3ff') },
+        color: { value: new THREE.Color(this.style.color) },
       },
       vertexShader: VERTEX_SHADER,
       fragmentShader: FRAGMENT_SHADER,
       transparent: true,
       depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      blending: this.style.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
 
     this.points = new THREE.Points(this.geometry, material);
@@ -95,19 +125,27 @@ export class WaterBurstEffect {
     this.scene.add(this.points);
   }
 
-  /** Spawn a droplet burst at `position` — call once when the bird breaks the surface. */
-  trigger(position: THREE.Vector3) {
-    const sizeAttr = this.geometry.getAttribute('aSize') as THREE.BufferAttribute;
+  /** Retints the particles (e.g. dust on grass vs. sand on a beach). */
+  setColor(color: THREE.Color) {
+    ((this.points.material as THREE.ShaderMaterial).uniforms.color.value as THREE.Color).copy(color);
+  }
 
-    for (let n = 0; n < PARTICLES_PER_BURST; n += 1) {
+  /** Spawn a burst at `position` (copied, not kept); `scale` scales its particle count. */
+  trigger(position: THREE.Vector3, scale = 1) {
+    const sizeAttr = this.geometry.getAttribute('aSize') as THREE.BufferAttribute;
+    const { count, lifetime, speedMin, speedMax, upward, size } = this.style;
+    const particles = Math.max(1, Math.round(count * scale));
+    this.activeCount = MAX_PARTICLES;
+
+    for (let n = 0; n < particles; n += 1) {
       const i = this.cursor;
       this.cursor = (this.cursor + 1) % MAX_PARTICLES;
 
       const theta = Math.random() * Math.PI * 2;
       // Bias the cone upward (mostly the top hemisphere) — droplets thrown up by a bird
       // breaking the surface, not scattering in every direction like the ring burst.
-      const phi = Math.acos(Math.random() * 0.9);
-      const speed = BURST_SPEED_MIN + Math.random() * (BURST_SPEED_MAX - BURST_SPEED_MIN);
+      const phi = Math.acos(Math.random() * upward);
+      const speed = speedMin + Math.random() * (speedMax - speedMin);
 
       this.positions[i * 3] = position.x;
       this.positions[i * 3 + 1] = position.y;
@@ -118,14 +156,18 @@ export class WaterBurstEffect {
       this.velocities[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
 
       this.ages[i] = 0;
-      this.lifetimes[i] = BURST_LIFETIME * (0.7 + Math.random() * 0.5);
+      this.lifetimes[i] = lifetime * (0.7 + Math.random() * 0.5);
       this.alive[i] = true;
-      sizeAttr.setX(i, 0.6 + Math.random() * 0.6);
+      sizeAttr.setX(i, size * (1 + Math.random()));
     }
     sizeAttr.needsUpdate = true;
   }
 
   update(dt: number) {
+    // Nothing alive since the last update: skip the attribute uploads entirely.
+    if (this.activeCount === 0) return;
+    let alive = 0;
+    const gravity = this.style.gravity;
     const opacityAttr = this.geometry.getAttribute('aOpacity') as THREE.BufferAttribute;
     for (let i = 0; i < MAX_PARTICLES; i += 1) {
       if (!this.alive[i]) {
@@ -139,7 +181,8 @@ export class WaterBurstEffect {
         continue;
       }
 
-      this.velocities[i * 3 + 1] += GRAVITY * dt;
+      alive += 1;
+      this.velocities[i * 3 + 1] += gravity * dt;
       this.positions[i * 3] += this.velocities[i * 3] * dt;
       this.positions[i * 3 + 1] += this.velocities[i * 3 + 1] * dt;
       this.positions[i * 3 + 2] += this.velocities[i * 3 + 2] * dt;
@@ -149,6 +192,7 @@ export class WaterBurstEffect {
     }
     (this.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     opacityAttr.needsUpdate = true;
+    this.activeCount = alive;
   }
 
   dispose() {

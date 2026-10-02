@@ -91,3 +91,38 @@ export function validateCalibration(center: CalibrationPoint, box: CalibrationBo
   }
   return problems;
 }
+
+/** A landmark's normalized image coordinates (MediaPipe's NormalizedLandmark, minus z). */
+export interface LandmarkPoint {
+  x: number;
+  y: number;
+}
+
+// The palm triangle: wrist, index knuckle (MCP) and pinky knuckle. Rigid, so curling the fingers
+// into a fist doesn't change its size.
+const PALM_TRIANGLE = [0, 5, 17] as const;
+
+/**
+ * Apparent palm size: the mean side of the wrist / index-MCP / pinky-MCP triangle, with x scaled by
+ * the frame's aspect ratio so it's measured in one unit (frame heights). It grows as the hand moves
+ * toward the camera (the air brake), and shrinks when the hand tilts away.
+ */
+export function palmSize(hand: readonly LandmarkPoint[], aspect: number) {
+  let sum = 0;
+  for (let i = 0; i < PALM_TRIANGLE.length; i += 1) {
+    const a = hand[PALM_TRIANGLE[i]];
+    const b = hand[PALM_TRIANGLE[(i + 1) % PALM_TRIANGLE.length]];
+    sum += Math.hypot((a.x - b.x) * aspect, a.y - b.y);
+  }
+  return sum / PALM_TRIANGLE.length;
+}
+
+/**
+ * Undoes the perspective shift of a hand pushed toward the camera: a point at a fixed place in the
+ * world moves away from the image center in proportion to how much bigger the hand looks, so
+ * pushing the palm in (the air brake) would also steer. Dividing the offset from the center by
+ * the size ratio (only when it's above 1) keeps the steering point where it was.
+ */
+export function depthCorrected(value: number, sizeRatio: number) {
+  return 0.5 + (value - 0.5) / Math.max(1, sizeRatio);
+}

@@ -239,6 +239,103 @@ export function BackflipArt({ distanceLabel, timeLabel }: { distanceLabel: strin
   );
 }
 
+/**
+ * Air brake: the open palm pushed toward the camera, so it looks bigger than the dashed outline
+ * (its size at calibration). While it's held big, the BRAKE readout and a tight turn arc light up.
+ */
+export function PushArt({ ratioLabel }: { ratioLabel: string }) {
+  return (
+    <ArtFrame pose="-1.6s" label="An open palm pushed toward the camera so it looks bigger, applying the air brake">
+      <Svg>
+        <circle cx={56} cy={52} r={24} fill="none" stroke={FAINT} strokeDasharray="3 3" />
+        <Label x={56} y={92}>
+          CALIBRATED SIZE
+        </Label>
+        <g transform="translate(56 52)">
+          <g className="ascent-guide-push">
+            <HandGlyph />
+          </g>
+        </g>
+        <g className="ascent-guide-while-pushed">
+          <path d="M104 74 Q104 34 132 30" fill="none" stroke={CYAN} strokeWidth={1.4} strokeLinecap="round" />
+          <path d="M128 26 L133 30 L128 34" fill="none" stroke={CYAN} strokeWidth={1.4} strokeLinecap="round" />
+          <Label x={150} y={14} anchor="end" fill={CYAN}>
+            BRAKE
+          </Label>
+          <Label x={150} y={92} anchor="end" fill={CYAN}>
+            {ratioLabel}
+          </Label>
+        </g>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
+/** A small bird seen from the side (wings up), for the landing and ground cards. */
+function BirdSide() {
+  return (
+    <g>
+      <ellipse cx={0} cy={0} rx={6} ry={3.4} fill={INK} {...stroke} />
+      <circle cx={6.5} cy={-2.6} r={2.4} fill={INK} {...stroke} />
+      <path d="M8.6 -2.6 L11.5 -1.8 L8.6 -1.2" fill={WARM} stroke="none" />
+      <path d="M-1 -2 L-5 -9 L2 -3" fill={INK} {...stroke} />
+      <path d="M-5.5 0.5 L-10 2 L-5.5 2.2" fill={INK} {...stroke} />
+    </g>
+  );
+}
+
+/**
+ * Land & take off: the bird glides down a shallow, braked approach onto the touchdown reticle,
+ * stands, then springs back up. `landLabel` / `takeoffLabel` name the inputs.
+ */
+export function LandArt({ landLabel, takeoffLabel }: { landLabel: string; takeoffLabel: string }) {
+  return (
+    <ArtFrame pose="-2.1s" label="A bird braking down onto a landing reticle, standing, and taking off again">
+      <Svg>
+        <path d="M6 80 Q60 76 96 80 T156 78" fill="none" stroke={FAINT} strokeWidth={1} />
+        <path d="M14 22 Q60 30 92 74" fill="none" stroke={CYAN} strokeDasharray="2 3" opacity={0.7} />
+        <ellipse cx={96} cy={79} rx={11} ry={2.6} fill="none" stroke={CYAN} strokeWidth={1.1} />
+        <g className="ascent-guide-land">
+          <BirdSide />
+        </g>
+        <Label x={12} y={14} anchor="start" fill={CYAN}>
+          {landLabel}
+        </Label>
+        <Label x={150} y={14} anchor="end" fill={WARM}>
+          {takeoffLabel}
+        </Label>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
+/**
+ * On the ground: the bird hops along the ground (walk), jumps with a flip at the top, and a dashed
+ * arc off the cliff edge shows the glide back into flight.
+ */
+export function GroundArt({ label }: { label: string }) {
+  return (
+    <ArtFrame pose="-1.3s" label="A bird walking, jumping with a backflip, and gliding off a ledge">
+      <Svg>
+        <path d="M6 72 H104 L112 92" fill="none" stroke={FAINT} strokeWidth={1} />
+        <path d="M110 70 Q132 66 154 84" fill="none" stroke={CYAN} strokeDasharray="2 3" opacity={0.75} />
+        <path d="M30 70 Q52 30 74 70" fill="none" stroke={WARM} strokeDasharray="2 3" opacity={0.6} />
+        <g className="ascent-guide-walk">
+          <g className="ascent-guide-flipbird">
+            <BirdSide />
+          </g>
+        </g>
+        <Label x={12} y={14} anchor="start" fill={WARM}>
+          {label}
+        </Label>
+        <Label x={150} y={14} anchor="end" fill={CYAN}>
+          GLIDE
+        </Label>
+      </Svg>
+    </ArtFrame>
+  );
+}
+
 /** One keycap. `press` animates it on a loop, starting `delay` into the cycle. */
 export function Keycap({
   children,

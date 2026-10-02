@@ -50,11 +50,13 @@ export const CONTROLS_BRIEFING: Record<ControlMode, readonly { key: string; acti
   hand: [
     { key: 'Palm', action: 'Steer', detail: 'Move inside your calibrated box to pitch and bank.' },
     { key: 'Fist', action: 'Boost', detail: 'Plus an automatic barrel roll as it closes.' },
+    { key: 'Push palm', action: 'Air brake', detail: 'Push your open palm toward the camera: slower, tighter turns.' },
     { key: 'Flick up', action: 'Backflip', detail: 'A fast upward flick of the hand.' },
   ],
   keyboard: [
     { key: 'WASD / ←↑↓→', action: 'Steer', detail: 'W or ↑ climbs, S or ↓ dives, A/D or ←/→ bank.' },
     { key: 'Space', action: 'Boost', detail: 'Hold to boost; each press also fires a barrel roll.' },
+    { key: 'Shift', action: 'Air brake', detail: 'Hold to slow down and turn tighter.' },
     { key: 'F', action: 'Backflip', detail: 'One press, one backflip. Esc pauses.' },
   ],
 };

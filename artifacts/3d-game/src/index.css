@@ -762,6 +762,96 @@ html {
   animation: ascent-guide-flick-trail 2.6s linear infinite;
 }
 
+/* The HUD's landing annunciator (LDG + AGL). FlightHud toggles data-state from its rAF: off (hidden),
+   armed (low over landable ground, pale) and ready (every landing condition holds, cyan). */
+.ascent-ldg {
+  opacity: 0;
+  transition: opacity 200ms ease-out;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.ascent-ldg[data-state='armed'],
+.ascent-ldg[data-state='ready'] {
+  opacity: 1;
+}
+
+.ascent-ldg[data-state='ready'] {
+  color: var(--ascent-cyan);
+}
+
+.ascent-ldg-lamp {
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.ascent-ldg[data-state='ready'] .ascent-ldg-lamp {
+  background: var(--ascent-cyan);
+  box-shadow: 0 0 8px var(--ascent-cyan);
+}
+
+/* Air brake: the open palm grows (pushed toward the camera), holds, and drops back; the BRAKE
+   readout and the tight-turn arc light only while it's held big. */
+@keyframes ascent-guide-push {
+  0%, 22% { transform: scale(1); }
+  34%, 70% { transform: scale(1.32); }
+  82%, 100% { transform: scale(1); }
+}
+
+@keyframes ascent-guide-while-pushed {
+  0%, 30% { opacity: 0.25; }
+  36%, 70% { opacity: 1; }
+  78%, 100% { opacity: 0.25; }
+}
+
+.ascent-guide-push {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-push 3.2s cubic-bezier(0.45, 0, 0.3, 1) infinite;
+}
+
+.ascent-guide-while-pushed {
+  animation: ascent-guide-while-pushed 3.2s linear infinite;
+}
+
+/* Land & take off: down the braked approach onto the reticle, a pause standing, then up and away. */
+@keyframes ascent-guide-land {
+  0% { transform: translate(14px, 22px) rotate(8deg); opacity: 0; }
+  6% { opacity: 1; }
+  38% { transform: translate(84px, 64px) rotate(14deg); }
+  48%, 66% { transform: translate(96px, 75px) rotate(-6deg); }
+  72% { transform: translate(98px, 73px) rotate(-22deg); }
+  92% { transform: translate(134px, 34px) rotate(-24deg); opacity: 1; }
+  100% { transform: translate(146px, 24px) rotate(-24deg); opacity: 0; }
+}
+
+.ascent-guide-land {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-land 4.2s cubic-bezier(0.4, 0, 0.4, 1) infinite;
+}
+
+/* On the ground: walk along, jump (flipping at the top), walk on to the edge and glide off. */
+@keyframes ascent-guide-walk {
+  0% { transform: translate(12px, 66px); }
+  14% { transform: translate(30px, 66px); }
+  26% { transform: translate(52px, 36px); }
+  38% { transform: translate(74px, 66px); }
+  60% { transform: translate(106px, 66px); }
+  80% { transform: translate(130px, 70px); opacity: 1; }
+  92%, 100% { transform: translate(150px, 82px); opacity: 0; }
+}
+
+@keyframes ascent-guide-flipbird {
+  0%, 16% { transform: rotate(0deg); }
+  36%, 100% { transform: rotate(-360deg); }
+}
+
+.ascent-guide-walk {
+  animation: ascent-guide-walk 4.6s linear infinite;
+}
+
+.ascent-guide-flipbird {
+  transform-origin: 50% 50%;
+  animation: ascent-guide-flipbird 4.6s ease-in-out infinite;
+}
+
 /* Keycaps: a key lights and sinks when "pressed". --press-delay staggers keys in a sequence. */
 .ascent-key {
   display: inline-flex;

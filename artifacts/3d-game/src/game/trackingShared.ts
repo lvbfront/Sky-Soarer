@@ -4,13 +4,12 @@
 // handControls.ts, so importing them doesn't pull @mediapipe/hands into the first-load bundle —
 // handControls (and MediaPipe with it) is only loaded once the player clicks "Begin pre-flight".
 
-// Sensitivity slider bounds exposed to the calibration UI.
-export const MIN_SENSITIVITY = 0.5;
-export const MAX_SENSITIVITY = 2.0;
+// Sensitivity slider bounds (the steering setting is shared by both control modes; see flightTuning).
+export { MAX_SENSITIVITY, MIN_SENSITIVITY } from './flightTuning';
 
-// Small deadzone (in the box-normalized -1..1 output space) so tiny hand tremor / tracking jitter
-// near the calibrated center doesn't cause constant steering drift.
-export const STEERING_DEADZONE = 0.06;
+// Small deadzone (in the box-normalized -1..1 output space, i.e. 7% of the calibrated half-range)
+// so tiny hand tremor / tracking jitter near the calibrated center doesn't cause steering drift.
+export const STEERING_DEADZONE = 0.07;
 
 // A fist has to hold (or release) for this many consecutive camera frames before boost changes.
 export const FIST_HOLD_FRAMES = 3;
@@ -65,7 +64,27 @@ export interface CalibrationData {
   center: CalibrationPoint;
   corners: Record<CalibrationCorner, CalibrationPoint>;
   sensitivity: number;
+  /**
+   * Apparent palm size at the neutral center (see `palmSize`), the air brake's reference. Absent in
+   * calibrations saved before the brake existed: the tracker then measures it in the first seconds.
+   */
+  handSize?: number;
 }
+
+// ---- Air brake (push the open palm toward the camera) ------------------------------------------
+//
+// Moving the hand toward the camera makes it look bigger. The palm's size (the wrist / index-knuckle
+// / pinky-knuckle triangle, which doesn't change when the fingers curl, so a fist never reads as a
+// push) is compared with the size recorded at calibration: the brake engages once it has stayed at
+// least BRAKE_ENGAGE_RATIO times bigger for BRAKE_HOLD_MS, and releases below BRAKE_RELEASE_RATIO.
+// Tilting the hand only ever makes it look smaller, so it can't trigger the brake.
+export const BRAKE_ENGAGE_RATIO = 1.25;
+export const BRAKE_RELEASE_RATIO = 1.15;
+export const BRAKE_HOLD_MS = 150;
+// A calibration saved before the brake existed has no palm size: the first BRAKE_BASELINE_MS of
+// tracked flight (at least BRAKE_BASELINE_MIN_FRAMES frames) provide it instead (their median).
+export const BRAKE_BASELINE_MS = 2500;
+export const BRAKE_BASELINE_MIN_FRAMES = 15;
 
 // ---- Backflip (upward flick) ------------------------------------------------------------------
 //

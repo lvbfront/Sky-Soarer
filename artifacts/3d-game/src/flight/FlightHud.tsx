@@ -1,6 +1,7 @@
 import { useEffect, useRef, type RefObject } from 'react';
 import { Pause, X } from 'lucide-react';
 import type { GameEngine } from '@/game/GameEngine';
+import type { BirdMode } from '@/game/birdState';
 import type { HandControlState } from '@/game/handControls';
 import type { RingHighlight } from '@/game/presets';
 import type { ControlMode } from '@/game/settings';
@@ -32,6 +33,10 @@ interface FlightHudProps {
   previewHeight: number;
   handDetected: boolean;
   boosting: boolean;
+  /** The air brake is applied (Shift, or the palm pushed toward the camera). */
+  braking: boolean;
+  /** Flying, landing, standing, floating or taking off: picks the context hint. */
+  birdMode: BirdMode;
   barrelRolling: boolean;
   backflipping: boolean;
   underwater: boolean;
@@ -91,6 +96,26 @@ function formatAltitude(meters: number) {
 const STICK_RANGE_X = 58;
 const STICK_RANGE_Y = 42;
 
+/** The hint under the heading tape: the controls that matter right now, for this input. */
+function contextHint(mode: BirdMode, keyboard: boolean, handDetected: boolean) {
+  if (!keyboard && !handDetected) return 'Show your hand to the camera to steer';
+  switch (mode) {
+    case 'FLARE':
+    case 'TOUCHDOWN':
+      return keyboard ? 'Landing · keep holding Shift' : 'Landing · keep pushing your palm in';
+    case 'TAKEOFF':
+      return 'Taking off';
+    case 'GROUNDED':
+      return keyboard
+        ? 'WASD walk · Space jump · Space×2 take off · F flip'
+        : 'Palm low walk · tilt turn · fist jump · fist×2 take off · flick flip · raise & hold take off';
+    case 'FLOATING':
+      return keyboard ? 'W paddle · A/D turn · Space take off' : 'Palm low paddle · tilt turn · fist take off';
+    default:
+      return keyboard ? 'WASD steer · Space boost · Shift brake · F flip' : 'Tilt your palm to glide · push it in to brake';
+  }
+}
+
 /** Blurs a HUD button after a mouse click, so Space (boost) can't "click" it again mid-flight. */
 function blurAfter(action: () => void) {
   return (event: { currentTarget: HTMLElement }) => {
@@ -108,6 +133,8 @@ export function FlightHud({
   previewHeight,
   handDetected,
   boosting,
+  braking,
+  birdMode,
   barrelRolling,
   backflipping,
   underwater,
@@ -131,11 +158,15 @@ export function FlightHud({
   const speedRef = useRef<HTMLSpanElement | null>(null);
   const altitudeRef = useRef<HTMLSpanElement | null>(null);
   const nextRingRef = useRef<HTMLSpanElement | null>(null);
+  const landingRef = useRef<HTMLDivElement | null>(null);
+  const aglRef = useRef<HTMLSpanElement | null>(null);
+  const landingStatusRef = useRef<HTMLSpanElement | null>(null);
 
   // Telemetry: direct DOM writes from a rAF loop, never React state, so the HUD costs no renders.
   useEffect(() => {
     let raf = 0;
     let lastReadout = -Infinity;
+    let lastLanding = -Infinity;
     const tick = (now: number) => {
       const engine = engineRef.current;
       if (engine) {
@@ -153,6 +184,31 @@ export function FlightHud({
             nextRingRef.current.textContent = distance === null ? '—' : String(Math.round(distance));
           }
         }
+        // The LDG readout: low over landable ground or water. Toggled through attributes (styled by
+        // CSS), so no React render; the numbers update at the readout rate.
+        const landing = landingRef.current;
+        if (landing) {
+          const cue = engine.getLandingCue();
+          const state = cue.visible ? (cue.ready ? 'ready' : 'armed') : 'off';
+          if (landing.dataset.state !== state) landing.dataset.state = state;
+          if (cue.visible && now - lastLanding >= READOUT_INTERVAL_MS) {
+            lastLanding = now;
+            if (aglRef.current) aglRef.current.textContent = cue.agl.toFixed(1);
+            if (landingStatusRef.current) {
+              landingStatusRef.current.textContent = cue.ready
+                ? 'Landing'
+                : cue.failure === 'not-braking'
+                  ? 'Brake to land'
+                  : cue.failure === 'too-fast'
+                    ? 'Slow down'
+                    : cue.failure === 'diving'
+                      ? 'Level off'
+                      : cue.failure === 'too-high'
+                        ? 'Descend'
+                        : 'Hold';
+            }
+          }
+        }
       }
       const control = controlStateRef.current;
       if (stickRef.current && control) {
@@ -166,6 +222,7 @@ export function FlightHud({
 
   const badges = [
     { key: 'boost', label: 'Boost', active: boosting, cool: false },
+    { key: 'brake', label: 'Brake', active: braking, cool: true },
     { key: 'roll', label: 'Barrel Roll', active: barrelRolling, cool: false },
     { key: 'flip', label: 'Backflip', active: backflipping, cool: false },
     ...(showDiving ? [{ key: 'dive', label: 'Diving', active: underwater, cool: true }] : []),
@@ -267,11 +324,7 @@ export function FlightHud({
           // Inline, because .ascent-glass (unlayered CSS) outranks a Tailwind border utility.
           style={handDetected ? undefined : { borderColor: 'rgba(255, 149, 128, 0.6)' }}
         >
-          {keyboard
-            ? 'WASD / arrows steer · Space boost · F flip'
-            : handDetected
-              ? 'Tilt your palm to glide'
-              : 'Show your hand to the camera to steer'}
+          {contextHint(birdMode, keyboard, handDetected)}
         </p>
         {/* Near-miss coaching: an upward flick that almost made a backflip. Re-keyed per hint so
             each one flickers in again. */}
@@ -370,6 +423,31 @@ export function FlightHud({
               026
             </span>
             <span className="ascent-hud text-white/70">m</span>
+          </p>
+        </div>
+
+      </div>
+
+      {/* ---- Bottom left, above speed + altitude: the landing annunciator (AGL over landable
+          ground or water, lit once the landing is on). Shown and hidden by the telemetry rAF. ---- */}
+      <div
+        data-flight-hud
+        className="ascent-shadow pointer-events-none absolute bottom-28 left-6 sm:bottom-32 sm:left-8"
+        aria-hidden="true"
+      >
+        <div ref={landingRef} data-state="off" className="ascent-ldg">
+          <p className="ascent-hud flex items-center gap-1.5">
+            <span className="ascent-ldg-lamp h-1.5 w-1.5 rounded-full" />
+            Ldg
+            <span ref={landingStatusRef} className="ml-1 text-white/75">
+              Brake to land
+            </span>
+          </p>
+          <p className="flex items-baseline gap-1.5">
+            <span ref={aglRef} className="font-mono text-2xl font-medium tabular-nums tracking-tight">
+              0.0
+            </span>
+            <span className="ascent-hud text-white/70">m agl</span>
           </p>
         </div>
       </div>

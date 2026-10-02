@@ -2,6 +2,7 @@ import type { BirdType } from './bird';
 import type { MapType, WeatherPreset } from './presets';
 import { QUALITY_SETTINGS, type QualitySetting } from './quality';
 import { clamp, computeBox, validateCalibration } from './trackingMath';
+import { DEFAULT_SENSITIVITY } from './flightTuning';
 import {
   MAX_SENSITIVITY,
   MIN_SENSITIVITY,
@@ -23,12 +24,24 @@ export const QUALITY_KEY = 'bird-flight-quality';
 /** How the bird is flown: a hand in front of the webcam, or the keyboard (no camera at all). */
 export type ControlMode = 'hand' | 'keyboard';
 
+/**
+ * Steering settings, shared by both control modes and stored inside the settings object (no key of
+ * their own). Sensitivity is turn authority (see flightTuning.ts); invert flips climb and dive.
+ */
+export interface SteeringSettings {
+  sensitivity: number;
+  invertPitch: boolean;
+}
+
+export const DEFAULT_STEERING: SteeringSettings = { sensitivity: DEFAULT_SENSITIVITY, invertPitch: false };
+
 export interface FlightSettings {
   bird: BirdType;
   map: MapType;
   weather: WeatherPreset;
   ringChallenge: boolean;
   controls: ControlMode;
+  steering: SteeringSettings;
 }
 
 export const DEFAULT_SETTINGS: FlightSettings = {
@@ -37,6 +50,7 @@ export const DEFAULT_SETTINGS: FlightSettings = {
   weather: 'sunny',
   ringChallenge: false,
   controls: 'hand',
+  steering: DEFAULT_STEERING,
 };
 
 const BIRDS: readonly BirdType[] = ['pigeon', 'falcon', 'flamingo', 'duck'];
@@ -49,6 +63,23 @@ function pick<T extends string>(value: unknown, allowed: readonly T[], fallback:
 }
 
 /**
+ * The steering settings from a stored value. Settings saved before they existed have none: the
+ * sensitivity then comes from the saved hand calibration (where the calibration screen's slider used
+ * to keep it), so a returning hand player keeps their choice; everything else gets its default.
+ */
+function readSteering(value: unknown): SteeringSettings {
+  const stored = value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+  const sensitivity =
+    typeof stored?.sensitivity === 'number' && Number.isFinite(stored.sensitivity)
+      ? stored.sensitivity
+      : (loadCalibration()?.sensitivity ?? DEFAULT_STEERING.sensitivity);
+  return {
+    sensitivity: clamp(sensitivity, MIN_SENSITIVITY, MAX_SENSITIVITY),
+    invertPitch: typeof stored?.invertPitch === 'boolean' ? stored.invertPitch : DEFAULT_STEERING.invertPitch,
+  };
+}
+
+/**
  * The last bird/map/sky/ring choices, persisted in this browser for the landing page's
  * "Quick start". Every field is validated on read, so a stale or hand-edited value falls back to
  * its default instead of reaching the engine.
@@ -56,7 +87,7 @@ function pick<T extends string>(value: unknown, allowed: readonly T[], fallback:
 export function loadSettings(): FlightSettings {
   try {
     const raw = window.localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS };
+    if (!raw) return { ...DEFAULT_SETTINGS, steering: readSteering(null) };
     const parsed = JSON.parse(raw) as Partial<Record<keyof FlightSettings, unknown>>;
     return {
       bird: pick(parsed.bird, BIRDS, DEFAULT_SETTINGS.bird),
@@ -65,6 +96,7 @@ export function loadSettings(): FlightSettings {
       ringChallenge: typeof parsed.ringChallenge === 'boolean' ? parsed.ringChallenge : DEFAULT_SETTINGS.ringChallenge,
       // Settings saved before keyboard mode existed have no `controls`, and fall back to hand.
       controls: pick(parsed.controls, CONTROLS, DEFAULT_SETTINGS.controls),
+      steering: readSteering(parsed.steering),
     };
   } catch {
     // Storage disabled, or unparseable JSON: fall back to defaults.
@@ -163,11 +195,17 @@ export function loadCalibration(): CalibrationData | null {
     if (!center) return null;
     if (validateCalibration(center, computeBox(corners)).length > 0) return null;
     const sensitivity = typeof parsed.sensitivity === 'number' && Number.isFinite(parsed.sensitivity) ? parsed.sensitivity : 1;
-    return {
+    const calibration: CalibrationData = {
       center,
       corners: corners as Record<CalibrationCorner, CalibrationPoint>,
       sensitivity: clamp(sensitivity, MIN_SENSITIVITY, MAX_SENSITIVITY),
     };
+    // Added with the air brake; older calibrations simply don't have it (the tracker measures it).
+    const handSize = parsed.handSize;
+    if (typeof handSize === 'number' && Number.isFinite(handSize) && handSize > 0 && handSize < 1) {
+      calibration.handSize = handSize;
+    }
+    return calibration;
   } catch {
     return null;
   }

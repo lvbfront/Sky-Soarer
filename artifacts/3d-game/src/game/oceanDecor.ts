@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { bake, jitter, mergeBaked, ribbon } from './lowPoly';
 import { ISLAND_CELL, cellSeed, islandAt, mulberry32, type Island, type OceanField } from './oceanField';
 import { patchOceanMaterial, type OceanUniforms } from './oceanShaders';
+import type { PerchPoint } from './landingSurface';
 
 // Above-water island dressing: instanced palm trees, bushes and shore rocks on every island near
 // the bird (three draw calls for all of them), and a ring of hazy island silhouettes on the
@@ -32,7 +33,14 @@ interface IslandDecorSet {
   palmColors: Float32Array;
   bushColors: Float32Array;
   rockColors: Float32Array;
+  /** Standable rock tops, computed once from the rock instance matrices (see rockTop). */
+  perches: PerchPoint[];
 }
+
+// A rock's standable top: the vertices within this much of its highest point (in its own scaled
+// height) make the flat-ish cap the bird can stand on.
+const ROCK_TOP_BAND = 0.18;
+const MIN_PERCH_RADIUS = 0.3;
 
 function buildPalm() {
   const height = 7;
@@ -91,7 +99,41 @@ const scratchQuat = new THREE.Quaternion();
 const scratchScale = new THREE.Vector3();
 const scratchEuler = new THREE.Euler();
 const scratchColor = new THREE.Color();
+const scratchVertex = new THREE.Vector3();
 
+/**
+ * The top of one rock instance, from the rock geometry's own vertices put through its instance
+ * matrix: the highest point, and the cap of vertices just below it (their centroid and spread give
+ * the perch's center and radius). Exact for the drawn mesh, and computed once per island, never
+ * per frame (no raycasts).
+ */
+function rockTop(vertices: Float32Array, matrix: THREE.Matrix4, heightScale: number): PerchPoint {
+  let maxY = -Infinity;
+  for (let i = 0; i < vertices.length; i += 3) {
+    scratchVertex.set(vertices[i], vertices[i + 1], vertices[i + 2]).applyMatrix4(matrix);
+    if (scratchVertex.y > maxY) maxY = scratchVertex.y;
+  }
+  const band = ROCK_TOP_BAND * heightScale;
+  let cx = 0;
+  let cz = 0;
+  let count = 0;
+  for (let i = 0; i < vertices.length; i += 3) {
+    scratchVertex.set(vertices[i], vertices[i + 1], vertices[i + 2]).applyMatrix4(matrix);
+    if (scratchVertex.y < maxY - band) continue;
+    cx += scratchVertex.x;
+    cz += scratchVertex.z;
+    count += 1;
+  }
+  cx /= count;
+  cz /= count;
+  let radius = 0;
+  for (let i = 0; i < vertices.length; i += 3) {
+    scratchVertex.set(vertices[i], vertices[i + 1], vertices[i + 2]).applyMatrix4(matrix);
+    if (scratchVertex.y < maxY - band) continue;
+    radius = Math.max(radius, Math.hypot(scratchVertex.x - cx, scratchVertex.z - cz));
+  }
+  return { x: cx, y: maxY, z: cz, radius: Math.max(MIN_PERCH_RADIUS, radius), kind: 'rock' };
+}
 /** Palms, bushes and shore rocks for every island near the bird, as three instanced meshes. */
 export class IslandDecor {
   private palms: THREE.InstancedMesh;
@@ -100,6 +142,9 @@ export class IslandDecor {
   private cache = new Map<number, IslandDecorSet>();
   private lastRefresh = new THREE.Vector3(Number.NaN, 0, Number.NaN);
   private radius: number;
+  // The rock geometry's vertex positions, for computing each rock's standable top.
+  private rockVertices: Float32Array;
+  private perchScratch: PerchPoint[] = [];
 
   constructor(
     parent: THREE.Object3D,
@@ -121,6 +166,7 @@ export class IslandDecor {
     this.palms = new THREE.InstancedMesh(buildPalm(), makeMaterial('palm', THREE.DoubleSide), PALM_CAPACITY);
     this.bushes = new THREE.InstancedMesh(buildBush(), makeMaterial('bush', THREE.FrontSide), BUSH_CAPACITY);
     this.rocks = new THREE.InstancedMesh(buildRock(), makeMaterial('rock', THREE.FrontSide), ROCK_CAPACITY);
+    this.rockVertices = (this.rocks.geometry.getAttribute('position').array as Float32Array).slice();
     for (const mesh of [this.palms, this.bushes, this.rocks]) {
       mesh.count = 0;
       mesh.frustumCulled = false;
@@ -150,6 +196,7 @@ export class IslandDecor {
     const palmColors: number[] = [];
     const bushColors: number[] = [];
     const rockColors: number[] = [];
+    const perches: PerchPoint[] = [];
     const push = (out: number[], colors: number[], x: number, y: number, z: number, yaw: number, sx: number, sy: number, sz: number, tint: THREE.Color, tilt = 0) => {
       scratchPos.set(x, y, z);
       scratchEuler.set(tilt, yaw, tilt * 0.5);
@@ -196,7 +243,10 @@ export class IslandDecor {
       const z = island.z + Math.sin(a) * d;
       const h = this.field.groundHeight(x, z);
       const s = 0.6 + rng() * 1.3;
-      push(rocks, rockColors, x, h - 0.1, z, rng() * 6.28, s * (1 + rng() * 0.5), s * (0.8 + rng() * 0.8), s, scratchColor.setHSL(0.08, 0.1, 0.75 + rng() * 0.25), (rng() - 0.5) * 0.4);
+      const sy = s * (0.8 + rng() * 0.8);
+      push(rocks, rockColors, x, h - 0.1, z, rng() * 6.28, s * (1 + rng() * 0.5), sy, s, scratchColor.setHSL(0.08, 0.1, 0.75 + rng() * 0.25), (rng() - 0.5) * 0.4);
+      // `push` left this rock's matrix in scratchMatrix.
+      perches.push(rockTop(this.rockVertices, scratchMatrix, sy));
     }
     return {
       palms: new Float32Array(palms),
@@ -205,7 +255,38 @@ export class IslandDecor {
       palmColors: new Float32Array(palmColors),
       bushColors: new Float32Array(bushColors),
       rockColors: new Float32Array(rockColors),
+      perches,
     };
+  }
+
+  private islandSet(cx: number, cz: number, island: Island) {
+    const key = (cx + 32768) * 65536 + (cz + 32768);
+    let set = this.cache.get(key);
+    if (!set) {
+      if (this.cache.size >= DECOR_CACHE_LIMIT) this.cache.clear();
+      set = this.buildIsland(cx, cz, island);
+      this.cache.set(key, set);
+    }
+    return set;
+  }
+
+  /**
+   * The standable rock tops of the islands around (x, z) (the 3x3 island cells). Returns a reused
+   * array; its perches are cached per island, so this allocates nothing once an island is built.
+   */
+  perchesNear(x: number, z: number): readonly PerchPoint[] {
+    const out = this.perchScratch;
+    out.length = 0;
+    const ccx = Math.round(x / ISLAND_CELL);
+    const ccz = Math.round(z / ISLAND_CELL);
+    for (let cx = ccx - 1; cx <= ccx + 1; cx += 1) {
+      for (let cz = ccz - 1; cz <= ccz + 1; cz += 1) {
+        const island = islandAt(cx, cz);
+        if (!island) continue;
+        for (const perch of this.islandSet(cx, cz, island).perches) out.push(perch);
+      }
+    }
+    return out;
   }
 
   /** Rebuilds the instance lists when the bird has moved far enough. Cheap: cached per island. */
@@ -236,13 +317,7 @@ export class IslandDecor {
         const ix = island.x - position.x;
         const iz = island.z - position.z;
         if (ix * ix + iz * iz > r2) continue;
-        const key = (cx + 32768) * 65536 + (cz + 32768);
-        let set = this.cache.get(key);
-        if (!set) {
-          if (this.cache.size >= DECOR_CACHE_LIMIT) this.cache.clear();
-          set = this.buildIsland(cx, cz, island);
-          this.cache.set(key, set);
-        }
+        const set = this.islandSet(cx, cz, island);
         palmCount = copy(this.palms, set.palms, set.palmColors, palmCount);
         bushCount = copy(this.bushes, set.bushes, set.bushColors, bushCount);
         rockCount = copy(this.rocks, set.rocks, set.rockColors, rockCount);

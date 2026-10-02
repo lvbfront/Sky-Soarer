@@ -105,7 +105,8 @@ export class WindAudio {
 
 /**
  * One-shot synthesized sound effects (no audio files): the ring-collection chime (a couple of
- * quick sine "bell" tones) and water splashes (swept, filtered noise).
+ * quick sine "bell" tones), water splashes (swept, filtered noise), and the landing and takeoff
+ * sounds (whoosh, thump, wing strokes), all cheap noise or sine envelopes.
  */
 export class SoundEffects {
   private ctx: AudioContext | null = null;
@@ -150,15 +151,9 @@ export class SoundEffects {
    */
   playSplash(kind: 'dive' | 'surface', volume = 1) {
     const ctx = this.getContext();
-    if (!this.noise) {
-      const length = Math.floor(ctx.sampleRate * 0.7);
-      this.noise = ctx.createBuffer(1, length, ctx.sampleRate);
-      const data = this.noise.getChannelData(0);
-      for (let i = 0; i < length; i += 1) data[i] = Math.random() * 2 - 1;
-    }
     const now = ctx.currentTime;
     const source = ctx.createBufferSource();
-    source.buffer = this.noise;
+    source.buffer = this.noiseBuffer(ctx);
     const filter = ctx.createBiquadFilter();
     filter.type = 'bandpass';
     filter.Q.value = 0.9;
@@ -174,6 +169,75 @@ export class SoundEffects {
     gain.connect(ctx.destination);
     source.start(now);
     source.stop(now + 0.65);
+  }
+
+  private noiseBuffer(ctx: AudioContext) {
+    if (!this.noise) {
+      const length = Math.floor(ctx.sampleRate * 0.7);
+      this.noise = ctx.createBuffer(1, length, ctx.sampleRate);
+      const data = this.noise.getChannelData(0);
+      for (let i = 0; i < length; i += 1) data[i] = Math.random() * 2 - 1;
+    }
+    return this.noise;
+  }
+
+  /** Filtered noise with a gain envelope: the building block of the landing and takeoff sounds. */
+  private noiseHit(
+    filterType: BiquadFilterType,
+    fromHz: number,
+    toHz: number,
+    peak: number,
+    attack: number,
+    length: number,
+    delay = 0,
+  ) {
+    const ctx = this.getContext();
+    const now = ctx.currentTime + delay;
+    const source = ctx.createBufferSource();
+    source.buffer = this.noiseBuffer(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = filterType;
+    filter.Q.value = 0.8;
+    filter.frequency.setValueAtTime(fromHz, now);
+    filter.frequency.exponentialRampToValueAtTime(toHz, now + length);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(peak, now + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + length);
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    source.start(now);
+    source.stop(now + length + 0.05);
+  }
+
+  /** The flare: a soft rising-then-falling whoosh of air through spread feathers. */
+  playWhoosh() {
+    this.noiseHit('bandpass', 500, 1400, 0.09, 0.18, 0.55);
+  }
+
+  /** Touchdown: a low, soft thump (softer and hissier on sand). */
+  playThump(surface: 'ground' | 'sand') {
+    const ctx = this.getContext();
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(surface === 'sand' ? 120 : 150, now);
+    osc.frequency.exponentialRampToValueAtTime(55, now + 0.16);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(surface === 'sand' ? 0.12 : 0.2, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.25);
+    this.noiseHit('lowpass', surface === 'sand' ? 2400 : 900, 300, surface === 'sand' ? 0.07 : 0.05, 0.005, 0.18);
+  }
+
+  /** One strong wing stroke (takeoff): a short low whump of air. */
+  playFlap(strength = 1, delay = 0) {
+    this.noiseHit('lowpass', 700, 160, 0.11 * strength, 0.02, 0.2, delay);
   }
 
   dispose() {
