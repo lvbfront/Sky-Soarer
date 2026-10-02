@@ -201,15 +201,16 @@ export class GroundWalker {
       b.z = nz;
     }
     if (b.vy > 0) return null;
-    const footprint = sampleFootprint(this.surfaces, b.x, b.z, this.footprint);
-    const under = footprint.center;
+    const under = this.surfaces.sample(b.x, b.z, this.sample);
     if (b.feetY > under.height) return null;
-    // Down on whatever is below.
+    // Down on whatever is below. A hop is judged on the ground under the feet only (not the
+    // footprint a landing approach needs): coming down beside a rock or at the foot of a wall is
+    // fine, only a slope too steep to stand on takes off into a glide.
     b.feetY = under.height;
     b.vy = 0;
     b.airborne = false;
     if (under.kind === 'water') return 'landed-water';
-    return isLandable(footprint) ? 'landed' : 'landed-unstandable';
+    return under.perch || under.slope <= MAX_GROUND_SLOPE_DEG ? 'landed' : 'landed-unstandable';
   }
 
   private moveTo(x: number, z: number, feetY: number) {

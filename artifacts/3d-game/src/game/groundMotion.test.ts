@@ -144,6 +144,27 @@ describe('ground walker', () => {
     expect(blocked.body.z).toBeLessThan(1);
   });
 
+  it('a jump landing beside a rock or a wall stands (only the ground under the feet counts)', () => {
+    // A 1.2 m rock 0.7 m ahead: inside the footprint, so a landing approach would reject this spot.
+    const rock = { x: 0, y: 1.2, z: 0.7, radius: 0.4, kind: 'rock' as const };
+    const beside = heightFieldSurfaces({ ground: () => 0, gridSpacing: 2, perches: () => [rock] });
+    const walker = new GroundWalker(beside);
+    walker.place(0, 0, 0);
+    walker.jump(JUMP_SPEED);
+    expect(walk(walker, 2, {})).toEqual(['landed']);
+    // The same beside a rock standing in the sea: it floats.
+    const sea = heightFieldSurfaces({ ground: () => -2, gridSpacing: 2, water: () => 0, perches: () => [rock] });
+    const swimmer = new GroundWalker(sea);
+    swimmer.place(0, 0, 0);
+    swimmer.jump(JUMP_SPEED);
+    expect(walk(swimmer, 2, {})[0]).toBe('landed-water');
+    // Coming down on a slope too steep to stand on still takes off into a glide.
+    const steep = new GroundWalker(ramp(50));
+    steep.place(0, 2, 0);
+    steep.jump(JUMP_SPEED);
+    expect(walk(steep, 3, {})[0]).toBe('landed-unstandable');
+  });
+
   it('beach ↔ water: walks in and floats, paddles back out and stands', () => {
     const walker = new GroundWalker(beach);
     walker.place(0, 0, 0);
